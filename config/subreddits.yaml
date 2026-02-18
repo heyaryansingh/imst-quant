@@ -1,0 +1,15 @@
+# Subreddit configuration for data ingestion
+# Per PRD FR-ING-01
+
+equity_subreddits:
+  - wallstreetbets
+  - stocks
+  - investing
+  - options
+  - stockmarket
+
+crypto_subreddits:
+  - cryptocurrency
+  - bitcoin
+  - ethereum
+  - CryptoMarkets
