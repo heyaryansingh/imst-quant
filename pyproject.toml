@@ -23,6 +23,9 @@ dependencies = [
     "emoji>=2.0",
     "sentence-transformers>=2.2.2",
     "textblob>=0.17.1",
+    "torch>=2.0",
+    "torch-geometric>=2.4",
+    "networkx>=3.0",
 ]
 
 [project.optional-dependencies]

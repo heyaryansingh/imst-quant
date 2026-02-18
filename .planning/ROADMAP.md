@@ -80,6 +80,7 @@
 5. Scores carried forward for daily inference
 
 **Dependencies:** Phase 2
+**Status:** ● Complete (2026-02-18)
 
 ---
 
@@ -97,6 +98,7 @@
 5. Credibility scores available for sentiment weighting
 
 **Dependencies:** Phase 2
+**Status:** ● Complete (2026-02-18)
 
 ---
 
@@ -114,6 +116,7 @@
 5. Gold layer parquet files generated
 
 **Dependencies:** Phases 3, 4, 5
+**Status:** ● Complete (2026-02-18)
 
 ---
 
@@ -131,6 +134,7 @@
 5. Predictions match paper accuracy within 5%
 
 **Dependencies:** Phase 6
+**Status:** ● Complete (2026-02-18)
 
 ---
 
@@ -148,6 +152,7 @@
 5. Unit tests validate signal generation
 
 **Dependencies:** Phase 7
+**Status:** ● Complete (2026-02-18)
 
 ---
 
@@ -167,6 +172,7 @@
 7. Results match paper within tolerance
 
 **Dependencies:** Phase 8
+**Status:** ● Complete (2026-02-18)
 
 ---
 
@@ -185,6 +191,7 @@
 6. Ablation shows improvement over baseline
 
 **Dependencies:** Phase 9
+**Status:** ● Complete (2026-02-18)
 
 ---
 
@@ -202,6 +209,7 @@
 5. Ensemble option available
 
 **Dependencies:** Phase 10
+**Status:** ● Complete (2026-02-18)
 
 ---
 
@@ -219,6 +227,7 @@
 5. Backtest shows improved risk-adjusted returns
 
 **Dependencies:** Phase 11
+**Status:** ● Complete (2026-02-18)
 
 ---
 
@@ -237,6 +246,7 @@
 6. 7 consecutive days run without errors
 
 **Dependencies:** Phase 12
+**Status:** ● Complete (2026-02-18)
 
 ---
 
@@ -254,6 +264,7 @@
 5. Manipulation risk alerts trigger
 
 **Dependencies:** Phase 13
+**Status:** ● Complete (2026-02-18)
 
 ---
 
@@ -273,6 +284,7 @@
 7. Model cards and datasheets finalized
 
 **Dependencies:** Phase 14
+**Status:** ● Complete (2026-02-18)
 
 ---
 

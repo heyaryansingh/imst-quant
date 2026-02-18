@@ -32,6 +32,9 @@ class DataSettings(BaseSettings):
     bronze_dir: Path = Path("data/bronze")
     silver_dir: Path = Path("data/silver")
     sentiment_dir: Path = Path("data/sentiment")
+    influence_dir: Path = Path("data/influence")
+    credibility_dir: Path = Path("data/credibility")
+    gold_dir: Path = Path("data/gold")
 
 
 class MarketSettings(BaseSettings):

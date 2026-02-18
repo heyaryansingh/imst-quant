@@ -18,6 +18,8 @@ def silver_to_sentiment(
     output_path: Path,
     date: str | None = None,
     influence_scores: Dict[str, float] | None = None,
+    influence_dir: Path | None = None,
+    as_of_month: str | None = None,
 ) -> None:
     """
     Read silver posts, compute TextBlob polarity, aggregate daily per asset.
@@ -26,6 +28,13 @@ def silver_to_sentiment(
     """
     silver_dir = Path(silver_dir)
     output_path = Path(output_path)
+    if influence_scores is None and influence_dir and as_of_month:
+        try:
+            from imst_quant.influence import load_influence_scores
+            influence_scores = load_influence_scores(Path(influence_dir), as_of_month)
+        except Exception:
+            influence_scores = {}
+    influence_scores = influence_scores or {}
     silver_reddit = silver_dir / "reddit"
     if not silver_reddit.exists():
         logger.warning("silver_reddit_missing", path=str(silver_reddit))
