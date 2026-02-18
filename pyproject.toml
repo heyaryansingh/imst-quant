@@ -18,6 +18,9 @@ dependencies = [
     "structlog>=24.0",
     "tenacity>=8.0",
     "pyyaml>=6.0",
+    "langdetect>=1.0.9",
+    "datasketch>=1.6.4",
+    "emoji>=2.0",
 ]
 
 [project.optional-dependencies]
