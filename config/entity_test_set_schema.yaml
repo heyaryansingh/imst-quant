@@ -1,0 +1,21 @@
+# Entity test set schema for ENT-04 validation
+# tests/fixtures/entity_test_set.csv
+
+columns:
+  id: integer row id
+  text: Reddit-style post text (title + selftext)
+  subreddit: subreddit name for context (e.g. stocks, cryptocurrency)
+  expected_tickers: comma-separated expected ticker symbols (exact set match)
+
+precision_calculation:
+  per_row: "|predicted ∩ expected| / |predicted|"
+  if_predicted_empty: "1.0 if expected empty else 0.0"
+  macro: "mean of per-row precision"
+
+coverage:
+  - cashtag-only ($AAPL)
+  - alias-only (Apple stock)
+  - mixed (cashtag + alias)
+  - crypto vs equity (subreddit context)
+  - negative (no entities)
+  - paper stocks: AAPL, JNJ, JPM, XOM

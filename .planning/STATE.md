@@ -1,6 +1,6 @@
 # Project State: IMST-Quant
 
-**Current Phase:** 2 - Text Processing & Entity Linking
+**Current Phase:** 4 - Influence Graph & GNN
 **Last Updated:** 2026-02-18
 
 ## Project Reference
@@ -8,15 +8,15 @@
 See: .planning/PROJECT.md (updated 2026-02-17)
 
 **Core value:** Faithful paper replication with production-grade upgrades
-**Current focus:** Phase 2 - Text Processing & Entity Linking
+**Current focus:** Phase 3 - Baseline Sentiment Analysis
 
 ## Progress
 
 | Phase | Status | Progress |
 |-------|--------|----------|
 | 1. Project Setup & Ingestion | ● Complete | 100% |
-| 2. Text Processing & Entity Linking | ○ Pending | 0% |
-| 3. Baseline Sentiment | ○ Pending | 0% |
+| 2. Text Processing & Entity Linking | ● Complete | 100% |
+| 3. Baseline Sentiment | ● Complete | 100% |
 | 4. Influence Graph & GNN | ○ Pending | 0% |
 | 5. Credibility & Bot Detection | ○ Pending | 0% |
 | 6. Feature Engineering | ○ Pending | 0% |
@@ -30,12 +30,11 @@ See: .planning/PROJECT.md (updated 2026-02-17)
 | 14. Monitoring | ○ Pending | 0% |
 | 15. Reproducibility | ○ Pending | 0% |
 
-**Overall:** 1/15 phases complete (7%)
+**Overall:** 3/15 phases complete (20%)
 
 ## Next Actions
 
-1. Complete Phase 2: 02-02 (entity linking), 02-03 (silver layer)
-2. Plan and execute Phase 3 (baseline sentiment)
+1. Plan and execute Phase 4 (influence graph, GCN, influence scores)
 
 ## Recent Decisions
 

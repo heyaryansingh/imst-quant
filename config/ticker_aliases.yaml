@@ -1,0 +1,69 @@
+# Ticker dictionary and aliases per PRD FR-ENT-02
+# Paper stocks: AAPL, JNJ, JPM, XOM
+
+tickers:
+  AAPL:
+    name: Apple Inc
+    sector: Technology
+  JNJ:
+    name: Johnson & Johnson
+    sector: Healthcare
+  JPM:
+    name: JPMorgan Chase
+    sector: Financials
+  XOM:
+    name: Exxon Mobil
+    sector: Energy
+  MSFT:
+    name: Microsoft
+    sector: Technology
+  NVDA:
+    name: Nvidia
+    sector: Technology
+  TSLA:
+    name: Tesla
+    sector: Consumer Discretionary
+  AMZN:
+    name: Amazon
+    sector: Consumer Discretionary
+  GOOGL:
+    name: Alphabet (Google)
+    sector: Technology
+  META:
+    name: Meta Platforms
+    sector: Technology
+  BTC:
+    name: Bitcoin
+    sector: Crypto
+  ETH:
+    name: Ethereum
+    sector: Crypto
+  SOL:
+    name: Solana
+    sector: Crypto
+
+company_aliases:
+  apple: [AAPL]
+  nvidia: [NVDA]
+  microsoft: [MSFT]
+  tesla: [TSLA]
+  amazon: [AMZN]
+  google: [GOOGL]
+  meta: [META]
+  facebook: [META]
+  jpmorgan: [JPM]
+  jpm: [JPM]
+  johnson and johnson: [JNJ]
+  johnson: [JNJ]
+  jnj: [JNJ]
+  exxon: [XOM]
+  exxon mobil: [XOM]
+  xom: [XOM]
+
+crypto_aliases:
+  bitcoin: [BTC]
+  btc: [BTC]
+  ethereum: [ETH]
+  eth: [ETH]
+  solana: [SOL]
+  sol: [SOL]

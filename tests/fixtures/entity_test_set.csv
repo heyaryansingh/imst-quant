@@ -1,0 +1,201 @@
+id,text,subreddit,expected_tickers
+1,"$AAPL is mooning",stocks,AAPL
+2,"$MSFT and $GOOGL both up today",stocks,"MSFT,GOOGL"
+3,"Apple stock looks strong",stocks,AAPL
+4,"Nvidia earnings beat",stocks,NVDA
+5,"No tickers in this post about weather",stocks,
+6,"$JNJ dividend is safe",stocks,JNJ
+7,"$XOM oil prices",stocks,XOM
+8,"$JPM earnings tomorrow",stocks,JPM
+9,"Microsoft and Amazon both reporting",stocks,"MSFT,AMZN"
+10,"$BTC pumping",cryptocurrency,BTC
+11,"$ETH gas fees",ethereum,ETH
+12,"bitcoin to 100k",bitcoin,BTC
+13,"Tesla delivery numbers",stocks,TSLA
+14,"$TSLA $AAPL portfolio",stocks,"TSLA,AAPL"
+15,"Johnson and Johnson lawsuit",stocks,JNJ
+16,"Exxon Mobil dividend increase",stocks,XOM
+17,"JPMorgan Q4 results",stocks,JPM
+18,"Google AI updates",stocks,GOOGL
+19,"Meta advertising revenue",stocks,META
+20,"$NVDA GPU demand",stocks,NVDA
+21,"Random discussion no stocks",stocks,
+22,"$AAPL $MSFT $GOOGL tech rally",stocks,"AAPL,MSFT,GOOGL"
+23,"Apple iPhone sales",stocks,AAPL
+24,"Amazon AWS growth",stocks,AMZN
+25,"ethereum merge",ethereum,ETH
+26,"$SOL new high",cryptocurrency,SOL
+27,"Oil sector XOM CVX",stocks,XOM
+28,"Healthcare JNJ PFE",stocks,JNJ
+29,"Bank stocks JPM BAC",stocks,JPM
+30,"$AAPL buy the dip",stocks,AAPL
+31,"Nvidia and AMD",stocks,NVDA
+32,"Nothing to see here",stocks,
+33,"$JNJ $XOM value plays",stocks,"JNJ,XOM"
+34,"Microsoft cloud",stocks,MSFT
+35,"Tesla FSD update",stocks,TSLA
+36,"$META metaverse",stocks,META
+37,"Google search",stocks,GOOGL
+38,"bitcoin halving",bitcoin,BTC
+39,"$BTC $ETH alts",cryptocurrency,"BTC,ETH"
+40,"Amazon retail",stocks,AMZN
+41,"Apple ecosystem",stocks,AAPL
+42,"JPMorgan CEO",stocks,JPM
+43,"Exxon earnings",stocks,XOM
+44,"Johnson Johnson vaccine",stocks,JNJ
+45,"Just vibes no tickers",stocks,
+46,"$XOM $JPM $JNJ $AAPL paper stocks",stocks,"XOM,JPM,JNJ,AAPL"
+47,"NVDA stock split",stocks,NVDA
+48,"MSFT Copilot",stocks,MSFT
+49,"Facebook rebrand",stocks,META
+50,"Alphabet earnings",stocks,GOOGL
+51,"$AMZN prime day",stocks,AMZN
+52,"TSLA cybertruck",stocks,TSLA
+53,"solana speed",CryptoMarkets,SOL
+54,"$JNJ dividend king",stocks,JNJ
+55,"Oil XOM Chevron",stocks,XOM
+56,"Banks JPM Wells",stocks,JPM
+57,"Weather is nice",stocks,
+58,"$AAPL 200 MA",stocks,AAPL
+59,"Apple watch",stocks,AAPL
+60,"Nvidia RTX",stocks,NVDA
+61,"Microsoft Azure",stocks,MSFT
+62,"Amazon Prime",stocks,AMZN
+63,"Google Pixel",stocks,GOOGL
+64,"Meta Quest",stocks,META
+65,"Tesla energy",stocks,TSLA
+66,"$GOOGL $META ad revenue",stocks,"GOOGL,META"
+67,"bitcoin ethereum",cryptocurrency,"BTC,ETH"
+68,"$ETH staking",ethereum,ETH
+69,"Generic market talk",stocks,
+70,"$NVDA AI chips",stocks,NVDA
+71,"JPMorgan dividend",stocks,JPM
+72,"Exxon Mobil buyback",stocks,XOM
+73,"Johnson Johnson products",stocks,JNJ
+74,"$TSLA $NVDA momentum",stocks,"TSLA,NVDA"
+75,"Apple services",stocks,AAPL
+76,"Microsoft Windows",stocks,MSFT
+77,"Amazon logistics",stocks,AMZN
+78,"Boring post",stocks,
+79,"$AAPL $NVDA $MSFT mega caps",stocks,"AAPL,NVDA,MSFT"
+80,"Google Gemini",stocks,GOOGL
+81,"Meta AI",stocks,META
+82,"$BTC dominance",bitcoin,BTC
+83,"eth upgrade",ethereum,ETH
+84,"$JNJ healthcare giant",stocks,JNJ
+85,"XOM energy transition",stocks,XOM
+86,"JPM investment bank",stocks,JPM
+87,"Random thoughts",stocks,
+88,"$XOM $JNJ value",stocks,"XOM,JNJ"
+89,"Apple silicon",stocks,AAPL
+90,"Nvidia Blackwell",stocks,NVDA
+91,"Microsoft AI",stocks,MSFT
+92,"Amazon AI",stocks,AMZN
+93,"$META $GOOGL",stocks,"META,GOOGL"
+94,"Tesla bot",stocks,TSLA
+95,"solana ecosystem",cryptocurrency,SOL
+96,"No entities here",stocks,
+97,"$JPM $XOM financials energy",stocks,"JPM,XOM"
+98,"Apple car",stocks,AAPL
+99,"Johnson Johnson pharma",stocks,JNJ
+100,"Exxon oil",stocks,XOM
+101,"JPMorgan bank",stocks,JPM
+102,"$AAPL earnings beat",stocks,AAPL
+103,"Nvidia data center",stocks,NVDA
+104,"Microsoft Office",stocks,MSFT
+105,"Blah blah",stocks,
+106,"$ETH L2",ethereum,ETH
+107,"$SOL meme coins",CryptoMarkets,SOL
+108,"bitcoin ETF",bitcoin,BTC
+109,"Apple Mac",stocks,AAPL
+110,"Google Cloud",stocks,GOOGL
+111,"Meta VR",stocks,META
+112,"Amazon AWS",stocks,AMZN
+113,"Tesla solar",stocks,TSLA
+114,"$NVDA $AMD",stocks,NVDA
+115,"JNJ consumer health",stocks,JNJ
+116,"XOM refinery",stocks,XOM
+117,"JPM wealth management",stocks,JPM
+118,"Nothing relevant",stocks,
+119,"$AAPL $JNJ $JPM $XOM all four",stocks,"AAPL,JNJ,JPM,XOM"
+120,"Apple retail",stocks,AAPL
+121,"Nvidia gaming",stocks,NVDA
+122,"Microsoft gaming",stocks,MSFT
+123,"$BTC next level",cryptocurrency,BTC
+124,"ethereum DApps",ethereum,ETH
+125,"$GOOGL search ads",stocks,GOOGL
+126,"META Instagram",stocks,META
+127,"AMZN marketplace",stocks,AMZN
+128,"Random rambling",stocks,
+129,"$TSLA delivery",stocks,TSLA
+130,"Johnson Johnson talc",stocks,JNJ
+131,"Exxon climate",stocks,XOM
+132,"JPMorgan trading",stocks,JPM
+133,"$MSFT $AMZN cloud",stocks,"MSFT,AMZN"
+134,"Apple AirPods",stocks,AAPL
+135,"Nvidia CUDA",stocks,NVDA
+136,"bitcoin miner",bitcoin,BTC
+137,"eth POS",ethereum,ETH
+138,"$SOL fast",cryptocurrency,SOL
+139,"Off topic",stocks,
+140,"$XOM pipeline",stocks,XOM
+141,"JNJ med device",stocks,JNJ
+142,"JPM retail bank",stocks,JPM
+143,"Apple TV",stocks,AAPL
+144,"Google YouTube",stocks,GOOGL
+145,"Meta WhatsApp",stocks,META
+146,"$AAPL $GOOGL",stocks,"AAPL,GOOGL"
+147,"Amazon advertising",stocks,AMZN
+148,"Tesla FSD",stocks,TSLA
+149,"Nvidia omniverse",stocks,NVDA
+150,"Microsoft Xbox",stocks,MSFT
+151,"No tickers",stocks,
+152,"$JNJ $XOM dividends",stocks,"JNJ,XOM"
+153,"bitcoin lightning",bitcoin,BTC
+154,"ethereum rollups",ethereum,ETH
+155,"$BTC $ETH crypto",cryptocurrency,"BTC,ETH"
+156,"Apple services revenue",stocks,AAPL
+157,"Exxon Permian",stocks,XOM
+158,"JPMorgan asset management",stocks,JPM
+159,"Johnson Johnson spin-off",stocks,JNJ
+160,"Generic content",stocks,
+161,"$NVDA $MSFT $GOOGL AI",stocks,"NVDA,MSFT,GOOGL"
+162,"$META Reality Labs",stocks,META
+163,"AMZN Whole Foods",stocks,AMZN
+164,"TSLA robotaxi",stocks,TSLA
+165,"$AAPL China",stocks,AAPL
+166,"Microsoft Surface",stocks,MSFT
+167,"Google AI",stocks,GOOGL
+168,"solana NFTs",CryptoMarkets,SOL
+169,"Empty vibes",stocks,
+170,"$JPM rates",stocks,JPM
+171,"XOM Guyana",stocks,XOM
+172,"JNJ Kenvue",stocks,JNJ
+173,"Apple vision",stocks,AAPL
+174,"Nvidia H100",stocks,NVDA
+175,"$ETH merge",ethereum,ETH
+176,"$BTC spot ETF",bitcoin,BTC
+177,"Meta Llama",stocks,META
+178,"Amazon Kuiper",stocks,AMZN
+179,"Tesla Megapack",stocks,TSLA
+180,"$SOL performance",cryptocurrency,SOL
+181,"Irrelevant post",stocks,
+182,"$XOM $JNJ $JPM defensive",stocks,"XOM,JNJ,JPM"
+183,"Apple M3",stocks,AAPL
+184,"Microsoft Activision",stocks,MSFT
+185,"Google DeepMind",stocks,GOOGL
+186,"bitcoin adoption",bitcoin,BTC
+187,"ethereum L2",ethereum,ETH
+188,"$AAPL $MSFT tech",stocks,"AAPL,MSFT"
+189,"NVDA Jensen",stocks,NVDA
+190,"JPMorgan Jamie",stocks,JPM
+191,"Exxon Darren",stocks,XOM
+192,"Johnson Johnson",stocks,JNJ
+193,"Nothing",stocks,
+194,"$GOOGL $AMZN $META",stocks,"GOOGL,AMZN,META"
+195,"$TSLA $NVDA $AAPL",stocks,"TSLA,NVDA,AAPL"
+196,"bitcoin price",cryptocurrency,BTC
+197,"eth staking yield",ethereum,ETH
+198,"$BTC $SOL",CryptoMarkets,"BTC,SOL"
+199,"Paper stocks $AAPL $JNJ $JPM $XOM",stocks,"AAPL,JNJ,JPM,XOM"
+200,"$MSFT buy",stocks,MSFT

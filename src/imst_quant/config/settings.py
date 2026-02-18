@@ -30,6 +30,8 @@ class DataSettings(BaseSettings):
 
     raw_dir: Path = Path("data/raw")
     bronze_dir: Path = Path("data/bronze")
+    silver_dir: Path = Path("data/silver")
+    sentiment_dir: Path = Path("data/sentiment")
 
 
 class MarketSettings(BaseSettings):

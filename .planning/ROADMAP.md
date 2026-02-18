@@ -44,6 +44,7 @@
 5. Silver layer parquet files contain entity links
 
 **Dependencies:** Phase 1
+**Status:** ● Complete (2026-02-18)
 
 ---
 
@@ -61,6 +62,7 @@
 5. Unit tests validate sentiment computation
 
 **Dependencies:** Phase 2
+**Status:** ● Complete (2026-02-18)
 
 ---
 

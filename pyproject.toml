@@ -21,6 +21,8 @@ dependencies = [
     "langdetect>=1.0.9",
     "datasketch>=1.6.4",
     "emoji>=2.0",
+    "sentence-transformers>=2.2.2",
+    "textblob>=0.17.1",
 ]
 
 [project.optional-dependencies]
