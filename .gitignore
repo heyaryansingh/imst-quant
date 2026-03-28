@@ -16,11 +16,14 @@ dist/
 .eggs/
 
 # Data (raw and processed)
+data/
 data/raw/
 data/bronze/
 *.parquet
 
 # IDE
+.claude/
+.cursor/
 .idea/
 .vscode/
 *.swp
