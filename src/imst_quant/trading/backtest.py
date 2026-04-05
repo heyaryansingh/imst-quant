@@ -1,4 +1,16 @@
-"""Event-driven backtest (BACK-01)."""
+"""Event-driven backtesting engine for trading strategy evaluation.
+
+This module implements a simple but effective backtesting framework that
+calculates daily PnL based on position signals and forward returns.
+
+Example:
+    >>> from imst_quant.trading.backtest import run_backtest
+    >>> results = run_backtest(
+    ...     features_path=Path("data/gold/features.parquet"),
+    ...     transaction_cost=0.001,
+    ... )
+    >>> print(f"Sharpe: {results['sharpe']:.2f}")
+"""
 
 from pathlib import Path
 from typing import Dict
@@ -10,10 +22,27 @@ def run_backtest(
     features_path: Path,
     predictions: pl.DataFrame | None = None,
     transaction_cost: float = 0.001,
-) -> Dict:
-    """
-    Simple backtest: daily PnL = signal * return_1d - cost.
-    predictions: date, asset_id, prob_up (or signal).
+) -> Dict[str, float | int]:
+    """Run a simple daily backtesting strategy.
+
+    Calculates daily PnL as: signal * return_1d - transaction_cost * |signal|
+
+    Args:
+        features_path: Path to Parquet file containing features with
+            columns: date, asset_id, return_1d.
+        predictions: Optional DataFrame with columns: date, asset_id, prob_up.
+            If None, uses a neutral (zero) signal for all days.
+        transaction_cost: Trading cost per unit traded (default: 0.1%).
+
+    Returns:
+        Dictionary containing:
+            - total_pnl: Cumulative profit/loss over the backtest period
+            - sharpe: Sharpe ratio (PnL mean / std)
+            - trades: Number of non-zero signal days
+
+    Example:
+        >>> results = run_backtest(Path("features.parquet"), transaction_cost=0.002)
+        >>> print(f"Total PnL: {results['total_pnl']:.4f}")
     """
     df = pl.read_parquet(features_path)
     if predictions is not None:
