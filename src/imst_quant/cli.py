@@ -21,7 +21,12 @@ logger = structlog.get_logger()
 
 
 def create_parser() -> argparse.ArgumentParser:
-    """Create the main argument parser with subcommands."""
+    """Create the main argument parser with all CLI subcommands.
+
+    Returns:
+        Configured ArgumentParser with ingest, process, analyze, backtest,
+        and status subcommands.
+    """
     parser = argparse.ArgumentParser(
         prog="imst",
         description="IMST-Quant: Influence-aware Multi-Source Sentiment Trading",
@@ -152,7 +157,17 @@ Examples:
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
-    """Handle the ingest subcommand."""
+    """Handle the ingest subcommand for data collection.
+
+    Ingests data from configured sources: Reddit posts, equity market OHLCV,
+    and cryptocurrency data via CCXT.
+
+    Args:
+        args: Parsed command-line arguments including source flags and date range.
+
+    Returns:
+        Exit code (0 for success).
+    """
     from imst_quant.config.settings import Settings
 
     settings = Settings()
@@ -218,7 +233,17 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
 
 def cmd_process(args: argparse.Namespace) -> int:
-    """Handle the process subcommand."""
+    """Handle the process subcommand for medallion architecture pipeline.
+
+    Processes data through Raw -> Bronze -> Silver -> Gold layers with
+    normalization, entity linking, and feature engineering.
+
+    Args:
+        args: Parsed command-line arguments including processing stage flags.
+
+    Returns:
+        Exit code (0 for success).
+    """
     from imst_quant.config.settings import Settings
 
     settings = Settings()
@@ -277,7 +302,17 @@ def cmd_process(args: argparse.Namespace) -> int:
 
 
 def cmd_analyze(args: argparse.Namespace) -> int:
-    """Handle the analyze subcommand."""
+    """Handle the analyze subcommand for sentiment, influence, and credibility.
+
+    Runs analysis pipelines including FinBERT sentiment, GNN influence modeling,
+    and user credibility profiling.
+
+    Args:
+        args: Parsed command-line arguments including analysis type and date filters.
+
+    Returns:
+        Exit code (0 for success, 1 for missing required arguments).
+    """
     from imst_quant.config.settings import Settings
 
     settings = Settings()
@@ -338,7 +373,17 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
 
 def cmd_backtest(args: argparse.Namespace) -> int:
-    """Handle the backtest subcommand."""
+    """Handle the backtest subcommand for model training and evaluation.
+
+    Trains forecasting models (LSTM, CNN, Transformer, LightGBM) on feature
+    vectors and runs historical backtests with configurable transaction costs.
+
+    Args:
+        args: Parsed command-line arguments including model type, epochs, and flags.
+
+    Returns:
+        Exit code (0 for success, 1 for missing features or training failure).
+    """
     from imst_quant.config.settings import Settings
 
     settings = Settings()
@@ -395,7 +440,17 @@ def cmd_backtest(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    """Handle the status subcommand."""
+    """Handle the status subcommand for pipeline overview.
+
+    Displays data layer statistics (file counts, sizes) and environment
+    configuration status.
+
+    Args:
+        args: Parsed command-line arguments (currently unused).
+
+    Returns:
+        Exit code (0 for success).
+    """
     from imst_quant.config.settings import Settings
 
     settings = Settings()
@@ -438,7 +493,14 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    """Main CLI entry point."""
+    """Main CLI entry point for IMST-Quant.
+
+    Parses command-line arguments and dispatches to the appropriate
+    subcommand handler.
+
+    Returns:
+        Exit code from the executed subcommand (0 for success).
+    """
     parser = create_parser()
     args = parser.parse_args()
 

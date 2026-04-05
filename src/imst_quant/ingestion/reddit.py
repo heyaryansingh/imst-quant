@@ -1,4 +1,26 @@
-"""Reddit ingestion via PRAW with checkpoint-based incremental crawling."""
+"""Reddit ingestion via PRAW with checkpoint-based incremental crawling.
+
+This module provides utilities for ingesting Reddit posts from configured
+subreddits using PRAW (Python Reddit API Wrapper). It supports:
+- Incremental crawling with checkpoint persistence
+- Automatic rate limiting via PRAW
+- Retry logic for transient network failures
+- Structured logging with structlog
+
+Example:
+    CLI usage::
+
+        python -m imst_quant.ingestion.reddit --limit 500
+
+    Programmatic usage::
+
+        from imst_quant.ingestion.reddit import ingest_subreddit
+        from imst_quant.config.settings import Settings
+
+        settings = Settings()
+        reddit = create_reddit_client(settings.reddit)
+        count = ingest_subreddit(reddit, "wallstreetbets", output_dir, checkpoint_mgr)
+"""
 
 from pathlib import Path
 
@@ -14,7 +36,17 @@ logger = structlog.get_logger()
 
 
 def create_reddit_client(settings: RedditSettings) -> praw.Reddit:
-    """Create authenticated Reddit client with built-in rate limiting."""
+    """Create authenticated Reddit client with built-in rate limiting.
+
+    Args:
+        settings: Reddit API credentials and configuration.
+
+    Returns:
+        Authenticated praw.Reddit instance with rate limiting enabled.
+
+    Raises:
+        praw.exceptions.ResponseException: If authentication fails.
+    """
     return praw.Reddit(
         client_id=settings.client_id,
         client_secret=settings.client_secret.get_secret_value(),
@@ -35,9 +67,25 @@ def ingest_subreddit(
     checkpoint_mgr: CheckpointManager,
     limit: int = 1000,
 ) -> int:
-    """Ingest posts from subreddit with checkpointing.
+    """Ingest posts from a subreddit with checkpoint-based incremental crawling.
 
-    PRAW handles rate limiting automatically. Checkpoint updated every 100 posts.
+    Fetches new posts from the specified subreddit, storing them as JSON files.
+    Uses checkpointing to track progress and avoid re-fetching posts on restart.
+    PRAW handles Reddit API rate limiting automatically.
+
+    Args:
+        reddit: Authenticated praw.Reddit client instance.
+        subreddit_name: Name of the subreddit (without r/ prefix).
+        output_dir: Directory to store raw JSON post files.
+        checkpoint_mgr: Manager for tracking last ingested timestamp.
+        limit: Maximum number of posts to fetch (default: 1000).
+
+    Returns:
+        Number of new posts ingested.
+
+    Raises:
+        ConnectionError: If network connection fails (retried up to 3 times).
+        TimeoutError: If request times out (retried up to 3 times).
     """
     subreddit = reddit.subreddit(subreddit_name)
     last_ts = checkpoint_mgr.get_last_timestamp(subreddit_name)
@@ -74,7 +122,15 @@ def ingest_subreddit(
 
 
 def main() -> None:
-    """CLI entry point for Reddit ingestion."""
+    """CLI entry point for Reddit ingestion.
+
+    Reads subreddit configuration from config/subreddits.yaml and ingests
+    posts from all configured subreddits. Requires REDDIT_CLIENT_ID and
+    REDDIT_CLIENT_SECRET environment variables.
+
+    Raises:
+        SystemExit: If credentials are missing or config file not found.
+    """
     import argparse
     import sys
     import yaml
