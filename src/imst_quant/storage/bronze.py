@@ -1,4 +1,34 @@
-"""Bronze layer: raw JSON to Parquet."""
+"""Bronze layer data transformation: raw JSON to Parquet.
+
+This module handles the first stage of the data pipeline, converting raw
+JSON files from data ingestion into partitioned Parquet files in the
+bronze layer. The bronze layer preserves source data with minimal
+transformation, adding only type casting and date partitioning.
+
+Supported data sources:
+    - Reddit posts (partitioned by date)
+    - Market data (partitioned by date)
+    - Crypto data (partitioned by date)
+
+The bronze layer follows the medallion architecture pattern where:
+    - Raw layer: Original JSON files as received
+    - Bronze layer: Parquet with schema, partitioned (this module)
+    - Silver layer: Cleaned and enriched data
+    - Gold layer: Aggregated analytics-ready data
+
+Functions:
+    raw_to_bronze_reddit: Transform Reddit JSON to bronze Parquet
+    raw_to_bronze_market: Transform market/crypto JSON to bronze Parquet
+
+Example:
+    >>> from pathlib import Path
+    >>> from imst_quant.storage.bronze import raw_to_bronze_reddit
+    >>> raw_to_bronze_reddit(
+    ...     raw_dir=Path("data/raw"),
+    ...     bronze_dir=Path("data/bronze"),
+    ...     date="2026-04-01"
+    ... )
+"""
 
 import json
 from pathlib import Path
@@ -14,7 +44,25 @@ def raw_to_bronze_reddit(
     bronze_dir: Path,
     date: str | None = None,
 ) -> None:
-    """Convert raw Reddit JSON to bronze Parquet."""
+    """Convert raw Reddit JSON files to bronze-layer Parquet.
+
+    Reads JSON files from the raw Reddit directory structure, applies
+    basic type casting, and writes date-partitioned Parquet files with
+    zstd compression to the bronze layer.
+
+    Args:
+        raw_dir: Root directory containing raw data. Expects structure:
+            raw_dir/reddit/<subreddit>/YYYY-MM-DD/*.json
+        bronze_dir: Output directory for bronze Parquet files. Writes to:
+            bronze_dir/reddit/date=YYYY-MM-DD/data.parquet
+        date: Optional date filter (YYYY-MM-DD). If provided, only
+            processes files from that specific date directory.
+
+    Note:
+        - Invalid JSON files are logged and skipped
+        - Creates output directories as needed
+        - Uses zstd compression for efficient storage
+    """
     raw_dir = Path(raw_dir)
     bronze_dir = Path(bronze_dir)
     reddit_raw = raw_dir / "reddit"
@@ -65,7 +113,24 @@ def raw_to_bronze_reddit(
 
 
 def raw_to_bronze_market(raw_dir: Path, bronze_dir: Path) -> None:
-    """Convert raw market and crypto JSON to bronze Parquet."""
+    """Convert raw market and crypto JSON to bronze-layer Parquet.
+
+    Processes market price data and cryptocurrency data from raw JSON
+    files into date-partitioned Parquet files with zstd compression.
+
+    Args:
+        raw_dir: Root directory containing raw data. Expects structure:
+            raw_dir/market/*.json (traditional market data)
+            raw_dir/crypto/*.json (cryptocurrency data)
+        bronze_dir: Output directory for bronze Parquet files. Writes to:
+            bronze_dir/market/date=YYYY-MM-DD/data.parquet
+            bronze_dir/crypto/date=YYYY-MM-DD/data.parquet
+
+    Note:
+        - Empty DataFrames and invalid JSON files are skipped
+        - Expects 'date' column in source data for partitioning
+        - Creates output directories as needed
+    """
     raw_dir = Path(raw_dir)
     bronze_dir = Path(bronze_dir)
 
