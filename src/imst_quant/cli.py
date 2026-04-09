@@ -153,6 +153,32 @@ Examples:
         "status", help="Show pipeline status and data statistics"
     )
 
+    # --- portfolio subcommand ---
+    portfolio_parser = subparsers.add_parser(
+        "portfolio", help="Analyze portfolio performance and risk metrics"
+    )
+    portfolio_parser.add_argument(
+        "--features", help="Path to features parquet file (default: gold/features.parquet)"
+    )
+    portfolio_parser.add_argument(
+        "--risk-free-rate",
+        type=float,
+        default=0.0,
+        help="Daily risk-free rate for Sharpe/Sortino (default: 0)",
+    )
+    portfolio_parser.add_argument(
+        "--var-confidence",
+        type=float,
+        default=0.95,
+        help="Confidence level for VaR calculation (default: 0.95)",
+    )
+    portfolio_parser.add_argument(
+        "--asset", help="Filter to specific asset (default: all)"
+    )
+    portfolio_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -439,6 +465,87 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_portfolio(args: argparse.Namespace) -> int:
+    """Handle the portfolio subcommand for risk metrics analysis.
+
+    Calculates and displays comprehensive portfolio risk metrics including
+    Sharpe ratio, Sortino ratio, max drawdown, VaR, and Calmar ratio.
+
+    Args:
+        args: Parsed command-line arguments including features path and filters.
+
+    Returns:
+        Exit code (0 for success, 1 for missing data).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.risk_metrics import calculate_all_metrics
+
+    settings = Settings()
+    gold_dir = Path(settings.data.gold_dir)
+
+    features_path = Path(args.features) if args.features else gold_dir / "features.parquet"
+
+    if not features_path.exists():
+        print(f"Error: Features file not found at {features_path}")
+        print("Run 'imst process --build-features' first.")
+        return 1
+
+    df = pl.read_parquet(features_path)
+
+    if "return_1d" not in df.columns:
+        print("Error: Features file must contain 'return_1d' column")
+        return 1
+
+    # Filter by asset if specified
+    if args.asset:
+        if "asset_id" in df.columns:
+            df = df.filter(pl.col("asset_id") == args.asset)
+        elif "ticker" in df.columns:
+            df = df.filter(pl.col("ticker") == args.asset)
+
+        if df.height == 0:
+            print(f"Error: No data found for asset '{args.asset}'")
+            return 1
+
+    returns = df["return_1d"].drop_nulls()
+
+    if returns.len() == 0:
+        print("Error: No valid return data found")
+        return 1
+
+    metrics = calculate_all_metrics(
+        returns,
+        risk_free_rate=args.risk_free_rate,
+        var_confidence=args.var_confidence,
+    )
+
+    if args.json:
+        print(json_module.dumps(metrics, indent=2))
+    else:
+        print("\n=== Portfolio Risk Metrics ===\n")
+        print(f"Data points:        {returns.len()}")
+        if args.asset:
+            print(f"Asset:              {args.asset}")
+        print()
+        print(f"Total Return:       {metrics['total_return']:+.2%}")
+        print(f"Annualized Return:  {metrics['annualized_return']:+.2%}")
+        print(f"Volatility (Ann.):  {metrics['volatility']:.2%}")
+        print()
+        print(f"Sharpe Ratio:       {metrics['sharpe']:.4f}")
+        print(f"Sortino Ratio:      {metrics['sortino']:.4f}")
+        print(f"Calmar Ratio:       {metrics['calmar']:.4f}")
+        print()
+        print(f"Max Drawdown:       {metrics['max_drawdown']:.2%}")
+        print(f"VaR ({args.var_confidence:.0%}):          {metrics['var']:.2%}")
+        print()
+
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     """Handle the status subcommand for pipeline overview.
 
@@ -519,6 +626,7 @@ def main() -> int:
         "analyze": cmd_analyze,
         "backtest": cmd_backtest,
         "status": cmd_status,
+        "portfolio": cmd_portfolio,
     }
 
     handler = commands.get(args.command)
