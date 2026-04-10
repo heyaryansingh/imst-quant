@@ -179,6 +179,72 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- correlation subcommand ---
+    correlation_parser = subparsers.add_parser(
+        "correlation", help="Analyze asset correlations and relationships"
+    )
+    correlation_parser.add_argument(
+        "--features", help="Path to features parquet file (default: gold/features.parquet)"
+    )
+    correlation_parser.add_argument(
+        "--asset1", help="First asset for pairwise correlation analysis"
+    )
+    correlation_parser.add_argument(
+        "--asset2", help="Second asset for pairwise correlation analysis"
+    )
+    correlation_parser.add_argument(
+        "--rolling-window",
+        type=int,
+        default=60,
+        help="Window size for rolling correlation (default: 60)",
+    )
+    correlation_parser.add_argument(
+        "--method",
+        choices=["pearson", "spearman"],
+        default="pearson",
+        help="Correlation method (default: pearson)",
+    )
+    correlation_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
+    # --- validate subcommand ---
+    validate_parser = subparsers.add_parser(
+        "validate", help="Validate data quality and integrity"
+    )
+    validate_parser.add_argument(
+        "--data", help="Path to data file to validate", required=True
+    )
+    validate_parser.add_argument(
+        "--type",
+        choices=["ohlcv", "returns", "all"],
+        default="all",
+        help="Type of validation to run (default: all)",
+    )
+    validate_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
+    # --- report subcommand ---
+    report_parser = subparsers.add_parser(
+        "report", help="Generate and export backtest reports"
+    )
+    report_parser.add_argument(
+        "--features", help="Path to features file for backtest"
+    )
+    report_parser.add_argument(
+        "--strategy", default="default", help="Strategy name for report"
+    )
+    report_parser.add_argument(
+        "--output", help="Output path for report (without extension)"
+    )
+    report_parser.add_argument(
+        "--format",
+        choices=["json", "csv", "html", "all"],
+        default="all",
+        help="Export format (default: all)",
+    )
+
     return parser
 
 
@@ -599,6 +665,302 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_correlation(args: argparse.Namespace) -> int:
+    """Handle the correlation subcommand for asset relationship analysis.
+
+    Calculates and displays correlation metrics between assets including
+    pairwise correlations and rolling correlation time series.
+
+    Args:
+        args: Parsed command-line arguments including feature path and options.
+
+    Returns:
+        Exit code (0 for success, 1 for missing data).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.correlation import (
+        calculate_asset_correlation,
+        calculate_correlation_summary,
+        calculate_rolling_correlation,
+    )
+
+    settings = Settings()
+    gold_dir = Path(settings.data.gold_dir)
+
+    features_path = Path(args.features) if args.features else gold_dir / "features.parquet"
+
+    if not features_path.exists():
+        print(f"Error: Features file not found at {features_path}")
+        return 1
+
+    df = pl.read_parquet(features_path)
+
+    if "return_1d" not in df.columns:
+        print("Error: Features file must contain 'return_1d' column")
+        return 1
+
+    # Determine asset column
+    asset_col = "asset_id" if "asset_id" in df.columns else "ticker"
+    if asset_col not in df.columns:
+        print("Error: Features file must contain 'asset_id' or 'ticker' column")
+        return 1
+
+    if args.asset1 and args.asset2:
+        # Pairwise rolling correlation
+        rolling_corr = calculate_rolling_correlation(
+            df,
+            args.asset1,
+            args.asset2,
+            return_col="return_1d",
+            asset_col=asset_col,
+            window=args.rolling_window,
+        )
+
+        if rolling_corr.height == 0:
+            print(f"Error: Could not calculate correlation for {args.asset1} and {args.asset2}")
+            return 1
+
+        valid_corr = rolling_corr.filter(pl.col("rolling_correlation").is_not_null())
+        if valid_corr.height > 0:
+            avg_corr = valid_corr["rolling_correlation"].mean()
+            min_corr = valid_corr["rolling_correlation"].min()
+            max_corr = valid_corr["rolling_correlation"].max()
+            latest_corr = valid_corr["rolling_correlation"].to_list()[-1]
+
+            if args.json:
+                result = {
+                    "asset1": args.asset1,
+                    "asset2": args.asset2,
+                    "window": args.rolling_window,
+                    "avg_correlation": float(avg_corr) if avg_corr else None,
+                    "min_correlation": float(min_corr) if min_corr else None,
+                    "max_correlation": float(max_corr) if max_corr else None,
+                    "latest_correlation": latest_corr,
+                }
+                print(json_module.dumps(result, indent=2))
+            else:
+                print(f"\n=== Rolling Correlation: {args.asset1} vs {args.asset2} ===\n")
+                print(f"Window:        {args.rolling_window} periods")
+                print(f"Data points:   {valid_corr.height}")
+                print()
+                print(f"Average:       {avg_corr:.4f}" if avg_corr else "Average:       N/A")
+                print(f"Minimum:       {min_corr:.4f}" if min_corr else "Minimum:       N/A")
+                print(f"Maximum:       {max_corr:.4f}" if max_corr else "Maximum:       N/A")
+                print(f"Latest:        {latest_corr:.4f}")
+                print()
+    else:
+        # Full correlation summary
+        summary = calculate_correlation_summary(
+            df, return_col="return_1d", asset_col=asset_col
+        )
+
+        if args.json:
+            # Convert correlation matrix to dict for JSON
+            corr_matrix = summary["correlation_matrix"]
+            matrix_dict = {
+                "assets": corr_matrix["asset"].to_list(),
+                "correlations": {
+                    col: corr_matrix[col].to_list()
+                    for col in corr_matrix.columns if col != "asset"
+                },
+            }
+            result = {
+                "avg_correlation": summary["avg_correlation"],
+                "min_correlation": summary["min_correlation"],
+                "max_correlation": summary["max_correlation"],
+                "highly_correlated_pairs": [
+                    {"asset1": p[0], "asset2": p[1], "correlation": p[2]}
+                    for p in summary["highly_correlated"]
+                ],
+                "negatively_correlated_pairs": [
+                    {"asset1": p[0], "asset2": p[1], "correlation": p[2]}
+                    for p in summary["negatively_correlated"]
+                ],
+                "total_pairs": summary["total_pairs"],
+                "correlation_matrix": matrix_dict,
+            }
+            print(json_module.dumps(result, indent=2, default=str))
+        else:
+            print("\n=== Correlation Analysis Summary ===\n")
+            print(f"Total asset pairs: {summary['total_pairs']}")
+            print(f"Average correlation: {summary['avg_correlation']:.4f}")
+            print()
+
+            if summary["max_correlation"]:
+                pair = summary["max_correlation"]["pair"]
+                val = summary["max_correlation"]["value"]
+                print(f"Highest correlation: {pair[0]} / {pair[1]} = {val:.4f}")
+
+            if summary["min_correlation"]:
+                pair = summary["min_correlation"]["pair"]
+                val = summary["min_correlation"]["value"]
+                print(f"Lowest correlation:  {pair[0]} / {pair[1]} = {val:.4f}")
+
+            if summary["highly_correlated"]:
+                print(f"\nHighly correlated pairs (>0.7): {len(summary['highly_correlated'])}")
+                for p in summary["highly_correlated"][:5]:
+                    print(f"  {p[0]} / {p[1]}: {p[2]:.4f}")
+
+            if summary["negatively_correlated"]:
+                print(f"\nNegatively correlated pairs (<-0.3): {len(summary['negatively_correlated'])}")
+                for p in summary["negatively_correlated"][:5]:
+                    print(f"  {p[0]} / {p[1]}: {p[2]:.4f}")
+
+            print()
+
+    return 0
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    """Handle the validate subcommand for data quality checks.
+
+    Runs comprehensive data quality validation and reports any issues
+    found in the specified data file.
+
+    Args:
+        args: Parsed command-line arguments including data path and validation type.
+
+    Returns:
+        Exit code (0 for success/no issues, 1 for errors found).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.utils.data_quality import generate_quality_report
+
+    data_path = Path(args.data)
+
+    if not data_path.exists():
+        print(f"Error: Data file not found at {data_path}")
+        return 1
+
+    # Load data based on extension
+    if data_path.suffix == ".parquet":
+        df = pl.read_parquet(data_path)
+    elif data_path.suffix == ".csv":
+        df = pl.read_csv(data_path)
+    else:
+        print(f"Error: Unsupported file format: {data_path.suffix}")
+        return 1
+
+    # Run quality checks
+    report = generate_quality_report(df)
+
+    if args.json:
+        print(json_module.dumps(report, indent=2, default=str))
+    else:
+        print(f"\n=== Data Quality Report: {data_path.name} ===\n")
+        print(f"Rows:          {report['total_rows']:,}")
+        print(f"Columns:       {report['total_columns']}")
+        print(f"Quality Score: {report['quality_score']:.1%}")
+        print()
+        print(f"Issues Found:  {report['summary']['total_issues']}")
+        print(f"  Errors:      {report['summary']['errors']}")
+        print(f"  Warnings:    {report['summary']['warnings']}")
+        print(f"  Info:        {report['summary']['info']}")
+        print()
+
+        if report["issues"]:
+            print("--- Issues ---")
+            for issue in report["issues"]:
+                severity_icon = {"error": "✗", "warning": "⚠", "info": "ℹ"}
+                icon = severity_icon.get(issue["severity"], "•")
+                print(f"  {icon} [{issue['severity'].upper()}] {issue['message']}")
+            print()
+
+        if report["recommendations"]:
+            print("--- Recommendations ---")
+            for rec in report["recommendations"]:
+                print(f"  • {rec}")
+            print()
+
+    # Return 1 if there are errors
+    return 1 if report["summary"]["errors"] > 0 else 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    """Handle the report subcommand for generating backtest reports.
+
+    Runs a backtest and exports results in specified formats (JSON, CSV, HTML).
+
+    Args:
+        args: Parsed command-line arguments including output path and format.
+
+    Returns:
+        Exit code (0 for success, 1 for errors).
+    """
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.trading.backtest import run_backtest
+    from imst_quant.trading.report import (
+        export_csv,
+        export_html,
+        export_json,
+        generate_report,
+    )
+    from imst_quant.utils.risk_metrics import calculate_all_metrics
+
+    settings = Settings()
+    gold_dir = Path(settings.data.gold_dir)
+
+    features_path = Path(args.features) if args.features else gold_dir / "features.parquet"
+
+    if not features_path.exists():
+        print(f"Error: Features file not found at {features_path}")
+        return 1
+
+    print(f"Running backtest on {features_path}...")
+
+    # Run backtest
+    backtest_results = run_backtest(features_path, transaction_cost=0.001)
+
+    # Load data for additional metrics
+    df = pl.read_parquet(features_path)
+    if "return_1d" in df.columns:
+        returns = df["return_1d"].drop_nulls()
+        risk_metrics = calculate_all_metrics(returns)
+        backtest_results.update(risk_metrics)
+
+    # Generate report
+    report = generate_report(
+        backtest_results,
+        strategy_name=args.strategy,
+        parameters={"transaction_cost": 0.001},
+        daily_pnl=returns if "return_1d" in df.columns else None,
+    )
+
+    # Determine output path
+    output_base = Path(args.output) if args.output else gold_dir / f"report_{args.strategy}"
+
+    # Export in requested formats
+    created_files = []
+
+    if args.format in ["json", "all"]:
+        json_path = export_json(report, output_base.with_suffix(".json"))
+        created_files.append(json_path)
+        print(f"  JSON report: {json_path}")
+
+    if args.format in ["csv", "all"]:
+        csv_paths = export_csv(report, output_base)
+        created_files.extend(csv_paths)
+        for p in csv_paths:
+            print(f"  CSV report:  {p}")
+
+    if args.format in ["html", "all"]:
+        html_path = export_html(report, output_base.with_suffix(".html"), title=f"Backtest: {args.strategy}")
+        created_files.append(html_path)
+        print(f"  HTML report: {html_path}")
+
+    print(f"\nGenerated {len(created_files)} report file(s).")
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -627,6 +989,9 @@ def main() -> int:
         "backtest": cmd_backtest,
         "status": cmd_status,
         "portfolio": cmd_portfolio,
+        "correlation": cmd_correlation,
+        "validate": cmd_validate,
+        "report": cmd_report,
     }
 
     handler = commands.get(args.command)
