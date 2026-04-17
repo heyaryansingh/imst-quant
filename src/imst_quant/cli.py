@@ -245,6 +245,102 @@ Examples:
         help="Export format (default: all)",
     )
 
+    # --- montecarlo subcommand ---
+    montecarlo_parser = subparsers.add_parser(
+        "montecarlo", help="Run Monte Carlo simulations for risk assessment"
+    )
+    montecarlo_parser.add_argument(
+        "--features", help="Path to features parquet file (default: gold/features.parquet)"
+    )
+    montecarlo_parser.add_argument(
+        "--simulations",
+        type=int,
+        default=10000,
+        help="Number of Monte Carlo simulations (default: 10000)",
+    )
+    montecarlo_parser.add_argument(
+        "--horizon",
+        type=int,
+        default=252,
+        help="Simulation horizon in trading days (default: 252)",
+    )
+    montecarlo_parser.add_argument(
+        "--confidence",
+        type=float,
+        default=0.95,
+        help="Confidence level for VaR/ES (default: 0.95)",
+    )
+    montecarlo_parser.add_argument(
+        "--method",
+        choices=["historical", "parametric", "gbm"],
+        default="historical",
+        help="Simulation method (default: historical)",
+    )
+    montecarlo_parser.add_argument(
+        "--seed", type=int, help="Random seed for reproducibility"
+    )
+    montecarlo_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
+    # --- benchmark subcommand ---
+    benchmark_parser = subparsers.add_parser(
+        "benchmark", help="Compare strategy performance against benchmarks"
+    )
+    benchmark_parser.add_argument(
+        "--strategy", help="Path to strategy returns file", required=True
+    )
+    benchmark_parser.add_argument(
+        "--benchmark", help="Path to benchmark returns file or ticker (e.g., SPY)"
+    )
+    benchmark_parser.add_argument(
+        "--risk-free-rate",
+        type=float,
+        default=0.0,
+        help="Daily risk-free rate for alpha calculation (default: 0)",
+    )
+    benchmark_parser.add_argument(
+        "--rolling-window",
+        type=int,
+        default=60,
+        help="Window for rolling metrics (default: 60)",
+    )
+    benchmark_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
+    # --- regime subcommand ---
+    regime_parser = subparsers.add_parser(
+        "regime", help="Detect market regimes (volatility, trend, combined)"
+    )
+    regime_parser.add_argument(
+        "--features", help="Path to features parquet file (default: gold/features.parquet)"
+    )
+    regime_parser.add_argument(
+        "--type",
+        choices=["volatility", "trend", "combined"],
+        default="combined",
+        help="Type of regime detection (default: combined)",
+    )
+    regime_parser.add_argument(
+        "--asset", help="Filter to specific asset (default: all)"
+    )
+    regime_parser.add_argument(
+        "--volatility-window",
+        type=int,
+        default=20,
+        help="Window for volatility calculation (default: 20)",
+    )
+    regime_parser.add_argument(
+        "--trend-window",
+        type=int,
+        default=50,
+        help="Window for trend calculation (default: 50)",
+    )
+    regime_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -961,6 +1057,332 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_montecarlo(args: argparse.Namespace) -> int:
+    """Handle the montecarlo subcommand for risk simulation.
+
+    Runs Monte Carlo simulations to estimate portfolio risk metrics including
+    VaR, Expected Shortfall, and return distributions.
+
+    Args:
+        args: Parsed command-line arguments including simulation parameters.
+
+    Returns:
+        Exit code (0 for success, 1 for errors).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.monte_carlo import MonteCarloSimulator
+
+    settings = Settings()
+    gold_dir = Path(settings.data.gold_dir)
+
+    features_path = Path(args.features) if args.features else gold_dir / "features.parquet"
+
+    if not features_path.exists():
+        print(f"Error: Features file not found at {features_path}")
+        return 1
+
+    df = pl.read_parquet(features_path)
+
+    if "return_1d" not in df.columns:
+        print("Error: Features file must contain 'return_1d' column")
+        return 1
+
+    returns = df["return_1d"].drop_nulls()
+
+    if returns.len() < 30:
+        print("Error: Insufficient data for Monte Carlo simulation (need at least 30 observations)")
+        return 1
+
+    print(f"Running {args.simulations:,} Monte Carlo simulations...")
+    print(f"Method: {args.method}, Horizon: {args.horizon} days, Confidence: {args.confidence:.0%}")
+
+    simulator = MonteCarloSimulator(
+        returns,
+        n_simulations=args.simulations,
+        seed=args.seed,
+    )
+
+    if args.method == "historical":
+        result = simulator.run_historical_simulation(horizon=args.horizon)
+    elif args.method == "parametric":
+        result = simulator.run_parametric_simulation(horizon=args.horizon)
+    else:  # gbm
+        result = simulator.run_gbm_simulation(horizon=args.horizon)
+
+    var = simulator.var_simulation(confidence=args.confidence)
+    es = simulator.expected_shortfall(confidence=args.confidence)
+
+    if args.json:
+        output = {
+            "method": args.method,
+            "simulations": args.simulations,
+            "horizon": args.horizon,
+            "confidence": args.confidence,
+            "var": float(var),
+            "expected_shortfall": float(es),
+            "mean_return": float(result.mean_return),
+            "std_return": float(result.std_return),
+            "percentiles": {str(k): float(v) for k, v in result.percentiles.items()},
+        }
+        print(json_module.dumps(output, indent=2))
+    else:
+        print(f"\n=== Monte Carlo Simulation Results ===\n")
+        print(f"Simulations:       {args.simulations:,}")
+        print(f"Horizon:           {args.horizon} trading days")
+        print(f"Method:            {args.method}")
+        print()
+        print(f"VaR ({args.confidence:.0%}):        {var:.2%}")
+        print(f"Expected Shortfall: {es:.2%}")
+        print()
+        print(f"Mean Return:       {result.mean_return:.2%}")
+        print(f"Std Deviation:     {result.std_return:.2%}")
+        print()
+        print("Percentiles:")
+        for pct, val in sorted(result.percentiles.items()):
+            print(f"  {pct}th:           {val:.2%}")
+        print()
+
+    return 0
+
+
+def cmd_benchmark(args: argparse.Namespace) -> int:
+    """Handle the benchmark subcommand for relative performance analysis.
+
+    Compares strategy returns against a benchmark to calculate alpha, beta,
+    tracking error, information ratio, and capture ratios.
+
+    Args:
+        args: Parsed command-line arguments including strategy and benchmark paths.
+
+    Returns:
+        Exit code (0 for success, 1 for errors).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.utils.benchmark import BenchmarkAnalyzer
+
+    strategy_path = Path(args.strategy)
+
+    if not strategy_path.exists():
+        print(f"Error: Strategy file not found at {strategy_path}")
+        return 1
+
+    # Load strategy returns
+    if strategy_path.suffix == ".parquet":
+        strat_df = pl.read_parquet(strategy_path)
+    else:
+        strat_df = pl.read_csv(strategy_path)
+
+    return_col = "return_1d" if "return_1d" in strat_df.columns else "return"
+    if return_col not in strat_df.columns:
+        print("Error: Strategy file must contain 'return_1d' or 'return' column")
+        return 1
+
+    strategy_returns = strat_df[return_col].drop_nulls()
+
+    # Load or generate benchmark returns
+    if args.benchmark:
+        bench_path = Path(args.benchmark)
+        if bench_path.exists():
+            if bench_path.suffix == ".parquet":
+                bench_df = pl.read_parquet(bench_path)
+            else:
+                bench_df = pl.read_csv(bench_path)
+            bench_return_col = "return_1d" if "return_1d" in bench_df.columns else "return"
+            benchmark_returns = bench_df[bench_return_col].drop_nulls()
+        else:
+            # Try to fetch benchmark data using ticker
+            print(f"Fetching benchmark data for {args.benchmark}...")
+            try:
+                import yfinance as yf
+                ticker = yf.Ticker(args.benchmark)
+                hist = ticker.history(period="5y")
+                benchmark_returns = pl.Series(hist["Close"].pct_change().dropna().values)
+            except Exception as e:
+                print(f"Error: Could not fetch benchmark data: {e}")
+                return 1
+    else:
+        # Use equal-weight benchmark from strategy data if available
+        print("Warning: No benchmark specified, using zero benchmark (absolute returns)")
+        benchmark_returns = pl.Series([0.0] * strategy_returns.len())
+
+    # Align series lengths
+    min_len = min(strategy_returns.len(), benchmark_returns.len())
+    strategy_returns = strategy_returns.tail(min_len)
+    benchmark_returns = benchmark_returns.tail(min_len)
+
+    analyzer = BenchmarkAnalyzer(
+        strategy_returns,
+        benchmark_returns,
+        risk_free_rate=args.risk_free_rate,
+    )
+
+    metrics = analyzer.calculate_all_metrics()
+
+    if args.json:
+        output = {
+            "alpha": float(metrics.alpha),
+            "beta": float(metrics.beta),
+            "r_squared": float(metrics.r_squared),
+            "tracking_error": float(metrics.tracking_error),
+            "information_ratio": float(metrics.information_ratio),
+            "up_capture": float(metrics.up_capture),
+            "down_capture": float(metrics.down_capture),
+            "capture_ratio": float(metrics.capture_ratio),
+            "excess_return": float(metrics.excess_return),
+            "correlation": float(metrics.correlation),
+        }
+        print(json_module.dumps(output, indent=2))
+    else:
+        print(f"\n=== Benchmark Comparison ===\n")
+        print(f"Data points:       {min_len}")
+        print()
+        print(f"Alpha (annualized): {metrics.alpha:.2%}")
+        print(f"Beta:               {metrics.beta:.2f}")
+        print(f"R-squared:          {metrics.r_squared:.2%}")
+        print()
+        print(f"Tracking Error:     {metrics.tracking_error:.2%}")
+        print(f"Information Ratio:  {metrics.information_ratio:.2f}")
+        print()
+        print(f"Up Capture:         {metrics.up_capture:.1%}")
+        print(f"Down Capture:       {metrics.down_capture:.1%}")
+        print(f"Capture Ratio:      {metrics.capture_ratio:.2f}")
+        print()
+        print(f"Excess Return:      {metrics.excess_return:.2%}")
+        print(f"Correlation:        {metrics.correlation:.2f}")
+        print()
+
+    return 0
+
+
+def cmd_regime(args: argparse.Namespace) -> int:
+    """Handle the regime subcommand for market regime detection.
+
+    Analyzes price/return data to detect market regimes including volatility
+    states, trend direction, and combined regime classifications.
+
+    Args:
+        args: Parsed command-line arguments including regime type and parameters.
+
+    Returns:
+        Exit code (0 for success, 1 for errors).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.regime_detection import (
+        detect_combined_regime,
+        detect_trend_regime,
+        detect_volatility_regime,
+        regime_statistics,
+        regime_transition_matrix,
+    )
+
+    settings = Settings()
+    gold_dir = Path(settings.data.gold_dir)
+
+    features_path = Path(args.features) if args.features else gold_dir / "features.parquet"
+
+    if not features_path.exists():
+        print(f"Error: Features file not found at {features_path}")
+        return 1
+
+    df = pl.read_parquet(features_path)
+
+    if "return_1d" not in df.columns:
+        print("Error: Features file must contain 'return_1d' column")
+        return 1
+
+    # Filter by asset if specified
+    asset_col = "asset_id" if "asset_id" in df.columns else "ticker"
+    if args.asset and asset_col in df.columns:
+        df = df.filter(pl.col(asset_col) == args.asset)
+        if df.height == 0:
+            print(f"Error: No data found for asset {args.asset}")
+            return 1
+
+    returns = df["return_1d"].drop_nulls()
+
+    print(f"Detecting {args.type} regime(s)...")
+    print(f"Data points: {returns.len()}")
+
+    if args.type == "volatility":
+        regimes = detect_volatility_regime(returns, window=args.volatility_window)
+        regime_col = "volatility_regime"
+    elif args.type == "trend":
+        regimes = detect_trend_regime(returns, window=args.trend_window)
+        regime_col = "trend_regime"
+    else:  # combined
+        regimes = detect_combined_regime(
+            returns,
+            vol_window=args.volatility_window,
+            trend_window=args.trend_window,
+        )
+        regime_col = "combined_regime"
+
+    stats = regime_statistics(regimes, regime_col)
+    transitions = regime_transition_matrix(regimes, regime_col)
+
+    if args.json:
+        # Get current regime
+        current = regimes[regime_col].to_list()[-1] if regimes.height > 0 else None
+
+        output = {
+            "type": args.type,
+            "current_regime": str(current) if current else None,
+            "statistics": {
+                str(k): {
+                    "count": int(v["count"]),
+                    "percentage": float(v["percentage"]),
+                    "avg_duration": float(v["avg_duration"]) if v.get("avg_duration") else None,
+                }
+                for k, v in stats.items()
+            },
+            "transition_matrix": {
+                str(k): {str(k2): float(v2) for k2, v2 in v.items()}
+                for k, v in transitions.items()
+            },
+        }
+        print(json_module.dumps(output, indent=2))
+    else:
+        print(f"\n=== Market Regime Analysis ({args.type}) ===\n")
+
+        # Current regime
+        if regimes.height > 0:
+            current = regimes[regime_col].to_list()[-1]
+            print(f"Current Regime:    {current}")
+            print()
+
+        # Regime statistics
+        print("Regime Distribution:")
+        for regime, data in sorted(stats.items(), key=lambda x: -x[1]["percentage"]):
+            pct = data["percentage"]
+            count = data["count"]
+            duration = data.get("avg_duration")
+            duration_str = f", avg duration: {duration:.1f} days" if duration else ""
+            print(f"  {regime:15} {pct:6.1%} ({count} periods{duration_str})")
+        print()
+
+        # Transition probabilities
+        print("Transition Probabilities:")
+        for from_regime, to_probs in sorted(transitions.items()):
+            probs_str = ", ".join(
+                f"{to_r}: {p:.1%}" for to_r, p in sorted(to_probs.items())
+            )
+            print(f"  {from_regime:15} -> {probs_str}")
+        print()
+
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -992,6 +1414,9 @@ def main() -> int:
         "correlation": cmd_correlation,
         "validate": cmd_validate,
         "report": cmd_report,
+        "montecarlo": cmd_montecarlo,
+        "benchmark": cmd_benchmark,
+        "regime": cmd_regime,
     }
 
     handler = commands.get(args.command)

@@ -6,8 +6,20 @@ This package provides utility functions for:
 - Technical indicators (MACD, Bollinger Bands, ATR, ADX, etc.)
 - Drawdown analysis (periods, underwater analysis, statistics)
 - Market regime detection (volatility, trend, combined regimes)
+- Monte Carlo simulation for risk assessment and scenario analysis
+- Benchmark comparison and relative performance metrics
+- Performance attribution analysis (Brinson, factor-based)
 """
 
+from imst_quant.utils.attribution import (
+    BrinsonAttribution,
+    FactorAttribution,
+    PerformanceAttributor,
+)
+from imst_quant.utils.benchmark import (
+    BenchmarkAnalyzer,
+    BenchmarkMetrics,
+)
 from imst_quant.utils.checkpoint import CheckpointManager
 from imst_quant.utils.drawdown_analysis import (
     DrawdownPeriod,
@@ -37,6 +49,10 @@ from imst_quant.utils.risk_metrics import (
     sortino_ratio,
     value_at_risk,
 )
+from imst_quant.utils.monte_carlo import (
+    MonteCarloSimulator,
+    SimulationResult,
+)
 from imst_quant.utils.technical_indicators import (
     adx,
     atr,
@@ -52,6 +68,16 @@ from imst_quant.utils.technical_indicators import (
 __all__ = [
     # Checkpoint
     "CheckpointManager",
+    # Monte Carlo
+    "MonteCarloSimulator",
+    "SimulationResult",
+    # Benchmark
+    "BenchmarkAnalyzer",
+    "BenchmarkMetrics",
+    # Attribution
+    "PerformanceAttributor",
+    "BrinsonAttribution",
+    "FactorAttribution",
     # Risk metrics
     "sharpe_ratio",
     "sortino_ratio",
