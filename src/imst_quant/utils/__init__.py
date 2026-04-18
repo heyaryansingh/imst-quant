@@ -9,6 +9,8 @@ This package provides utility functions for:
 - Monte Carlo simulation for risk assessment and scenario analysis
 - Benchmark comparison and relative performance metrics
 - Performance attribution analysis (Brinson, factor-based)
+- Trade journal for logging and analyzing trades
+- Liquidity analysis (Amihud, spread estimation, market impact)
 """
 
 from imst_quant.utils.attribution import (
@@ -64,6 +66,20 @@ from imst_quant.utils.technical_indicators import (
     vwap,
     williams_r,
 )
+from imst_quant.utils.trade_journal import (
+    JournalStatistics,
+    TradeEntry,
+    TradeJournal,
+)
+from imst_quant.utils.liquidity_analysis import (
+    LiquidityMetrics,
+    analyze_liquidity,
+    calculate_amihud_illiquidity,
+    calculate_roll_spread,
+    calculate_volume_profile,
+    estimate_market_impact,
+    find_illiquid_periods,
+)
 
 __all__ = [
     # Checkpoint
@@ -113,4 +129,16 @@ __all__ = [
     "regime_statistics",
     "regime_transition_matrix",
     "estimate_regime_persistence",
+    # Trade journal
+    "TradeJournal",
+    "TradeEntry",
+    "JournalStatistics",
+    # Liquidity analysis
+    "LiquidityMetrics",
+    "analyze_liquidity",
+    "calculate_amihud_illiquidity",
+    "calculate_roll_spread",
+    "calculate_volume_profile",
+    "estimate_market_impact",
+    "find_illiquid_periods",
 ]

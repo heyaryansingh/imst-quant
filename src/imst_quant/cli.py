@@ -341,6 +341,94 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- journal subcommand ---
+    journal_parser = subparsers.add_parser(
+        "journal", help="Trade journal for logging and analyzing trades"
+    )
+    journal_parser.add_argument(
+        "--action",
+        choices=["log", "close", "list", "stats", "report", "export"],
+        default="list",
+        help="Journal action (default: list)",
+    )
+    journal_parser.add_argument(
+        "--symbol", help="Trading symbol for new trade"
+    )
+    journal_parser.add_argument(
+        "--direction",
+        choices=["long", "short"],
+        help="Trade direction",
+    )
+    journal_parser.add_argument(
+        "--entry-price", type=float, help="Entry price"
+    )
+    journal_parser.add_argument(
+        "--quantity", type=float, help="Position size"
+    )
+    journal_parser.add_argument(
+        "--reason", help="Trade rationale"
+    )
+    journal_parser.add_argument(
+        "--trade-id", help="Trade ID for close action"
+    )
+    journal_parser.add_argument(
+        "--exit-price", type=float, help="Exit price for close action"
+    )
+    journal_parser.add_argument(
+        "--setup", help="Setup type (e.g., breakout, pullback)"
+    )
+    journal_parser.add_argument(
+        "--stop-loss", type=float, help="Stop loss price"
+    )
+    journal_parser.add_argument(
+        "--take-profit", type=float, help="Take profit price"
+    )
+    journal_parser.add_argument(
+        "--output", help="Output path for export"
+    )
+    journal_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
+    # --- seasonality subcommand ---
+    seasonality_parser = subparsers.add_parser(
+        "seasonality", help="Analyze seasonal patterns in returns"
+    )
+    seasonality_parser.add_argument(
+        "--features", help="Path to features parquet file (default: gold/features.parquet)"
+    )
+    seasonality_parser.add_argument(
+        "--type",
+        choices=["dow", "monthly", "tom", "holiday", "all"],
+        default="all",
+        help="Type of seasonality analysis (default: all)",
+    )
+    seasonality_parser.add_argument(
+        "--asset", help="Filter to specific asset (default: all)"
+    )
+    seasonality_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
+    # --- liquidity subcommand ---
+    liquidity_parser = subparsers.add_parser(
+        "liquidity", help="Analyze market liquidity and trading costs"
+    )
+    liquidity_parser.add_argument(
+        "--features", help="Path to features parquet file (default: gold/features.parquet)"
+    )
+    liquidity_parser.add_argument(
+        "--asset", help="Filter to specific asset (default: all)"
+    )
+    liquidity_parser.add_argument(
+        "--order-size",
+        type=float,
+        help="Order size for market impact estimation",
+    )
+    liquidity_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -1383,6 +1471,345 @@ def cmd_regime(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_journal(args: argparse.Namespace) -> int:
+    """Handle the journal subcommand for trade logging and analysis.
+
+    Provides trade journaling functionality including logging new trades,
+    closing positions, viewing statistics, and exporting data.
+
+    Args:
+        args: Parsed command-line arguments including action and trade details.
+
+    Returns:
+        Exit code (0 for success, 1 for errors).
+    """
+    import json as json_module
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.trade_journal import TradeEntry, TradeJournal
+
+    settings = Settings()
+    journal_path = Path(settings.data.gold_dir) / "trade_journal.json"
+    journal = TradeJournal(journal_path)
+
+    if args.action == "log":
+        if not args.symbol or not args.direction or not args.entry_price or not args.quantity:
+            print("Error: --symbol, --direction, --entry-price, and --quantity are required for logging")
+            return 1
+
+        entry = TradeEntry(
+            symbol=args.symbol.upper(),
+            direction=args.direction,
+            entry_price=args.entry_price,
+            quantity=args.quantity,
+            entry_reason=args.reason or "",
+            setup_type=args.setup or "",
+            stop_loss=args.stop_loss,
+            take_profit=args.take_profit,
+        )
+
+        # Calculate risk if stop loss provided
+        if args.stop_loss:
+            if args.direction == "long":
+                risk_per_share = args.entry_price - args.stop_loss
+            else:
+                risk_per_share = args.stop_loss - args.entry_price
+            entry.risk_amount = abs(risk_per_share * args.quantity)
+
+        trade_id = journal.log_entry(entry)
+        print(f"Trade logged: {trade_id}")
+        print(f"  Symbol:    {entry.symbol}")
+        print(f"  Direction: {entry.direction}")
+        print(f"  Entry:     ${entry.entry_price:.2f}")
+        print(f"  Quantity:  {entry.quantity}")
+        if entry.stop_loss:
+            print(f"  Stop Loss: ${entry.stop_loss:.2f}")
+        if entry.risk_amount:
+            print(f"  Risk:      ${entry.risk_amount:.2f}")
+
+    elif args.action == "close":
+        if not args.trade_id or not args.exit_price:
+            print("Error: --trade-id and --exit-price are required for closing")
+            return 1
+
+        trade = journal.close_trade(
+            args.trade_id,
+            exit_price=args.exit_price,
+            exit_reason=args.reason or "",
+        )
+
+        if trade is None:
+            print(f"Error: Trade {args.trade_id} not found")
+            return 1
+
+        print(f"Trade closed: {trade.trade_id}")
+        print(f"  Symbol:   {trade.symbol}")
+        print(f"  Entry:    ${trade.entry_price:.2f}")
+        print(f"  Exit:     ${trade.exit_price:.2f}")
+        print(f"  P&L:      ${trade.pnl:+.2f} ({trade.pnl_percent:+.2%})")
+        if trade.r_multiple is not None:
+            print(f"  R-Multiple: {trade.r_multiple:+.2f}R")
+
+    elif args.action == "list":
+        open_trades = journal.get_open_trades()
+        closed_trades = journal.get_closed_trades()
+
+        if args.json:
+            output = {
+                "open": [t.to_dict() for t in open_trades],
+                "closed": [t.to_dict() for t in closed_trades[-10:]],
+            }
+            print(json_module.dumps(output, indent=2, default=str))
+        else:
+            print(f"\n=== Open Positions ({len(open_trades)}) ===\n")
+            for t in open_trades:
+                print(f"  [{t.trade_id}] {t.symbol} {t.direction.upper()} @ ${t.entry_price:.2f} x {t.quantity}")
+
+            print(f"\n=== Recent Closed ({min(10, len(closed_trades))}) ===\n")
+            for t in closed_trades[-10:]:
+                pnl_str = f"${t.pnl:+.2f}" if t.pnl else "N/A"
+                print(f"  [{t.trade_id}] {t.symbol} {t.direction.upper()} P&L: {pnl_str}")
+
+    elif args.action == "stats":
+        stats = journal.get_statistics()
+
+        if args.json:
+            output = {
+                "total_trades": stats.total_trades,
+                "winning_trades": stats.winning_trades,
+                "losing_trades": stats.losing_trades,
+                "win_rate": stats.win_rate,
+                "total_pnl": stats.total_pnl,
+                "avg_pnl": stats.avg_pnl,
+                "profit_factor": stats.profit_factor,
+                "expectancy": stats.expectancy,
+                "avg_r_multiple": stats.avg_r_multiple,
+                "largest_win": stats.largest_win,
+                "largest_loss": stats.largest_loss,
+            }
+            print(json_module.dumps(output, indent=2))
+        else:
+            print(journal.generate_summary_report())
+
+    elif args.action == "report":
+        by_symbol = journal.get_performance_by_symbol()
+        by_setup = journal.get_performance_by_setup()
+
+        print("\n=== Performance by Symbol ===\n")
+        for symbol, stats in sorted(by_symbol.items()):
+            print(f"  {symbol:8} Win Rate: {stats.win_rate:.1%}, P&L: ${stats.total_pnl:+.2f}, Trades: {stats.total_trades}")
+
+        print("\n=== Performance by Setup ===\n")
+        for setup, stats in sorted(by_setup.items()):
+            print(f"  {setup:15} Win Rate: {stats.win_rate:.1%}, P&L: ${stats.total_pnl:+.2f}, Trades: {stats.total_trades}")
+
+    elif args.action == "export":
+        output_path = Path(args.output) if args.output else journal_path.with_suffix(".csv")
+        journal.export_to_csv(output_path)
+        print(f"Journal exported to: {output_path}")
+
+    return 0
+
+
+def cmd_seasonality(args: argparse.Namespace) -> int:
+    """Handle the seasonality subcommand for temporal pattern analysis.
+
+    Analyzes seasonal patterns in returns including day-of-week effects,
+    monthly seasonality, and turn-of-month patterns.
+
+    Args:
+        args: Parsed command-line arguments including analysis type.
+
+    Returns:
+        Exit code (0 for success, 1 for errors).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.seasonality import (
+        analyze_day_of_week_effect,
+        analyze_holiday_effect,
+        analyze_monthly_seasonality,
+        analyze_turn_of_month_effect,
+        generate_seasonality_report,
+    )
+
+    settings = Settings()
+    gold_dir = Path(settings.data.gold_dir)
+
+    features_path = Path(args.features) if args.features else gold_dir / "features.parquet"
+
+    if not features_path.exists():
+        print(f"Error: Features file not found at {features_path}")
+        return 1
+
+    df = pl.read_parquet(features_path)
+
+    if "return_1d" not in df.columns:
+        print("Error: Features file must contain 'return_1d' column")
+        return 1
+
+    # Filter by asset if specified
+    asset_col = "asset_id" if "asset_id" in df.columns else "ticker"
+    if args.asset and asset_col in df.columns:
+        df = df.filter(pl.col(asset_col) == args.asset)
+        if df.height == 0:
+            print(f"Error: No data found for asset {args.asset}")
+            return 1
+
+    date_col = "date" if "date" in df.columns else "timestamp"
+
+    if args.type == "all":
+        if args.json:
+            dow = analyze_day_of_week_effect(df, date_col)
+            monthly = analyze_monthly_seasonality(df, date_col)
+            tom = analyze_turn_of_month_effect(df, date_col)
+            holiday = analyze_holiday_effect(df, date_col)
+
+            output = {
+                "day_of_week": {
+                    "best": str(dow.best_period),
+                    "worst": str(dow.worst_period),
+                    "spread": dow.spread,
+                    "significant": dow.is_significant,
+                },
+                "monthly": {
+                    "best": str(monthly.best_period),
+                    "worst": str(monthly.worst_period),
+                    "spread": monthly.spread,
+                    "significant": monthly.is_significant,
+                },
+                "turn_of_month": tom,
+                "holiday": holiday,
+            }
+            print(json_module.dumps(output, indent=2))
+        else:
+            print(generate_seasonality_report(df, date_col))
+    else:
+        if args.type == "dow":
+            result = analyze_day_of_week_effect(df, date_col)
+            print(f"\n=== Day of Week Effect ===\n")
+            print(f"Best Day:    {result.best_period}")
+            print(f"Worst Day:   {result.worst_period}")
+            print(f"Spread:      {result.spread:.4%}")
+            print(f"Significant: {'Yes' if result.is_significant else 'No'}")
+        elif args.type == "monthly":
+            result = analyze_monthly_seasonality(df, date_col)
+            print(f"\n=== Monthly Seasonality ===\n")
+            print(f"Best Month:  {result.best_period}")
+            print(f"Worst Month: {result.worst_period}")
+            print(f"Spread:      {result.spread:.4%}")
+            print(f"Significant: {'Yes' if result.is_significant else 'No'}")
+        elif args.type == "tom":
+            result = analyze_turn_of_month_effect(df, date_col)
+            print(f"\n=== Turn of Month Effect ===\n")
+            for key, val in result.items():
+                if isinstance(val, float):
+                    print(f"{key:20}: {val:.4%}" if abs(val) < 1 else f"{key:20}: {val:.1f}")
+                else:
+                    print(f"{key:20}: {val}")
+        elif args.type == "holiday":
+            result = analyze_holiday_effect(df, date_col)
+            print(f"\n=== Holiday Effect ===\n")
+            for key, val in result.items():
+                if isinstance(val, float):
+                    print(f"{key:20}: {val:.4%}" if abs(val) < 1 else f"{key:20}: {val:.1f}")
+                else:
+                    print(f"{key:20}: {val}")
+
+    return 0
+
+
+def cmd_liquidity(args: argparse.Namespace) -> int:
+    """Handle the liquidity subcommand for market liquidity analysis.
+
+    Analyzes market liquidity including Amihud illiquidity, spread estimation,
+    volume profiles, and market impact estimation.
+
+    Args:
+        args: Parsed command-line arguments including order size for impact.
+
+    Returns:
+        Exit code (0 for success, 1 for errors).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.liquidity_analysis import (
+        analyze_liquidity,
+        estimate_market_impact,
+    )
+
+    settings = Settings()
+    gold_dir = Path(settings.data.gold_dir)
+
+    features_path = Path(args.features) if args.features else gold_dir / "features.parquet"
+
+    if not features_path.exists():
+        print(f"Error: Features file not found at {features_path}")
+        return 1
+
+    df = pl.read_parquet(features_path)
+
+    # Filter by asset if specified
+    asset_col = "asset_id" if "asset_id" in df.columns else "ticker"
+    if args.asset and asset_col in df.columns:
+        df = df.filter(pl.col(asset_col) == args.asset)
+        if df.height == 0:
+            print(f"Error: No data found for asset {args.asset}")
+            return 1
+
+    metrics = analyze_liquidity(df)
+
+    if args.json:
+        output = {
+            "avg_daily_volume": metrics.avg_daily_volume,
+            "avg_dollar_volume": metrics.avg_dollar_volume,
+            "volume_volatility": metrics.volume_volatility,
+            "amihud_illiquidity": metrics.amihud_illiquidity,
+            "avg_spread_estimate": metrics.avg_spread_estimate,
+            "volume_concentration": metrics.volume_concentration,
+            "liquidity_score": metrics.liquidity_score,
+            "days_analyzed": metrics.days_analyzed,
+        }
+
+        if args.order_size:
+            impact = estimate_market_impact(df, args.order_size)
+            output["market_impact"] = impact
+
+        print(json_module.dumps(output, indent=2))
+    else:
+        print(f"\n=== Liquidity Analysis ===\n")
+        if args.asset:
+            print(f"Asset:              {args.asset}")
+        print(f"Days Analyzed:      {metrics.days_analyzed}")
+        print()
+        print(f"Avg Daily Volume:   {metrics.avg_daily_volume:,.0f}")
+        print(f"Avg Dollar Volume:  ${metrics.avg_dollar_volume:,.0f}")
+        print(f"Volume Volatility:  {metrics.volume_volatility:.2%}")
+        print()
+        print(f"Amihud Illiquidity: {metrics.amihud_illiquidity:.2e}")
+        print(f"Est. Spread:        {metrics.avg_spread_estimate:.4%}")
+        print(f"Vol. Concentration: {metrics.volume_concentration:.1%}")
+        print()
+        print(f"Liquidity Score:    {metrics.liquidity_score:.1f}/100")
+
+        if args.order_size:
+            impact = estimate_market_impact(df, args.order_size)
+            print()
+            print(f"--- Market Impact (Order: {args.order_size:,.0f} shares) ---")
+            print(f"Participation Rate: {impact['participation_rate']:.2%}")
+            print(f"Expected Slippage:  {impact['expected_slippage_pct']:.4%} ({impact['expected_slippage_bps']:.1f} bps)")
+
+        print()
+
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -1417,6 +1844,9 @@ def main() -> int:
         "montecarlo": cmd_montecarlo,
         "benchmark": cmd_benchmark,
         "regime": cmd_regime,
+        "journal": cmd_journal,
+        "seasonality": cmd_seasonality,
+        "liquidity": cmd_liquidity,
     }
 
     handler = commands.get(args.command)
