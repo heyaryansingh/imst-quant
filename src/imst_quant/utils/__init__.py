@@ -11,6 +11,9 @@ This package provides utility functions for:
 - Performance attribution analysis (Brinson, factor-based)
 - Trade journal for logging and analyzing trades
 - Liquidity analysis (Amihud, spread estimation, market impact)
+- Order flow analysis (VPIN, volume imbalance, trade classification)
+- Cointegration analysis for pairs trading (Engle-Granger, Kalman filter)
+- Portfolio optimization (mean-variance, risk parity, Black-Litterman, HRP)
 """
 
 from imst_quant.utils.attribution import (
@@ -80,6 +83,41 @@ from imst_quant.utils.liquidity_analysis import (
     estimate_market_impact,
     find_illiquid_periods,
 )
+from imst_quant.utils.order_flow import (
+    OrderFlowMetrics,
+    analyze_order_flow,
+    calculate_vpin,
+    classify_trades,
+    order_flow_imbalance,
+    order_flow_momentum,
+    trade_flow_toxicity,
+    volume_clock_bars,
+    volume_imbalance,
+)
+from imst_quant.utils.cointegration import (
+    CointegrationResult,
+    PairsTradingSignal,
+    calculate_half_life,
+    calculate_hedge_ratio,
+    calculate_spread,
+    calculate_zscore,
+    find_cointegrated_pairs,
+    generate_pairs_signal,
+    kalman_hedge_ratio,
+    rolling_hedge_ratio,
+    test_cointegration,
+)
+from imst_quant.utils.portfolio_optimization import (
+    EfficientFrontier,
+    OptimizationObjective,
+    PortfolioStats,
+    black_litterman,
+    calculate_efficient_frontier,
+    hierarchical_risk_parity,
+    mean_variance_optimize,
+    minimum_tracking_error,
+    risk_parity_optimize,
+)
 
 __all__ = [
     # Checkpoint
@@ -141,4 +179,36 @@ __all__ = [
     "calculate_volume_profile",
     "estimate_market_impact",
     "find_illiquid_periods",
+    # Order flow analysis
+    "OrderFlowMetrics",
+    "analyze_order_flow",
+    "calculate_vpin",
+    "classify_trades",
+    "order_flow_imbalance",
+    "order_flow_momentum",
+    "trade_flow_toxicity",
+    "volume_clock_bars",
+    "volume_imbalance",
+    # Cointegration analysis
+    "CointegrationResult",
+    "PairsTradingSignal",
+    "calculate_half_life",
+    "calculate_hedge_ratio",
+    "calculate_spread",
+    "calculate_zscore",
+    "find_cointegrated_pairs",
+    "generate_pairs_signal",
+    "kalman_hedge_ratio",
+    "rolling_hedge_ratio",
+    "test_cointegration",
+    # Portfolio optimization
+    "EfficientFrontier",
+    "OptimizationObjective",
+    "PortfolioStats",
+    "black_litterman",
+    "calculate_efficient_frontier",
+    "hierarchical_risk_parity",
+    "mean_variance_optimize",
+    "minimum_tracking_error",
+    "risk_parity_optimize",
 ]

@@ -429,6 +429,97 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- pairs subcommand ---
+    pairs_parser = subparsers.add_parser(
+        "pairs", help="Cointegration analysis for pairs trading"
+    )
+    pairs_parser.add_argument(
+        "--features", help="Path to features parquet file (default: gold/features.parquet)"
+    )
+    pairs_parser.add_argument(
+        "--asset1", help="First asset for pair analysis"
+    )
+    pairs_parser.add_argument(
+        "--asset2", help="Second asset for pair analysis"
+    )
+    pairs_parser.add_argument(
+        "--scan", action="store_true", help="Scan all pairs for cointegration"
+    )
+    pairs_parser.add_argument(
+        "--significance",
+        type=float,
+        default=0.05,
+        help="Significance level for cointegration test (default: 0.05)",
+    )
+    pairs_parser.add_argument(
+        "--min-half-life",
+        type=float,
+        default=1.0,
+        help="Minimum half-life in periods (default: 1)",
+    )
+    pairs_parser.add_argument(
+        "--max-half-life",
+        type=float,
+        default=60.0,
+        help="Maximum half-life in periods (default: 60)",
+    )
+    pairs_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
+    # --- optimize subcommand ---
+    optimize_parser = subparsers.add_parser(
+        "optimize", help="Portfolio optimization (mean-variance, risk parity, HRP)"
+    )
+    optimize_parser.add_argument(
+        "--features", help="Path to features parquet file (default: gold/features.parquet)"
+    )
+    optimize_parser.add_argument(
+        "--method",
+        choices=["sharpe", "variance", "risk-parity", "hrp"],
+        default="sharpe",
+        help="Optimization method (default: sharpe)",
+    )
+    optimize_parser.add_argument(
+        "--target-return",
+        type=float,
+        help="Target annual return (for target-return optimization)",
+    )
+    optimize_parser.add_argument(
+        "--target-volatility",
+        type=float,
+        help="Target annual volatility (for target-risk optimization)",
+    )
+    optimize_parser.add_argument(
+        "--allow-short", action="store_true", help="Allow short positions"
+    )
+    optimize_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
+    # --- orderflow subcommand ---
+    orderflow_parser = subparsers.add_parser(
+        "orderflow", help="Order flow analysis (VPIN, volume imbalance, toxicity)"
+    )
+    orderflow_parser.add_argument(
+        "--data", help="Path to tick/trade data file", required=True
+    )
+    orderflow_parser.add_argument(
+        "--window",
+        type=int,
+        default=50,
+        help="Rolling window for calculations (default: 50)",
+    )
+    orderflow_parser.add_argument(
+        "--vpin-bucket-size",
+        type=float,
+        default=10000.0,
+        help="Volume per bucket for VPIN (default: 10000)",
+    )
+    orderflow_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -1810,6 +1901,275 @@ def cmd_liquidity(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pairs(args: argparse.Namespace) -> int:
+    """Handle pairs trading cointegration analysis.
+
+    Tests for cointegration between asset pairs and generates trading signals.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success).
+    """
+    import json as json_module
+    import pandas as pd
+    from imst_quant.utils.cointegration import (
+        test_cointegration,
+        find_cointegrated_pairs,
+        generate_pairs_signal,
+    )
+
+    features_path = args.features or "gold/features.parquet"
+
+    try:
+        df = pd.read_parquet(features_path)
+    except FileNotFoundError:
+        print(f"Error: Features file not found: {features_path}")
+        return 1
+
+    if args.scan:
+        # Scan all pairs for cointegration
+        print("Scanning for cointegrated pairs...")
+
+        # Extract returns columns
+        return_cols = [c for c in df.columns if "return" in c.lower()]
+        if not return_cols:
+            return_cols = df.select_dtypes(include=[float]).columns.tolist()[:10]
+
+        prices = df[return_cols].cumsum() + 100  # Convert returns to prices
+
+        pairs = find_cointegrated_pairs(
+            prices,
+            significance=args.significance,
+            min_half_life=args.min_half_life,
+            max_half_life=args.max_half_life,
+        )
+
+        if args.json:
+            print(json_module.dumps(pairs, indent=2))
+        else:
+            print(f"\n=== Cointegrated Pairs Found: {len(pairs)} ===\n")
+            for pair in pairs[:20]:  # Show top 20
+                print(f"{pair['asset_y']:12} / {pair['asset_x']:12}  "
+                      f"p={pair['p_value']:.4f}  "
+                      f"β={pair['hedge_ratio']:.3f}  "
+                      f"HL={pair['half_life']:.1f}d")
+
+    elif args.asset1 and args.asset2:
+        # Test specific pair
+        if args.asset1 not in df.columns or args.asset2 not in df.columns:
+            print(f"Error: Assets not found in data")
+            return 1
+
+        y = df[args.asset1]
+        x = df[args.asset2]
+
+        result = test_cointegration(y, x, args.significance)
+
+        if args.json:
+            output = {
+                "asset_y": args.asset1,
+                "asset_x": args.asset2,
+                "is_cointegrated": result.is_cointegrated,
+                "adf_statistic": result.adf_statistic,
+                "p_value": result.p_value,
+                "hedge_ratio": result.hedge_ratio,
+                "half_life": result.half_life,
+                "spread_mean": result.spread_mean,
+                "spread_std": result.spread_std,
+            }
+            print(json_module.dumps(output, indent=2))
+        else:
+            print(f"\n=== Cointegration Test: {args.asset1} / {args.asset2} ===\n")
+            print(f"Cointegrated:   {'Yes' if result.is_cointegrated else 'No'}")
+            print(f"ADF Statistic:  {result.adf_statistic:.4f}")
+            print(f"P-Value:        {result.p_value:.4f}")
+            print(f"Hedge Ratio:    {result.hedge_ratio:.4f}")
+            print(f"Half-Life:      {result.half_life:.1f} periods")
+            print(f"Spread Mean:    {result.spread_mean:.4f}")
+            print(f"Spread Std:     {result.spread_std:.4f}")
+
+            if result.is_cointegrated:
+                signal = generate_pairs_signal(y, x, result.hedge_ratio)
+                print(f"\n--- Current Signal ---")
+                print(f"Z-Score:        {signal.zscore:.2f}")
+                positions = {-1: "Short Pair", 0: "Neutral", 1: "Long Pair"}
+                print(f"Position:       {positions[signal.position]}")
+
+    else:
+        print("Error: Specify --scan or both --asset1 and --asset2")
+        return 1
+
+    return 0
+
+
+def cmd_optimize(args: argparse.Namespace) -> int:
+    """Handle portfolio optimization.
+
+    Optimizes portfolio weights using various methods.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success).
+    """
+    import json as json_module
+    import pandas as pd
+    from imst_quant.utils.portfolio_optimization import (
+        mean_variance_optimize,
+        risk_parity_optimize,
+        hierarchical_risk_parity,
+        OptimizationObjective,
+    )
+
+    features_path = args.features or "gold/features.parquet"
+
+    try:
+        df = pd.read_parquet(features_path)
+    except FileNotFoundError:
+        print(f"Error: Features file not found: {features_path}")
+        return 1
+
+    # Extract returns columns
+    return_cols = [c for c in df.columns if "return" in c.lower()]
+    if not return_cols:
+        return_cols = df.select_dtypes(include=[float]).columns.tolist()[:10]
+
+    returns = df[return_cols]
+
+    # Select optimization method
+    if args.method == "sharpe":
+        result = mean_variance_optimize(
+            returns,
+            OptimizationObjective.MAX_SHARPE,
+            allow_short=args.allow_short,
+        )
+    elif args.method == "variance":
+        result = mean_variance_optimize(
+            returns,
+            OptimizationObjective.MIN_VARIANCE,
+            allow_short=args.allow_short,
+        )
+    elif args.method == "risk-parity":
+        result = risk_parity_optimize(returns)
+    elif args.method == "hrp":
+        result = hierarchical_risk_parity(returns)
+    else:
+        print(f"Error: Unknown method: {args.method}")
+        return 1
+
+    if args.json:
+        output = {
+            "method": args.method,
+            "weights": result.weights,
+            "expected_return": result.expected_return,
+            "volatility": result.volatility,
+            "sharpe_ratio": result.sharpe_ratio,
+            "diversification_ratio": result.diversification_ratio,
+            "effective_n": result.effective_n,
+        }
+        print(json_module.dumps(output, indent=2))
+    else:
+        print(f"\n=== Portfolio Optimization ({args.method}) ===\n")
+        print(f"Expected Return:      {result.expected_return:.2%}")
+        print(f"Volatility:           {result.volatility:.2%}")
+        print(f"Sharpe Ratio:         {result.sharpe_ratio:.3f}")
+        print(f"Diversification:      {result.diversification_ratio:.2f}")
+        print(f"Effective N:          {result.effective_n:.1f}")
+        print()
+        print("--- Optimal Weights ---")
+        for asset, weight in sorted(result.weights.items(), key=lambda x: -x[1]):
+            if abs(weight) > 0.001:
+                print(f"  {asset:20} {weight:7.2%}")
+
+    return 0
+
+
+def cmd_orderflow(args: argparse.Namespace) -> int:
+    """Handle order flow analysis.
+
+    Analyzes trade flow for informed trading indicators.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success).
+    """
+    import json as json_module
+    import pandas as pd
+    from imst_quant.utils.order_flow import analyze_order_flow
+
+    try:
+        df = pd.read_parquet(args.data)
+    except FileNotFoundError:
+        try:
+            df = pd.read_csv(args.data)
+        except FileNotFoundError:
+            print(f"Error: Data file not found: {args.data}")
+            return 1
+
+    # Find price and volume columns
+    price_col = None
+    volume_col = None
+    for col in df.columns:
+        col_lower = col.lower()
+        if price_col is None and "price" in col_lower:
+            price_col = col
+        if volume_col is None and "volume" in col_lower:
+            volume_col = col
+
+    if price_col is None or volume_col is None:
+        print("Error: Could not find price and volume columns")
+        return 1
+
+    prices = df[price_col]
+    volumes = df[volume_col]
+
+    metrics = analyze_order_flow(
+        prices,
+        volumes,
+        window=args.window,
+        vpin_bucket_size=args.vpin_bucket_size,
+    )
+
+    if args.json:
+        output = {
+            "volume_imbalance": metrics.volume_imbalance,
+            "ofi": metrics.ofi,
+            "vpin": metrics.vpin,
+            "trade_flow_toxicity": metrics.trade_flow_toxicity,
+            "buy_volume_pct": metrics.buy_volume_pct,
+            "sell_volume_pct": metrics.sell_volume_pct,
+            "large_trade_ratio": metrics.large_trade_ratio,
+            "aggressor_imbalance": metrics.aggressor_imbalance,
+        }
+        print(json_module.dumps(output, indent=2))
+    else:
+        print(f"\n=== Order Flow Analysis ===\n")
+        print(f"Volume Imbalance:    {metrics.volume_imbalance:+.3f}")
+        print(f"Order Flow Imbal:    {metrics.ofi:+.3f}")
+        print(f"VPIN:                {metrics.vpin:.3f}")
+        print(f"Trade Flow Toxicity: {metrics.trade_flow_toxicity:.2f}")
+        print()
+        print(f"Buy Volume %:        {metrics.buy_volume_pct:.1%}")
+        print(f"Sell Volume %:       {metrics.sell_volume_pct:.1%}")
+        print(f"Large Trade Ratio:   {metrics.large_trade_ratio:.1%}")
+        print(f"Aggressor Imbalance: {metrics.aggressor_imbalance:+.3f}")
+        print()
+
+        # Interpretation
+        if metrics.vpin > 0.4:
+            print("⚠️  High VPIN: Elevated informed trading probability")
+        if abs(metrics.volume_imbalance) > 0.5:
+            side = "buying" if metrics.volume_imbalance > 0 else "selling"
+            print(f"⚠️  Strong {side} pressure detected")
+
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -1847,6 +2207,9 @@ def main() -> int:
         "journal": cmd_journal,
         "seasonality": cmd_seasonality,
         "liquidity": cmd_liquidity,
+        "pairs": cmd_pairs,
+        "optimize": cmd_optimize,
+        "orderflow": cmd_orderflow,
     }
 
     handler = commands.get(args.command)
