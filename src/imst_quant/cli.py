@@ -520,6 +520,87 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- factors subcommand ---
+    factors_parser = subparsers.add_parser(
+        "factors", help="Factor exposure and risk decomposition analysis"
+    )
+    factors_parser.add_argument(
+        "--features", help="Path to features parquet file (default: gold/features.parquet)"
+    )
+    factors_parser.add_argument(
+        "--type",
+        choices=["exposures", "decomposition", "attribution", "rolling"],
+        default="exposures",
+        help="Type of factor analysis (default: exposures)",
+    )
+    factors_parser.add_argument(
+        "--asset", help="Filter to specific asset (default: all)"
+    )
+    factors_parser.add_argument(
+        "--window",
+        type=int,
+        default=60,
+        help="Rolling window for rolling analysis (default: 60)",
+    )
+    factors_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
+    # --- execution subcommand ---
+    execution_parser = subparsers.add_parser(
+        "execution", help="Execution quality and slippage analysis"
+    )
+    execution_parser.add_argument(
+        "--trades", help="Path to trade log file (JSON or CSV)"
+    )
+    execution_parser.add_argument(
+        "--estimate", action="store_true", help="Estimate slippage for hypothetical order"
+    )
+    execution_parser.add_argument(
+        "--order-size", type=float, help="Order size for estimation"
+    )
+    execution_parser.add_argument(
+        "--avg-volume", type=float, help="Average daily volume for estimation"
+    )
+    execution_parser.add_argument(
+        "--spread-bps", type=float, default=5.0, help="Spread in basis points (default: 5)"
+    )
+    execution_parser.add_argument(
+        "--volatility", type=float, default=0.02, help="Daily volatility (default: 0.02)"
+    )
+    execution_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
+    # --- streaks subcommand ---
+    streaks_parser = subparsers.add_parser(
+        "streaks", help="Win/loss streak analysis and statistics"
+    )
+    streaks_parser.add_argument(
+        "--features", help="Path to features parquet file (default: gold/features.parquet)"
+    )
+    streaks_parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.0,
+        help="Return threshold for win classification (default: 0)",
+    )
+    streaks_parser.add_argument(
+        "--asset", help="Filter to specific asset (default: all)"
+    )
+    streaks_parser.add_argument(
+        "--ruin-analysis", action="store_true", help="Include gambler's ruin analysis"
+    )
+    streaks_parser.add_argument(
+        "--bankroll",
+        type=float,
+        default=100.0,
+        help="Bankroll units for ruin analysis (default: 100)",
+    )
+    streaks_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -2170,6 +2251,376 @@ def cmd_orderflow(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_factors(args: argparse.Namespace) -> int:
+    """Handle the factors subcommand for factor exposure analysis.
+
+    Analyzes portfolio factor exposures using regression-based methods,
+    including Fama-French style factor models.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.factor_analysis import (
+        decompose_risk,
+        estimate_factor_exposures,
+        factor_attribution,
+        generate_synthetic_factors,
+        rolling_factor_exposures,
+    )
+
+    settings = Settings()
+    gold_dir = Path(settings.data.gold_dir)
+
+    features_path = Path(args.features) if args.features else gold_dir / "features.parquet"
+
+    if not features_path.exists():
+        print(f"Error: Features file not found at {features_path}")
+        return 1
+
+    df = pl.read_parquet(features_path)
+
+    if "return_1d" not in df.columns:
+        print("Error: Features file must contain 'return_1d' column")
+        return 1
+
+    # Filter by asset if specified
+    asset_col = "asset_id" if "asset_id" in df.columns else "ticker"
+    if args.asset and asset_col in df.columns:
+        df = df.filter(pl.col(asset_col) == args.asset)
+        if df.height == 0:
+            print(f"Error: No data found for asset {args.asset}")
+            return 1
+
+    returns = df["return_1d"].drop_nulls()
+
+    # Generate synthetic factors if market data available
+    # In production, would load real factor data
+    print("Generating synthetic factor returns for analysis...")
+    factor_returns = generate_synthetic_factors(returns, seed=42)
+
+    if args.type == "exposures":
+        exposures = estimate_factor_exposures(returns, factor_returns)
+
+        if args.json:
+            output = {
+                "betas": exposures.betas,
+                "alpha": exposures.alpha,
+                "r_squared": exposures.r_squared,
+                "adj_r_squared": exposures.adj_r_squared,
+                "residual_vol": exposures.residual_vol,
+                "t_stats": exposures.t_stats,
+                "p_values": exposures.p_values,
+                "factor_contributions": exposures.factor_contributions,
+            }
+            print(json_module.dumps(output, indent=2))
+        else:
+            print(f"\n=== Factor Exposures ===\n")
+            print(f"Alpha (ann.):       {exposures.alpha:+.2%}")
+            print(f"R-squared:          {exposures.r_squared:.2%}")
+            print(f"Adj. R-squared:     {exposures.adj_r_squared:.2%}")
+            print(f"Idiosyncratic Vol:  {exposures.residual_vol:.2%}")
+            print()
+            print("--- Factor Betas ---")
+            for factor, beta in exposures.betas.items():
+                t_stat = exposures.t_stats.get(factor, 0)
+                p_val = exposures.p_values.get(factor, 1)
+                sig = "***" if p_val < 0.01 else "**" if p_val < 0.05 else "*" if p_val < 0.1 else ""
+                print(f"  {factor:8} {beta:+.3f}  (t={t_stat:.2f}) {sig}")
+            print()
+
+    elif args.type == "decomposition":
+        decomp = decompose_risk(returns, factor_returns)
+
+        if args.json:
+            output = {
+                "total_risk": decomp.total_risk,
+                "systematic_risk": decomp.systematic_risk,
+                "idiosyncratic_risk": decomp.idiosyncratic_risk,
+                "factor_risks": decomp.factor_risks,
+                "diversification_benefit": decomp.diversification_benefit,
+            }
+            print(json_module.dumps(output, indent=2))
+        else:
+            print(f"\n=== Risk Decomposition ===\n")
+            print(f"Total Risk:         {decomp.total_risk:.2%}")
+            print(f"Systematic Risk:    {decomp.systematic_risk:.2%}")
+            print(f"Idiosyncratic Risk: {decomp.idiosyncratic_risk:.2%}")
+            print()
+            print("--- Factor Risk Contributions ---")
+            for factor, risk in decomp.factor_risks.items():
+                pct = risk / decomp.total_risk * 100 if decomp.total_risk > 0 else 0
+                print(f"  {factor:8} {risk:.2%}  ({pct:.1f}% of total)")
+            print()
+
+    elif args.type == "attribution":
+        attrib = factor_attribution(returns, factor_returns)
+
+        if args.json:
+            print(json_module.dumps(attrib, indent=2))
+        else:
+            print(f"\n=== Return Attribution ===\n")
+            print(f"Total Return (ann.): {attrib['total']:.2%}")
+            print()
+            print("--- Sources ---")
+            print(f"  Alpha:            {attrib['alpha']:+.2%}")
+            for key in ["MKT", "SMB", "HML", "MOM"]:
+                if key in attrib:
+                    print(f"  {key:16} {attrib[key]:+.2%}")
+            print(f"  Residual:         {attrib['residual']:+.2%}")
+            print()
+
+    elif args.type == "rolling":
+        rolling = rolling_factor_exposures(returns, factor_returns, window=args.window)
+
+        # Show last few values
+        if args.json:
+            output = rolling.tail(20).to_dicts()
+            print(json_module.dumps(output, indent=2))
+        else:
+            print(f"\n=== Rolling Factor Exposures (last 10) ===\n")
+            print(f"Window: {args.window} periods\n")
+            tail = rolling.tail(10)
+            for i, row in enumerate(tail.iter_rows(named=True)):
+                betas_str = ", ".join(
+                    f"{k}={v:.2f}" for k, v in row.items()
+                    if k not in ["alpha", "r_squared"] and v is not None
+                )
+                print(f"  [{i+1}] α={row['alpha']:.2%}  {betas_str}")
+            print()
+
+    return 0
+
+
+def cmd_execution(args: argparse.Namespace) -> int:
+    """Handle the execution subcommand for trade execution analysis.
+
+    Analyzes execution quality including slippage and market impact.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success).
+    """
+    import json as json_module
+
+    from imst_quant.utils.execution_analytics import (
+        estimate_expected_slippage,
+        generate_execution_report,
+    )
+
+    if args.estimate:
+        # Estimate slippage for hypothetical order
+        if not args.order_size or not args.avg_volume:
+            print("Error: --order-size and --avg-volume required for estimation")
+            return 1
+
+        estimate = estimate_expected_slippage(
+            order_size=args.order_size,
+            avg_daily_volume=args.avg_volume,
+            avg_spread_bps=args.spread_bps,
+            volatility=args.volatility,
+        )
+
+        if args.json:
+            print(json_module.dumps(estimate, indent=2))
+        else:
+            print(f"\n=== Execution Cost Estimate ===\n")
+            print(f"Order Size:         {args.order_size:,.0f} shares")
+            print(f"Avg Daily Volume:   {args.avg_volume:,.0f}")
+            print(f"Participation Rate: {estimate['participation_rate']:.2%}")
+            print()
+            print("--- Cost Breakdown ---")
+            print(f"  Spread Cost:      {estimate['spread_cost_bps']:.1f} bps")
+            print(f"  Market Impact:    {estimate['market_impact_bps']:.1f} bps")
+            print(f"  Timing Cost:      {estimate['timing_cost_bps']:.1f} bps")
+            print(f"  -------------------")
+            print(f"  Total Expected:   {estimate['total_expected_cost_bps']:.1f} bps")
+            print()
+            print(f"Recommendation: {estimate['recommendation']}")
+            print()
+
+    elif args.trades:
+        # Analyze trade log
+        import pandas as pd
+        from imst_quant.utils.execution_analytics import (
+            ExecutedTrade,
+            OrderSide,
+            OrderType,
+            analyze_execution_quality,
+        )
+
+        try:
+            if args.trades.endswith(".json"):
+                trades_data = pd.read_json(args.trades)
+            else:
+                trades_data = pd.read_csv(args.trades)
+        except FileNotFoundError:
+            print(f"Error: Trade file not found: {args.trades}")
+            return 1
+
+        # Convert to ExecutedTrade objects
+        trades = []
+        for _, row in trades_data.iterrows():
+            trade = ExecutedTrade(
+                trade_id=str(row.get("trade_id", "")),
+                symbol=str(row.get("symbol", "")),
+                side=OrderSide.BUY if str(row.get("side", "")).lower() == "buy" else OrderSide.SELL,
+                order_type=OrderType.MARKET,
+                decision_price=float(row.get("decision_price", row.get("order_price", 0))),
+                order_price=float(row.get("order_price", 0)),
+                fill_price=float(row.get("fill_price", 0)),
+                quantity_ordered=float(row.get("quantity_ordered", row.get("quantity", 0))),
+                quantity_filled=float(row.get("quantity_filled", row.get("quantity", 0))),
+                commission=float(row.get("commission", 0)),
+                venue=str(row.get("venue", "unknown")),
+            )
+            trades.append(trade)
+
+        if not trades:
+            print("Error: No trades found in file")
+            return 1
+
+        metrics = analyze_execution_quality(trades)
+
+        if args.json:
+            output = {
+                "total_trades": metrics.total_trades,
+                "fill_rate": metrics.fill_rate,
+                "avg_slippage_bps": metrics.avg_slippage_bps,
+                "total_slippage_cost": metrics.total_slippage_cost,
+                "implementation_shortfall": metrics.implementation_shortfall,
+                "commission_cost": metrics.commission_cost,
+                "slippage_by_venue": metrics.slippage_by_venue,
+                "slippage_by_size_bucket": metrics.slippage_by_size_bucket,
+            }
+            print(json_module.dumps(output, indent=2))
+        else:
+            print(generate_execution_report(trades, "Trade Log Analysis"))
+
+    else:
+        print("Error: Specify --trades <file> or --estimate with order parameters")
+        return 1
+
+    return 0
+
+
+def cmd_streaks(args: argparse.Namespace) -> int:
+    """Handle the streaks subcommand for win/loss streak analysis.
+
+    Analyzes consecutive winning and losing periods in returns.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success).
+    """
+    import json as json_module
+
+    import numpy as np
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.streak_analysis import (
+        analyze_streaks,
+        calculate_gambler_ruin_prob,
+        generate_streak_report,
+    )
+
+    settings = Settings()
+    gold_dir = Path(settings.data.gold_dir)
+
+    features_path = Path(args.features) if args.features else gold_dir / "features.parquet"
+
+    if not features_path.exists():
+        print(f"Error: Features file not found at {features_path}")
+        return 1
+
+    df = pl.read_parquet(features_path)
+
+    if "return_1d" not in df.columns:
+        print("Error: Features file must contain 'return_1d' column")
+        return 1
+
+    # Filter by asset if specified
+    asset_col = "asset_id" if "asset_id" in df.columns else "ticker"
+    if args.asset and asset_col in df.columns:
+        df = df.filter(pl.col(asset_col) == args.asset)
+        if df.height == 0:
+            print(f"Error: No data found for asset {args.asset}")
+            return 1
+
+    returns = df["return_1d"].drop_nulls()
+
+    stats = analyze_streaks(returns, threshold=args.threshold)
+
+    if args.json:
+        output = {
+            "total_periods": stats.total_periods,
+            "win_rate": stats.win_rate,
+            "max_win_streak": stats.max_win_streak,
+            "max_loss_streak": stats.max_loss_streak,
+            "avg_win_streak": stats.avg_win_streak,
+            "avg_loss_streak": stats.avg_loss_streak,
+            "current_streak": stats.current_streak,
+            "expected_max_streak": stats.expected_max_streak,
+            "runs_test_p": stats.streak_runs_test_p,
+            "max_favorable_excursion": stats.max_favorable_excursion,
+            "max_adverse_excursion": stats.max_adverse_excursion,
+        }
+
+        if args.ruin_analysis:
+            # Calculate average win/loss for ruin analysis
+            wins = returns.filter(returns > args.threshold)
+            losses = returns.filter(returns <= args.threshold)
+            avg_win = float(wins.mean()) if wins.len() > 0 else 0.01
+            avg_loss = abs(float(losses.mean())) if losses.len() > 0 else 0.01
+
+            ruin = calculate_gambler_ruin_prob(
+                win_rate=stats.win_rate,
+                avg_win=avg_win,
+                avg_loss=avg_loss,
+                bankroll_units=args.bankroll,
+            )
+            output["ruin_analysis"] = ruin
+
+        print(json_module.dumps(output, indent=2))
+    else:
+        print(generate_streak_report(stats))
+
+        if args.ruin_analysis:
+            wins = returns.filter(returns > args.threshold)
+            losses = returns.filter(returns <= args.threshold)
+            avg_win = float(wins.mean()) if wins.len() > 0 else 0.01
+            avg_loss = abs(float(losses.mean())) if losses.len() > 0 else 0.01
+
+            ruin = calculate_gambler_ruin_prob(
+                win_rate=stats.win_rate,
+                avg_win=avg_win,
+                avg_loss=avg_loss,
+                bankroll_units=args.bankroll,
+            )
+
+            print("--- Gambler's Ruin Analysis ---")
+            print(f"Risk/Reward Ratio:  {ruin['risk_reward']:.2f}")
+            print(f"Edge per Trade:     {ruin['edge']:+.4f}")
+            print(f"Kelly Fraction:     {ruin['kelly_fraction']:.1%}")
+            print(f"Ruin Probability:   {ruin['ruin_probability']:.1%}")
+            print(f"Survival Prob:      {ruin['survival_probability']:.1%}")
+            print()
+
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -2210,6 +2661,9 @@ def main() -> int:
         "pairs": cmd_pairs,
         "optimize": cmd_optimize,
         "orderflow": cmd_orderflow,
+        "factors": cmd_factors,
+        "execution": cmd_execution,
+        "streaks": cmd_streaks,
     }
 
     handler = commands.get(args.command)

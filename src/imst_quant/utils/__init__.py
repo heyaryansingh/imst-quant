@@ -14,6 +14,9 @@ This package provides utility functions for:
 - Order flow analysis (VPIN, volume imbalance, trade classification)
 - Cointegration analysis for pairs trading (Engle-Granger, Kalman filter)
 - Portfolio optimization (mean-variance, risk parity, Black-Litterman, HRP)
+- Factor analysis (Fama-French exposures, beta decomposition, risk attribution)
+- Execution analytics (slippage tracking, fill analysis, implementation shortfall)
+- Streak analysis (win/loss streaks, recovery times, gambler's ruin)
 """
 
 from imst_quant.utils.attribution import (
@@ -118,6 +121,34 @@ from imst_quant.utils.portfolio_optimization import (
     minimum_tracking_error,
     risk_parity_optimize,
 )
+from imst_quant.utils.factor_analysis import (
+    FactorExposures,
+    RiskDecomposition,
+    decompose_risk,
+    estimate_factor_exposures,
+    factor_attribution,
+    generate_synthetic_factors,
+    rolling_factor_exposures,
+)
+from imst_quant.utils.execution_analytics import (
+    ExecutedTrade,
+    ExecutionMetrics,
+    OrderSide,
+    OrderType,
+    analyze_execution_quality,
+    calculate_slippage,
+    estimate_expected_slippage,
+    generate_execution_report,
+    vwap_deviation,
+)
+from imst_quant.utils.streak_analysis import (
+    StreakPeriod,
+    StreakStatistics,
+    analyze_streaks,
+    calculate_gambler_ruin_prob,
+    generate_streak_report,
+    identify_streaks,
+)
 
 __all__ = [
     # Checkpoint
@@ -211,4 +242,29 @@ __all__ = [
     "mean_variance_optimize",
     "minimum_tracking_error",
     "risk_parity_optimize",
+    # Factor analysis
+    "FactorExposures",
+    "RiskDecomposition",
+    "decompose_risk",
+    "estimate_factor_exposures",
+    "factor_attribution",
+    "generate_synthetic_factors",
+    "rolling_factor_exposures",
+    # Execution analytics
+    "ExecutedTrade",
+    "ExecutionMetrics",
+    "OrderSide",
+    "OrderType",
+    "analyze_execution_quality",
+    "calculate_slippage",
+    "estimate_expected_slippage",
+    "generate_execution_report",
+    "vwap_deviation",
+    # Streak analysis
+    "StreakPeriod",
+    "StreakStatistics",
+    "analyze_streaks",
+    "calculate_gambler_ruin_prob",
+    "generate_streak_report",
+    "identify_streaks",
 ]
