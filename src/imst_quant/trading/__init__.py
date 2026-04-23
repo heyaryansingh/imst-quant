@@ -24,7 +24,18 @@ from .position_sizing import (
     PositionSizer,
     SizingMethod,
 )
-from .signals import prediction_to_signal
+from .signals import (
+    bollinger_band_signal,
+    breakout_signal,
+    composite_signal,
+    crossover_signal,
+    macd_signal,
+    mean_reversion_signal,
+    momentum_signal,
+    prediction_to_signal,
+    signal_strength,
+    volatility_adjusted_signal,
+)
 from .walk_forward import (
     WalkForwardConfig,
     WalkForwardValidator,
@@ -37,6 +48,15 @@ __all__ = [
     "DynamicThresholdPolicy",
     # Signals
     "prediction_to_signal",
+    "momentum_signal",
+    "mean_reversion_signal",
+    "crossover_signal",
+    "composite_signal",
+    "breakout_signal",
+    "volatility_adjusted_signal",
+    "macd_signal",
+    "signal_strength",
+    "bollinger_band_signal",
     # Backtesting
     "run_backtest",
     # Position sizing

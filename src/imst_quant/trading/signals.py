@@ -275,3 +275,353 @@ def composite_signal(
         .otherwise(0)
         .alias("composite_signal")
     )
+
+
+def breakout_signal(
+    df: pl.DataFrame,
+    price_col: str = "close",
+    high_col: str = "high",
+    low_col: str = "low",
+    lookback: int = 20,
+    breakout_threshold: float = 0.0,
+) -> pl.DataFrame:
+    """Generate breakout trading signals based on Donchian channel.
+
+    Identifies breakouts above the highest high or below the lowest low
+    over the lookback period. Useful for trend-following strategies.
+
+    Args:
+        df: DataFrame containing price data with high/low columns.
+        price_col: Name of the closing price column. Defaults to "close".
+        high_col: Name of the high price column. Defaults to "high".
+        low_col: Name of the low price column. Defaults to "low".
+        lookback: Number of periods for channel calculation. Defaults to 20.
+        breakout_threshold: Minimum % above/below channel for signal.
+            Defaults to 0 (any breakout generates signal).
+
+    Returns:
+        DataFrame with new columns:
+        - channel_high: Highest high over lookback period
+        - channel_low: Lowest low over lookback period
+        - breakout_signal: 1 (upside breakout), -1 (downside breakout), 0 (no breakout)
+
+    Example:
+        >>> df = pl.DataFrame({
+        ...     "close": [100, 102, 105, 103, 110],
+        ...     "high": [101, 103, 106, 104, 112],
+        ...     "low": [99, 101, 104, 102, 108],
+        ... })
+        >>> result = breakout_signal(df, lookback=3)
+    """
+    # Calculate Donchian channel
+    df = df.with_columns([
+        pl.col(high_col).rolling_max(window_size=lookback).shift(1).alias("channel_high"),
+        pl.col(low_col).rolling_min(window_size=lookback).shift(1).alias("channel_low"),
+    ])
+
+    # Calculate breakout percentage
+    df = df.with_columns([
+        ((pl.col(price_col) - pl.col("channel_high")) / pl.col("channel_high")).alias("_up_break"),
+        ((pl.col("channel_low") - pl.col(price_col)) / pl.col("channel_low")).alias("_down_break"),
+    ])
+
+    # Generate signals
+    df = df.with_columns(
+        pl.when(pl.col("_up_break") > breakout_threshold)
+        .then(1)
+        .when(pl.col("_down_break") > breakout_threshold)
+        .then(-1)
+        .otherwise(0)
+        .alias("breakout_signal")
+    )
+
+    return df.drop(["_up_break", "_down_break"])
+
+
+def volatility_adjusted_signal(
+    df: pl.DataFrame,
+    signal_col: str = "signal",
+    price_col: str = "close",
+    vol_lookback: int = 20,
+    vol_threshold: float = 1.5,
+) -> pl.DataFrame:
+    """Adjust trading signals based on volatility regime.
+
+    Filters or modifies signals based on current volatility relative to
+    historical average. Can reduce position sizes in high-volatility
+    environments or filter signals entirely.
+
+    Args:
+        df: DataFrame containing signal and price data.
+        signal_col: Name of the input signal column. Defaults to "signal".
+        price_col: Name of the price column for volatility calculation.
+        vol_lookback: Period for volatility calculation. Defaults to 20.
+        vol_threshold: Multiple of average vol above which to filter signals.
+            Defaults to 1.5 (signals filtered when vol > 1.5x average).
+
+    Returns:
+        DataFrame with new columns:
+        - realized_vol: Rolling realized volatility
+        - vol_ratio: Current vol / average vol
+        - vol_adjusted_signal: Signal adjusted for volatility regime
+
+    Example:
+        >>> df = pl.DataFrame({
+        ...     "close": [100, 102, 98, 105, 95, 108, 92],
+        ...     "signal": [1, 1, 0, 1, -1, 1, -1],
+        ... })
+        >>> result = volatility_adjusted_signal(df, vol_lookback=3)
+    """
+    # Calculate returns
+    df = df.with_columns(
+        (pl.col(price_col) / pl.col(price_col).shift(1) - 1).alias("_ret")
+    )
+
+    # Calculate rolling volatility (annualized)
+    df = df.with_columns(
+        (pl.col("_ret").rolling_std(window_size=vol_lookback) * (252 ** 0.5))
+        .alias("realized_vol")
+    )
+
+    # Calculate average volatility over longer period
+    df = df.with_columns(
+        pl.col("realized_vol").rolling_mean(window_size=vol_lookback * 3)
+        .alias("_avg_vol")
+    )
+
+    # Calculate volatility ratio
+    df = df.with_columns(
+        (pl.col("realized_vol") / pl.col("_avg_vol")).alias("vol_ratio")
+    )
+
+    # Adjust signal based on volatility regime
+    df = df.with_columns(
+        pl.when(pl.col("vol_ratio") > vol_threshold)
+        .then(0)  # Filter signals in high-vol regime
+        .otherwise(pl.col(signal_col))
+        .alias("vol_adjusted_signal")
+    )
+
+    return df.drop(["_ret", "_avg_vol"])
+
+
+def macd_signal(
+    df: pl.DataFrame,
+    price_col: str = "close",
+    fast_period: int = 12,
+    slow_period: int = 26,
+    signal_period: int = 9,
+) -> pl.DataFrame:
+    """Generate MACD crossover trading signals.
+
+    Calculates MACD (Moving Average Convergence Divergence) and generates
+    signals based on MACD line crossing the signal line.
+
+    Args:
+        df: DataFrame containing price data.
+        price_col: Name of the price column. Defaults to "close".
+        fast_period: Period for fast EMA. Defaults to 12.
+        slow_period: Period for slow EMA. Defaults to 26.
+        signal_period: Period for signal line EMA. Defaults to 9.
+
+    Returns:
+        DataFrame with new columns:
+        - macd_line: MACD line (fast EMA - slow EMA)
+        - macd_signal_line: Signal line (EMA of MACD line)
+        - macd_histogram: Difference between MACD and signal line
+        - macd_signal: 1 (bullish crossover), -1 (bearish crossover), 0 (no cross)
+
+    Example:
+        >>> df = pl.DataFrame({"close": list(range(50, 100))})
+        >>> result = macd_signal(df, fast_period=5, slow_period=10, signal_period=3)
+    """
+    # Calculate EMAs using Polars' ewm_mean
+    df = df.with_columns([
+        pl.col(price_col).ewm_mean(span=fast_period).alias("_ema_fast"),
+        pl.col(price_col).ewm_mean(span=slow_period).alias("_ema_slow"),
+    ])
+
+    # Calculate MACD line
+    df = df.with_columns(
+        (pl.col("_ema_fast") - pl.col("_ema_slow")).alias("macd_line")
+    )
+
+    # Calculate signal line
+    df = df.with_columns(
+        pl.col("macd_line").ewm_mean(span=signal_period).alias("macd_signal_line")
+    )
+
+    # Calculate histogram
+    df = df.with_columns(
+        (pl.col("macd_line") - pl.col("macd_signal_line")).alias("macd_histogram")
+    )
+
+    # Generate crossover signals
+    df = df.with_columns(
+        pl.col("macd_histogram").shift(1).alias("_prev_hist")
+    )
+
+    df = df.with_columns(
+        pl.when((pl.col("macd_histogram") > 0) & (pl.col("_prev_hist") <= 0))
+        .then(1)  # Bullish crossover
+        .when((pl.col("macd_histogram") < 0) & (pl.col("_prev_hist") >= 0))
+        .then(-1)  # Bearish crossover
+        .otherwise(0)
+        .alias("macd_signal")
+    )
+
+    return df.drop(["_ema_fast", "_ema_slow", "_prev_hist"])
+
+
+def signal_strength(
+    df: pl.DataFrame,
+    signal_col: str = "signal",
+    price_col: str = "close",
+    volume_col: Optional[str] = None,
+    lookback: int = 20,
+) -> pl.DataFrame:
+    """Calculate confidence/strength indicator for trading signals.
+
+    Combines multiple factors (trend strength, volume confirmation, momentum)
+    to provide a confidence score for the current signal.
+
+    Args:
+        df: DataFrame containing signal and price data.
+        signal_col: Name of the signal column. Defaults to "signal".
+        price_col: Name of the price column. Defaults to "close".
+        volume_col: Name of the volume column. If None, volume factor excluded.
+        lookback: Period for strength calculations. Defaults to 20.
+
+    Returns:
+        DataFrame with new columns:
+        - trend_strength: Absolute value of price momentum (0-100)
+        - volume_strength: Volume relative to average (0-100), if volume provided
+        - signal_strength: Combined confidence score (0-100)
+        - strong_signal: Signal only when strength > 50
+
+    Example:
+        >>> df = pl.DataFrame({
+        ...     "close": [100, 102, 105, 108, 112, 110],
+        ...     "signal": [0, 1, 1, 1, 1, -1],
+        ...     "volume": [1000, 1200, 1500, 1100, 1800, 900],
+        ... })
+        >>> result = signal_strength(df, volume_col="volume", lookback=3)
+    """
+    # Calculate trend strength based on directional movement
+    df = df.with_columns(
+        ((pl.col(price_col) / pl.col(price_col).shift(lookback)) - 1).alias("_momentum")
+    )
+
+    # Normalize momentum to 0-100 scale using rolling percentile
+    df = df.with_columns(
+        (pl.col("_momentum").abs().rolling_quantile(quantile=0.5, window_size=lookback * 5))
+        .alias("_median_mom")
+    )
+
+    df = df.with_columns(
+        pl.when(pl.col("_median_mom") > 0)
+        .then((pl.col("_momentum").abs() / (pl.col("_median_mom") * 2) * 100).clip(0, 100))
+        .otherwise(50.0)
+        .alias("trend_strength")
+    )
+
+    factors = [pl.col("trend_strength")]
+
+    # Add volume strength if volume column provided
+    if volume_col and volume_col in df.columns:
+        df = df.with_columns(
+            pl.col(volume_col).rolling_mean(window_size=lookback).alias("_avg_vol")
+        )
+
+        df = df.with_columns(
+            pl.when(pl.col("_avg_vol") > 0)
+            .then((pl.col(volume_col) / pl.col("_avg_vol") * 50).clip(0, 100))
+            .otherwise(50.0)
+            .alias("volume_strength")
+        )
+        factors.append(pl.col("volume_strength"))
+        df = df.drop("_avg_vol")
+
+    # Calculate combined signal strength as average of factors
+    combined = sum(factors) / len(factors)
+    df = df.with_columns(combined.alias("signal_strength"))
+
+    # Generate strong signal (only when strength > 50)
+    df = df.with_columns(
+        pl.when(pl.col("signal_strength") > 50)
+        .then(pl.col(signal_col))
+        .otherwise(0)
+        .alias("strong_signal")
+    )
+
+    return df.drop(["_momentum", "_median_mom"])
+
+
+def bollinger_band_signal(
+    df: pl.DataFrame,
+    price_col: str = "close",
+    lookback: int = 20,
+    num_std: float = 2.0,
+) -> pl.DataFrame:
+    """Generate trading signals based on Bollinger Band position.
+
+    Signals are generated when price touches or crosses the bands:
+    - Buy when price touches lower band (oversold)
+    - Sell when price touches upper band (overbought)
+
+    Args:
+        df: DataFrame containing price data.
+        price_col: Name of the price column. Defaults to "close".
+        lookback: Period for moving average and std calculation. Defaults to 20.
+        num_std: Number of standard deviations for bands. Defaults to 2.0.
+
+    Returns:
+        DataFrame with new columns:
+        - bb_middle: Middle band (SMA)
+        - bb_upper: Upper band
+        - bb_lower: Lower band
+        - bb_percent: Price position within bands (0-100)
+        - bb_signal: 1 (at lower band), -1 (at upper band), 0 (middle)
+
+    Example:
+        >>> df = pl.DataFrame({"close": [100, 102, 98, 95, 105, 110, 108]})
+        >>> result = bollinger_band_signal(df, lookback=3)
+    """
+    # Calculate middle band (SMA)
+    df = df.with_columns(
+        pl.col(price_col).rolling_mean(window_size=lookback).alias("bb_middle")
+    )
+
+    # Calculate rolling standard deviation
+    df = df.with_columns(
+        pl.col(price_col).rolling_std(window_size=lookback).alias("_std")
+    )
+
+    # Calculate upper and lower bands
+    df = df.with_columns([
+        (pl.col("bb_middle") + num_std * pl.col("_std")).alias("bb_upper"),
+        (pl.col("bb_middle") - num_std * pl.col("_std")).alias("bb_lower"),
+    ])
+
+    # Calculate percent B (position within bands)
+    df = df.with_columns(
+        pl.when((pl.col("bb_upper") - pl.col("bb_lower")) > 0)
+        .then(
+            ((pl.col(price_col) - pl.col("bb_lower")) /
+             (pl.col("bb_upper") - pl.col("bb_lower")) * 100)
+        )
+        .otherwise(50.0)
+        .alias("bb_percent")
+    )
+
+    # Generate signals
+    df = df.with_columns(
+        pl.when(pl.col("bb_percent") < 5)  # Near lower band
+        .then(1)
+        .when(pl.col("bb_percent") > 95)  # Near upper band
+        .then(-1)
+        .otherwise(0)
+        .alias("bb_signal")
+    )
+
+    return df.drop("_std")
