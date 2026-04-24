@@ -601,6 +601,102 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- volatility subcommand ---
+    volatility_parser = subparsers.add_parser(
+        "volatility", help="Volatility forecasting and analysis (EWMA, GARCH)"
+    )
+    volatility_parser.add_argument(
+        "--features", help="Path to features parquet file (default: gold/features.parquet)"
+    )
+    volatility_parser.add_argument(
+        "--method",
+        choices=["ewma", "garch", "historical", "compare"],
+        default="ewma",
+        help="Volatility estimation method (default: ewma)",
+    )
+    volatility_parser.add_argument(
+        "--span",
+        type=int,
+        default=20,
+        help="EWMA span / Historical window (default: 20)",
+    )
+    volatility_parser.add_argument(
+        "--asset", help="Filter to specific asset (default: all)"
+    )
+    volatility_parser.add_argument(
+        "--forecast", action="store_true", help="Generate volatility forecasts"
+    )
+    volatility_parser.add_argument(
+        "--cone", action="store_true", help="Generate volatility cone analysis"
+    )
+    volatility_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
+    # --- distribution subcommand ---
+    distribution_parser = subparsers.add_parser(
+        "distribution", help="Returns distribution analysis (skewness, kurtosis, normality)"
+    )
+    distribution_parser.add_argument(
+        "--features", help="Path to features parquet file (default: gold/features.parquet)"
+    )
+    distribution_parser.add_argument(
+        "--asset", help="Filter to specific asset (default: all)"
+    )
+    distribution_parser.add_argument(
+        "--normality", action="store_true", help="Run comprehensive normality tests"
+    )
+    distribution_parser.add_argument(
+        "--tails", action="store_true", help="Analyze tail risk"
+    )
+    distribution_parser.add_argument(
+        "--rolling-window",
+        type=int,
+        default=63,
+        help="Window for rolling statistics (default: 63)",
+    )
+    distribution_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
+    # --- signal subcommand ---
+    signal_parser = subparsers.add_parser(
+        "signal", help="Signal backtesting and validation"
+    )
+    signal_parser.add_argument(
+        "--features", help="Path to features parquet file (default: gold/features.parquet)"
+    )
+    signal_parser.add_argument(
+        "--signal-col", help="Column name containing the signal", required=True
+    )
+    signal_parser.add_argument(
+        "--returns-col", default="returns", help="Column name containing returns (default: returns)"
+    )
+    signal_parser.add_argument(
+        "--transaction-cost",
+        type=float,
+        default=0.001,
+        help="Transaction cost as decimal (default: 0.001)",
+    )
+    signal_parser.add_argument(
+        "--decay", action="store_true", help="Run signal decay analysis"
+    )
+    signal_parser.add_argument(
+        "--max-lag",
+        type=int,
+        default=20,
+        help="Maximum lag for decay analysis (default: 20)",
+    )
+    signal_parser.add_argument(
+        "--bootstrap",
+        type=int,
+        default=0,
+        help="Number of bootstrap simulations (0 to skip)",
+    )
+    signal_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -2621,6 +2717,343 @@ def cmd_streaks(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_volatility(args: argparse.Namespace) -> int:
+    """Handle the volatility subcommand for volatility forecasting.
+
+    Analyzes volatility using EWMA, GARCH, or historical methods with
+    optional forecasting and cone analysis.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.volatility_forecast import (
+        compare_volatility_methods,
+        ewma_volatility,
+        garch_volatility,
+        historical_volatility,
+        volatility_cone,
+        volatility_forecast,
+    )
+
+    settings = Settings()
+    features_path = args.features or str(Path(settings.data.gold_dir) / "features.parquet")
+
+    if not Path(features_path).exists():
+        print(f"Error: Features file not found: {features_path}")
+        return 1
+
+    df = pl.read_parquet(features_path)
+
+    # Filter by asset if specified
+    if args.asset and "asset" in df.columns:
+        df = df.filter(pl.col("asset") == args.asset)
+
+    if "returns" not in df.columns:
+        print("Error: 'returns' column not found in features file")
+        return 1
+
+    returns = df["returns"].drop_nulls().to_pandas()
+
+    output = {}
+
+    if args.method == "compare":
+        comparison = compare_volatility_methods(returns)
+        current = comparison.iloc[-1].to_dict()
+        output["volatility_comparison"] = {k: float(v) for k, v in current.items()}
+    else:
+        if args.method == "ewma":
+            vol = ewma_volatility(returns, span=args.span)
+        elif args.method == "garch":
+            vol = garch_volatility(returns)
+        else:
+            vol = historical_volatility(returns, window=args.span)
+
+        output["current_volatility"] = float(vol.iloc[-1])
+        output["method"] = args.method
+
+    if args.forecast:
+        forecast = volatility_forecast(returns, method=args.method if args.method != "compare" else "ewma")
+        output["forecast"] = {
+            "current": forecast.current,
+            "forecast_1d": forecast.forecast_1d,
+            "forecast_5d": forecast.forecast_5d,
+            "forecast_21d": forecast.forecast_21d,
+            "half_life": forecast.half_life,
+        }
+
+    if args.cone:
+        cone = volatility_cone(returns)
+        output["volatility_cone"] = {
+            "windows": cone.windows,
+            "current": cone.current,
+            "min": cone.min_vol,
+            "max": cone.max_vol,
+            "median": cone.median_vol,
+        }
+
+    if args.json:
+        print(json_module.dumps(output, indent=2))
+    else:
+        print("=== Volatility Analysis ===")
+        print(f"Method: {args.method}")
+        if "current_volatility" in output:
+            print(f"Current Volatility: {output['current_volatility']:.2%}")
+        if "volatility_comparison" in output:
+            print("\nVolatility Comparison (current):")
+            for method, vol in output["volatility_comparison"].items():
+                print(f"  {method}: {vol:.2%}")
+        if "forecast" in output:
+            f = output["forecast"]
+            print(f"\nVolatility Forecast:")
+            print(f"  1-day:  {f['forecast_1d']:.2%}")
+            print(f"  5-day:  {f['forecast_5d']:.2%}")
+            print(f"  21-day: {f['forecast_21d']:.2%}")
+            if f.get("half_life"):
+                print(f"  Half-life: {f['half_life']:.1f} days")
+        if "volatility_cone" in output:
+            print("\nVolatility Cone:")
+            c = output["volatility_cone"]
+            for i, w in enumerate(c["windows"]):
+                print(f"  {w:3d}d: Current={c['current'][i]:.2%} | Range=[{c['min'][i]:.2%}, {c['max'][i]:.2%}] | Median={c['median'][i]:.2%}")
+
+    return 0
+
+
+def cmd_distribution(args: argparse.Namespace) -> int:
+    """Handle the distribution subcommand for returns distribution analysis.
+
+    Analyzes return distribution statistics, normality, and tail risk.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.returns_distribution import (
+        analyze_distribution,
+        analyze_tails,
+        distribution_summary,
+        test_normality,
+    )
+
+    settings = Settings()
+    features_path = args.features or str(Path(settings.data.gold_dir) / "features.parquet")
+
+    if not Path(features_path).exists():
+        print(f"Error: Features file not found: {features_path}")
+        return 1
+
+    df = pl.read_parquet(features_path)
+
+    if args.asset and "asset" in df.columns:
+        df = df.filter(pl.col("asset") == args.asset)
+
+    if "returns" not in df.columns:
+        print("Error: 'returns' column not found in features file")
+        return 1
+
+    returns = df["returns"].drop_nulls().to_pandas()
+
+    output = {}
+
+    # Basic distribution analysis
+    stats = analyze_distribution(returns)
+    output["distribution"] = {
+        "mean": stats.mean,
+        "std": stats.std,
+        "skewness": stats.skewness,
+        "kurtosis": stats.kurtosis,
+        "min": stats.min_return,
+        "max": stats.max_return,
+        "n_observations": stats.n_observations,
+    }
+
+    if args.normality:
+        normality = test_normality(returns)
+        output["normality_tests"] = {
+            "jarque_bera": {"statistic": normality.jarque_bera[0], "pvalue": normality.jarque_bera[1]},
+            "kolmogorov_smirnov": {"statistic": normality.kolmogorov_smirnov[0], "pvalue": normality.kolmogorov_smirnov[1]},
+            "is_normal_5pct": normality.is_normal_5pct,
+            "is_normal_1pct": normality.is_normal_1pct,
+        }
+        if normality.shapiro_wilk:
+            output["normality_tests"]["shapiro_wilk"] = {"statistic": normality.shapiro_wilk[0], "pvalue": normality.shapiro_wilk[1]}
+
+    if args.tails:
+        tails = analyze_tails(returns)
+        output["tail_analysis"] = {
+            "var_95": tails.var_95,
+            "var_99": tails.var_99,
+            "expected_shortfall_95": tails.expected_shortfall_95,
+            "expected_shortfall_99": tails.expected_shortfall_99,
+            "left_tail_ratio": tails.left_tail_ratio,
+            "right_tail_ratio": tails.right_tail_ratio,
+            "gain_loss_ratio": tails.gain_loss_ratio,
+        }
+
+    if args.json:
+        print(json_module.dumps(output, indent=2))
+    else:
+        print("=== Returns Distribution Analysis ===")
+        d = output["distribution"]
+        print(f"Observations: {d['n_observations']}")
+        print(f"Mean Return:  {d['mean']:.6f}")
+        print(f"Std Dev:      {d['std']:.6f}")
+        print(f"Skewness:     {d['skewness']:.4f}")
+        print(f"Kurtosis:     {d['kurtosis']:.4f} (excess)")
+        print(f"Range:        [{d['min']:.4f}, {d['max']:.4f}]")
+
+        if "normality_tests" in output:
+            print("\n--- Normality Tests ---")
+            n = output["normality_tests"]
+            print(f"Jarque-Bera:      stat={n['jarque_bera']['statistic']:.2f}, p={n['jarque_bera']['pvalue']:.4f}")
+            print(f"K-S Test:         stat={n['kolmogorov_smirnov']['statistic']:.4f}, p={n['kolmogorov_smirnov']['pvalue']:.4f}")
+            print(f"Normal at 5%:     {'Yes' if n['is_normal_5pct'] else 'No'}")
+
+        if "tail_analysis" in output:
+            print("\n--- Tail Risk Analysis ---")
+            t = output["tail_analysis"]
+            print(f"VaR 95%:          {t['var_95']:.4f}")
+            print(f"VaR 99%:          {t['var_99']:.4f}")
+            print(f"ES 95% (CVaR):    {t['expected_shortfall_95']:.4f}")
+            print(f"ES 99% (CVaR):    {t['expected_shortfall_99']:.4f}")
+            print(f"Gain/Loss Ratio:  {t['gain_loss_ratio']:.2f}")
+
+    return 0
+
+
+def cmd_signal(args: argparse.Namespace) -> int:
+    """Handle the signal subcommand for signal backtesting.
+
+    Backtests trading signals with performance metrics and optional
+    decay analysis.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.signal_backtest import (
+        backtest_signal,
+        bootstrap_signal,
+        signal_decay_analysis,
+        signal_statistics,
+        turnover_analysis,
+    )
+
+    settings = Settings()
+    features_path = args.features or str(Path(settings.data.gold_dir) / "features.parquet")
+
+    if not Path(features_path).exists():
+        print(f"Error: Features file not found: {features_path}")
+        return 1
+
+    df = pl.read_parquet(features_path)
+
+    if args.signal_col not in df.columns:
+        print(f"Error: Signal column '{args.signal_col}' not found")
+        return 1
+
+    if args.returns_col not in df.columns:
+        print(f"Error: Returns column '{args.returns_col}' not found")
+        return 1
+
+    signal = df[args.signal_col].drop_nulls().to_pandas()
+    returns = df[args.returns_col].drop_nulls().to_pandas()
+
+    # Align series
+    common_idx = signal.index.intersection(returns.index)
+    signal = signal.loc[common_idx]
+    returns = returns.loc[common_idx]
+
+    output = {}
+
+    # Main backtest
+    result = backtest_signal(signal, returns, transaction_cost=args.transaction_cost)
+    output["backtest"] = {
+        "total_return": result.total_return,
+        "annualized_return": result.annualized_return,
+        "volatility": result.volatility,
+        "sharpe_ratio": result.sharpe_ratio,
+        "max_drawdown": result.max_drawdown,
+        "hit_rate": result.hit_rate,
+        "profit_factor": result.profit_factor,
+        "n_trades": result.n_trades,
+        "avg_holding_period": result.avg_holding_period,
+    }
+
+    # Signal statistics
+    stats = signal_statistics(signal)
+    output["signal_stats"] = stats
+
+    # Turnover analysis
+    turnover = turnover_analysis(signal)
+    output["turnover"] = turnover
+
+    if args.decay:
+        decay = signal_decay_analysis(signal, returns, max_lag=args.max_lag)
+        output["decay_analysis"] = decay.to_dict(orient="records")
+
+    if args.bootstrap > 0:
+        bootstrap = bootstrap_signal(signal, returns, n_simulations=args.bootstrap)
+        output["bootstrap"] = bootstrap
+
+    if args.json:
+        print(json_module.dumps(output, indent=2, default=float))
+    else:
+        print("=== Signal Backtest Results ===")
+        b = output["backtest"]
+        print(f"Total Return:       {b['total_return']:.2%}")
+        print(f"Annualized Return:  {b['annualized_return']:.2%}")
+        print(f"Volatility:         {b['volatility']:.2%}")
+        print(f"Sharpe Ratio:       {b['sharpe_ratio']:.2f}")
+        print(f"Max Drawdown:       {b['max_drawdown']:.2%}")
+        print(f"Hit Rate:           {b['hit_rate']:.2%}")
+        print(f"Profit Factor:      {b['profit_factor']:.2f}")
+        print(f"Number of Trades:   {b['n_trades']}")
+        print(f"Avg Holding Period: {b['avg_holding_period']:.1f} days")
+
+        print("\n--- Signal Statistics ---")
+        s = output["signal_stats"]
+        print(f"Long %:  {s['pct_long']:.1%}")
+        print(f"Short %: {s['pct_short']:.1%}")
+        print(f"Flat %:  {s['pct_flat']:.1%}")
+
+        if "decay_analysis" in output:
+            print("\n--- Signal Decay (IC by lag) ---")
+            for row in output["decay_analysis"][:10]:
+                ic = row.get("information_coefficient", 0) or 0
+                print(f"  Lag {row['lag']:2d}: IC={ic:.4f}")
+
+        if "bootstrap" in output:
+            print("\n--- Bootstrap Confidence Intervals ---")
+            bs = output["bootstrap"]
+            print(f"Sharpe 95% CI: [{bs['sharpe_ci_lower']:.2f}, {bs['sharpe_ci_upper']:.2f}]")
+            print(f"Hit Rate 95% CI: [{bs['hit_rate_ci_lower']:.2%}, {bs['hit_rate_ci_upper']:.2%}]")
+
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -2664,6 +3097,9 @@ def main() -> int:
         "factors": cmd_factors,
         "execution": cmd_execution,
         "streaks": cmd_streaks,
+        "volatility": cmd_volatility,
+        "distribution": cmd_distribution,
+        "signal": cmd_signal,
     }
 
     handler = commands.get(args.command)

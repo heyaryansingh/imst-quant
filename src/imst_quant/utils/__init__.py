@@ -17,6 +17,9 @@ This package provides utility functions for:
 - Factor analysis (Fama-French exposures, beta decomposition, risk attribution)
 - Execution analytics (slippage tracking, fill analysis, implementation shortfall)
 - Streak analysis (win/loss streaks, recovery times, gambler's ruin)
+- Volatility forecasting (EWMA, GARCH, historical, volatility cone)
+- Returns distribution analysis (skewness, kurtosis, normality tests)
+- Signal backtesting (quick signal validation, performance metrics)
 """
 
 from imst_quant.utils.attribution import (
@@ -149,6 +152,47 @@ from imst_quant.utils.streak_analysis import (
     generate_streak_report,
     identify_streaks,
 )
+from imst_quant.utils.volatility_forecast import (
+    VolatilityCone,
+    VolatilityForecast,
+    compare_volatility_methods,
+    ewma_volatility,
+    garman_klass_volatility,
+    garch_volatility,
+    historical_volatility,
+    parkinson_volatility,
+    simple_garch_volatility,
+    volatility_cone,
+    volatility_forecast,
+    volatility_term_structure,
+)
+from imst_quant.utils.returns_distribution import (
+    DistributionStats,
+    NormalityTests,
+    TailAnalysis,
+    analyze_distribution,
+    analyze_tails,
+    calculate_moments,
+    compare_periods,
+    distribution_summary,
+    quantile_comparison,
+    rolling_kurtosis,
+    rolling_skewness,
+    test_normality,
+)
+from imst_quant.utils.signal_backtest import (
+    SignalBacktestResult,
+    SignalComparison,
+    backtest_signal,
+    bootstrap_signal,
+    combine_signals,
+    compare_signals,
+    generate_random_signal,
+    rolling_signal_performance,
+    signal_decay_analysis,
+    signal_statistics,
+    turnover_analysis,
+)
 
 __all__ = [
     # Checkpoint
@@ -267,4 +311,42 @@ __all__ = [
     "calculate_gambler_ruin_prob",
     "generate_streak_report",
     "identify_streaks",
+    # Volatility forecasting
+    "VolatilityCone",
+    "VolatilityForecast",
+    "compare_volatility_methods",
+    "ewma_volatility",
+    "garman_klass_volatility",
+    "garch_volatility",
+    "historical_volatility",
+    "parkinson_volatility",
+    "simple_garch_volatility",
+    "volatility_cone",
+    "volatility_forecast",
+    "volatility_term_structure",
+    # Returns distribution analysis
+    "DistributionStats",
+    "NormalityTests",
+    "TailAnalysis",
+    "analyze_distribution",
+    "analyze_tails",
+    "calculate_moments",
+    "compare_periods",
+    "distribution_summary",
+    "quantile_comparison",
+    "rolling_kurtosis",
+    "rolling_skewness",
+    "test_normality",
+    # Signal backtesting
+    "SignalBacktestResult",
+    "SignalComparison",
+    "backtest_signal",
+    "bootstrap_signal",
+    "combine_signals",
+    "compare_signals",
+    "generate_random_signal",
+    "rolling_signal_performance",
+    "signal_decay_analysis",
+    "signal_statistics",
+    "turnover_analysis",
 ]
