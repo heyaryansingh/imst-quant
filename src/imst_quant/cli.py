@@ -697,6 +697,45 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- health subcommand ---
+    health_parser = subparsers.add_parser(
+        "health", help="Check data pipeline health status"
+    )
+    health_parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=7,
+        help="Days to check for recent data (default: 7)",
+    )
+    health_parser.add_argument(
+        "--layer",
+        choices=["raw", "bronze", "silver", "sentiment", "influence", "gold"],
+        help="Check specific layer only",
+    )
+    health_parser.add_argument(
+        "--max-age-hours",
+        type=int,
+        default=24,
+        help="Max acceptable data age in hours (default: 24)",
+    )
+    health_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
+    # --- summary subcommand ---
+    summary_parser = subparsers.add_parser(
+        "summary", help="Quick portfolio metrics summary"
+    )
+    summary_parser.add_argument(
+        "--features", help="Path to features parquet file (default: gold/features.parquet)"
+    )
+    summary_parser.add_argument(
+        "--top-n", type=int, default=10, help="Number of top holdings to show (default: 10)"
+    )
+    summary_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -3054,6 +3093,152 @@ def cmd_signal(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_health(args: argparse.Namespace) -> int:
+    """Check data pipeline health status.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success)
+    """
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.health_check import (
+        check_pipeline_health,
+        check_data_freshness,
+    )
+    import json as json_module
+
+    settings = Settings()
+    data_dir = Path(settings.data.raw_dir).parent  # Get data/ directory
+
+    if args.layer:
+        # Check specific layer freshness
+        freshness = check_data_freshness(
+            data_dir,
+            layer=args.layer,
+            max_age_hours=args.max_age_hours
+        )
+
+        if args.json:
+            print(json_module.dumps(freshness, indent=2))
+        else:
+            print(f"=== {args.layer.upper()} Layer Freshness ===")
+            if freshness["fresh"]:
+                print("✓ Data is fresh")
+            else:
+                print(f"✗ Data is stale: {freshness.get('reason', 'unknown')}")
+
+            if freshness.get("latest_file"):
+                print(f"Latest file: {freshness['latest_file']}")
+                print(f"Age: {freshness['age_hours']:.1f} hours")
+    else:
+        # Check full pipeline health
+        health = check_pipeline_health(data_dir, lookback_days=args.lookback_days)
+
+        if args.json:
+            print(json_module.dumps(health, indent=2))
+        else:
+            status_icon = "✓" if health["status"] == "healthy" else "⚠"
+            print(f"=== Pipeline Health: {status_icon} {health['status'].upper()} ===")
+            print(f"Checked at: {health['checked_at']}")
+            print(f"\nData Layers (last {args.lookback_days} days):")
+
+            for layer, info in health["layers"].items():
+                if info["exists"]:
+                    recent = "✓" if info["has_recent_data"] else "✗"
+                    print(f"  {recent} {layer:12s}: {info['file_count']} files ({info['total_size_mb']} MB)")
+                else:
+                    print(f"  ✗ {layer:12s}: NOT FOUND")
+
+            if health["alerts"]:
+                print("\n⚠ Alerts:")
+                for alert in health["alerts"]:
+                    print(f"  - {alert}")
+
+            if health["recommendations"]:
+                print("\n💡 Recommendations:")
+                for rec in health["recommendations"]:
+                    print(f"  - {rec}")
+
+    return 0
+
+
+def cmd_summary(args: argparse.Namespace) -> int:
+    """Show quick portfolio metrics summary.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success)
+    """
+    from imst_quant.config.settings import Settings
+    import pandas as pd
+    import json as json_module
+
+    settings = Settings()
+
+    if args.features:
+        features_path = Path(args.features)
+    else:
+        features_path = Path(settings.data.gold_dir) / "features.parquet"
+
+    if not features_path.exists():
+        print(f"Error: Features file not found: {features_path}")
+        return 1
+
+    df = pd.read_parquet(features_path)
+
+    # Calculate summary metrics
+    summary = {
+        "total_records": len(df),
+        "date_range": {
+            "start": str(df.index.min()) if hasattr(df.index, 'min') else "N/A",
+            "end": str(df.index.max()) if hasattr(df.index, 'max') else "N/A",
+        },
+    }
+
+    # Add returns statistics if available
+    if "returns" in df.columns:
+        returns = df["returns"].dropna()
+        summary["returns_stats"] = {
+            "mean_daily": float(returns.mean()),
+            "std_daily": float(returns.std()),
+            "sharpe_approx": float(returns.mean() / returns.std() * (252 ** 0.5)) if returns.std() > 0 else 0,
+            "min": float(returns.min()),
+            "max": float(returns.max()),
+        }
+
+    # Add ticker-level stats if available
+    if "ticker" in df.columns:
+        ticker_counts = df["ticker"].value_counts().head(args.top_n)
+        summary["top_tickers"] = ticker_counts.to_dict()
+
+    if args.json:
+        print(json_module.dumps(summary, indent=2, default=str))
+    else:
+        print("=== Portfolio Summary ===")
+        print(f"Total Records: {summary['total_records']:,}")
+        print(f"Date Range: {summary['date_range']['start']} to {summary['date_range']['end']}")
+
+        if "returns_stats" in summary:
+            rs = summary["returns_stats"]
+            print("\n--- Returns Statistics ---")
+            print(f"Mean Daily Return: {rs['mean_daily']:.4%}")
+            print(f"Daily Volatility:  {rs['std_daily']:.4%}")
+            print(f"Sharpe Ratio:      {rs['sharpe_approx']:.2f}")
+            print(f"Min Return:        {rs['min']:.4%}")
+            print(f"Max Return:        {rs['max']:.4%}")
+
+        if "top_tickers" in summary:
+            print(f"\n--- Top {args.top_n} Tickers by Record Count ---")
+            for ticker, count in summary["top_tickers"].items():
+                print(f"  {ticker:6s}: {count:,} records")
+
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -3100,6 +3285,8 @@ def main() -> int:
         "volatility": cmd_volatility,
         "distribution": cmd_distribution,
         "signal": cmd_signal,
+        "health": cmd_health,
+        "summary": cmd_summary,
     }
 
     handler = commands.get(args.command)
