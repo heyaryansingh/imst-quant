@@ -736,6 +736,32 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- sentiment-screen subcommand ---
+    sentiment_screen_parser = subparsers.add_parser(
+        "sentiment-screen", help="Screen assets by sentiment strength and quality"
+    )
+    sentiment_screen_parser.add_argument(
+        "--sentiment", help="Path to sentiment aggregates parquet (default: sentiment/sentiment_aggregates.parquet)"
+    )
+    sentiment_screen_parser.add_argument(
+        "--asset", help="Analyze specific asset (default: all assets)"
+    )
+    sentiment_screen_parser.add_argument(
+        "--top-n", type=int, default=20, help="Show top N strongest signals (default: 20)"
+    )
+    sentiment_screen_parser.add_argument(
+        "--min-strength",
+        type=float,
+        default=50.0,
+        help="Minimum strength score threshold (0-100, default: 50)",
+    )
+    sentiment_screen_parser.add_argument(
+        "--output", help="Path to export CSV report"
+    )
+    sentiment_screen_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -3239,6 +3265,79 @@ def cmd_summary(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sentiment_screen(args: argparse.Namespace) -> int:
+    """Screen assets by sentiment strength and signal quality.
+
+    Uses the SentimentStrengthAnalyzer to identify high-conviction
+    sentiment signals across multiple quality dimensions.
+
+    Args:
+        args: Parsed arguments including sentiment file path and filters.
+
+    Returns:
+        Exit code (0 for success).
+    """
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.sentiment_strength import analyze_sentiment_file
+    import json as json_module
+
+    settings = Settings()
+
+    # Determine sentiment file path
+    if args.sentiment:
+        sentiment_path = Path(args.sentiment)
+    else:
+        sentiment_path = settings.data.sentiment_dir / "sentiment_aggregates.parquet"
+
+    if not sentiment_path.exists():
+        logger.error("sentiment_file_not_found", path=str(sentiment_path))
+        return 1
+
+    # Determine output path if specified
+    output_path = Path(args.output) if args.output else None
+
+    # Analyze sentiment strength
+    logger.info("running_sentiment_screen", file=str(sentiment_path))
+
+    df_results = analyze_sentiment_file(
+        sentiment_path=sentiment_path,
+        asset_id=args.asset,
+        output_path=output_path,
+    )
+
+    # Filter by minimum strength
+    df_filtered = df_results[df_results["strength_score"] >= args.min_strength]
+
+    # Limit to top N
+    df_top = df_filtered.head(args.top_n)
+
+    if len(df_top) == 0:
+        logger.warning("no_signals_found", min_strength=args.min_strength)
+        print(f"No signals found above strength threshold {args.min_strength}")
+        return 0
+
+    # Output results
+    if args.json:
+        result_dict = df_top.to_dict(orient="records")
+        print(json_module.dumps(result_dict, indent=2))
+    else:
+        print("=== Sentiment Strength Screener ===")
+        print(f"Analyzed: {len(df_results)} assets")
+        print(f"Above threshold ({args.min_strength}): {len(df_filtered)}")
+        print(f"\nTop {len(df_top)} Strongest Signals:\n")
+
+        for idx, row in df_top.iterrows():
+            print(f"{row['asset_id']:10s}  Strength: {row['strength_score']:5.1f}  "
+                  f"Consistency: {row['consistency']:.2f}  "
+                  f"Momentum: {row['momentum']:+.2f}  "
+                  f"Conviction: {row['conviction']:.2f}")
+
+        if output_path:
+            print(f"\nFull report exported to: {output_path}")
+
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -3287,6 +3386,7 @@ def main() -> int:
         "signal": cmd_signal,
         "health": cmd_health,
         "summary": cmd_summary,
+        "sentiment-screen": cmd_sentiment_screen,
     }
 
     handler = commands.get(args.command)
