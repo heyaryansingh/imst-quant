@@ -3,6 +3,7 @@
 This package provides utility functions for:
 - Checkpoint management for incremental data crawling
 - Risk metrics calculations (Sharpe, Sortino, VaR, Max Drawdown)
+- Tail risk analysis (CVaR, Omega ratio, EVT VaR, tail dependency, stress tests)
 - Technical indicators (MACD, Bollinger Bands, ATR, ADX, etc.)
 - Drawdown analysis (periods, underwater analysis, statistics)
 - Market regime detection (volatility, trend, combined regimes)
@@ -193,6 +194,15 @@ from imst_quant.utils.signal_backtest import (
     signal_statistics,
     turnover_analysis,
 )
+from imst_quant.utils.tail_risk import (
+    calculate_all_tail_metrics,
+    conditional_var,
+    extreme_value_at_risk,
+    omega_ratio,
+    stress_test_scenarios,
+    tail_dependency,
+    tail_ratio,
+)
 
 __all__ = [
     # Checkpoint
@@ -349,4 +359,12 @@ __all__ = [
     "signal_decay_analysis",
     "signal_statistics",
     "turnover_analysis",
+    # Tail risk analysis
+    "calculate_all_tail_metrics",
+    "conditional_var",
+    "extreme_value_at_risk",
+    "omega_ratio",
+    "stress_test_scenarios",
+    "tail_dependency",
+    "tail_ratio",
 ]
