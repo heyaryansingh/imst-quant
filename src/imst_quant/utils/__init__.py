@@ -203,6 +203,17 @@ from imst_quant.utils.tail_risk import (
     tail_dependency,
     tail_ratio,
 )
+from imst_quant.utils.var_calculator import (
+    VaRCalculator,
+    calculate_portfolio_var,
+    stress_test_var,
+)
+from imst_quant.utils.position_sizer import (
+    PositionSizer,
+    risk_parity_weights,
+    calculate_leverage,
+    dynamic_position_sizing,
+)
 
 __all__ = [
     # Checkpoint
@@ -367,4 +378,13 @@ __all__ = [
     "stress_test_scenarios",
     "tail_dependency",
     "tail_ratio",
+    # VaR calculator
+    "VaRCalculator",
+    "calculate_portfolio_var",
+    "stress_test_var",
+    # Position sizer
+    "PositionSizer",
+    "risk_parity_weights",
+    "calculate_leverage",
+    "dynamic_position_sizing",
 ]

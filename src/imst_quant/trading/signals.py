@@ -625,3 +625,247 @@ def bollinger_band_signal(
     )
 
     return df.drop("_std")
+
+
+def roc_signal(
+    df: pl.DataFrame,
+    price_col: str = "close",
+    lookback: int = 12,
+    threshold: float = 5.0,
+) -> pl.DataFrame:
+    """Generate Rate of Change (ROC) momentum signals.
+
+    ROC measures the percentage change in price over a lookback period.
+    Positive ROC indicates upward momentum, negative indicates downward.
+
+    Args:
+        df: DataFrame containing price data.
+        price_col: Name of the price column. Defaults to "close".
+        lookback: Period for ROC calculation. Defaults to 12.
+        threshold: ROC threshold in percent for signal generation. Defaults to 5.0.
+
+    Returns:
+        DataFrame with new columns:
+        - roc: Rate of change (percentage)
+        - roc_signal: 1 (strong upward momentum), -1 (strong downward), 0 (neutral)
+
+    Example:
+        >>> df = pl.DataFrame({"close": [100, 105, 110, 108, 115, 120]})
+        >>> result = roc_signal(df, lookback=3, threshold=3.0)
+    """
+    df = df.with_columns(
+        (
+            (pl.col(price_col) - pl.col(price_col).shift(lookback))
+            / pl.col(price_col).shift(lookback)
+            * 100
+        ).alias("roc")
+    )
+
+    return df.with_columns(
+        pl.when(pl.col("roc") > threshold)
+        .then(1)
+        .when(pl.col("roc") < -threshold)
+        .then(-1)
+        .otherwise(0)
+        .alias("roc_signal")
+    )
+
+
+def stochastic_signal(
+    df: pl.DataFrame,
+    high_col: str = "high",
+    low_col: str = "low",
+    close_col: str = "close",
+    k_period: int = 14,
+    d_period: int = 3,
+    oversold: float = 20.0,
+    overbought: float = 80.0,
+) -> pl.DataFrame:
+    """Generate Stochastic Oscillator signals.
+
+    Calculates %K and %D lines and generates signals based on overbought/oversold
+    levels and crossovers.
+
+    Args:
+        df: DataFrame containing OHLC data.
+        high_col: Name of the high price column. Defaults to "high".
+        low_col: Name of the low price column. Defaults to "low".
+        close_col: Name of the close price column. Defaults to "close".
+        k_period: Period for %K calculation. Defaults to 14.
+        d_period: Period for %D smoothing. Defaults to 3.
+        oversold: Oversold threshold. Defaults to 20.
+        overbought: Overbought threshold. Defaults to 80.
+
+    Returns:
+        DataFrame with new columns:
+        - stoch_k: Fast stochastic (%K)
+        - stoch_d: Slow stochastic (%D, smoothed %K)
+        - stoch_signal: 1 (oversold or bullish cross), -1 (overbought or bearish cross), 0 (neutral)
+
+    Example:
+        >>> df = pl.DataFrame({
+        ...     "high": [105, 110, 108, 112, 115],
+        ...     "low": [100, 105, 103, 107, 110],
+        ...     "close": [102, 108, 106, 110, 113],
+        ... })
+        >>> result = stochastic_signal(df, k_period=3, d_period=2)
+    """
+    # Calculate %K
+    df = df.with_columns([
+        pl.col(high_col).rolling_max(window_size=k_period).alias("_highest_high"),
+        pl.col(low_col).rolling_min(window_size=k_period).alias("_lowest_low"),
+    ])
+
+    df = df.with_columns(
+        pl.when((pl.col("_highest_high") - pl.col("_lowest_low")) > 0)
+        .then(
+            (pl.col(close_col) - pl.col("_lowest_low"))
+            / (pl.col("_highest_high") - pl.col("_lowest_low"))
+            * 100
+        )
+        .otherwise(50.0)
+        .alias("stoch_k")
+    )
+
+    # Calculate %D (smoothed %K)
+    df = df.with_columns(
+        pl.col("stoch_k").rolling_mean(window_size=d_period).alias("stoch_d")
+    )
+
+    # Generate signals based on levels and crossovers
+    df = df.with_columns([
+        pl.col("stoch_k").shift(1).alias("_prev_k"),
+        pl.col("stoch_d").shift(1).alias("_prev_d"),
+    ])
+
+    df = df.with_columns(
+        pl.when(
+            (pl.col("stoch_k") < oversold)
+            | ((pl.col("stoch_k") > pl.col("stoch_d")) & (pl.col("_prev_k") <= pl.col("_prev_d")))
+        )
+        .then(1)  # Oversold or bullish crossover
+        .when(
+            (pl.col("stoch_k") > overbought)
+            | ((pl.col("stoch_k") < pl.col("stoch_d")) & (pl.col("_prev_k") >= pl.col("_prev_d")))
+        )
+        .then(-1)  # Overbought or bearish crossover
+        .otherwise(0)
+        .alias("stoch_signal")
+    )
+
+    return df.drop(["_highest_high", "_lowest_low", "_prev_k", "_prev_d"])
+
+
+def adx_signal(
+    df: pl.DataFrame,
+    high_col: str = "high",
+    low_col: str = "low",
+    close_col: str = "close",
+    period: int = 14,
+    adx_threshold: float = 25.0,
+) -> pl.DataFrame:
+    """Generate Average Directional Index (ADX) trend strength signals.
+
+    ADX measures trend strength (not direction). High ADX indicates strong trend,
+    low ADX indicates weak trend or ranging market.
+
+    Args:
+        df: DataFrame containing OHLC data.
+        high_col: Name of the high price column. Defaults to "high".
+        low_col: Name of the low price column. Defaults to "low".
+        close_col: Name of the close price column. Defaults to "close".
+        period: Period for ADX calculation. Defaults to 14.
+        adx_threshold: ADX level above which trend is considered strong. Defaults to 25.
+
+    Returns:
+        DataFrame with new columns:
+        - adx: Average Directional Index (0-100)
+        - di_plus: Positive Directional Indicator
+        - di_minus: Negative Directional Indicator
+        - adx_signal: 1 (strong uptrend), -1 (strong downtrend), 0 (weak/no trend)
+
+    Example:
+        >>> df = pl.DataFrame({
+        ...     "high": [105, 110, 108, 112, 115, 118],
+        ...     "low": [100, 105, 103, 107, 110, 113],
+        ...     "close": [102, 108, 106, 110, 113, 116],
+        ... })
+        >>> result = adx_signal(df, period=3)
+    """
+    # Calculate True Range and Directional Movement
+    df = df.with_columns([
+        (pl.col(high_col) - pl.col(low_col)).alias("_tr1"),
+        (pl.col(high_col) - pl.col(close_col).shift(1)).abs().alias("_tr2"),
+        (pl.col(low_col) - pl.col(close_col).shift(1)).abs().alias("_tr3"),
+        (pl.col(high_col) - pl.col(high_col).shift(1)).alias("_plus_dm_raw"),
+        (pl.col(low_col).shift(1) - pl.col(low_col)).alias("_minus_dm_raw"),
+    ])
+
+    # True Range (max of three values)
+    df = df.with_columns(
+        pl.max_horizontal("_tr1", "_tr2", "_tr3").alias("_tr")
+    )
+
+    # Directional Movement
+    df = df.with_columns([
+        pl.when((pl.col("_plus_dm_raw") > pl.col("_minus_dm_raw")) & (pl.col("_plus_dm_raw") > 0))
+        .then(pl.col("_plus_dm_raw"))
+        .otherwise(0)
+        .alias("_plus_dm"),
+        pl.when((pl.col("_minus_dm_raw") > pl.col("_plus_dm_raw")) & (pl.col("_minus_dm_raw") > 0))
+        .then(pl.col("_minus_dm_raw"))
+        .otherwise(0)
+        .alias("_minus_dm"),
+    ])
+
+    # Smoothed TR and DM
+    df = df.with_columns([
+        pl.col("_tr").ewm_mean(span=period).alias("_atr"),
+        pl.col("_plus_dm").ewm_mean(span=period).alias("_smoothed_plus_dm"),
+        pl.col("_minus_dm").ewm_mean(span=period).alias("_smoothed_minus_dm"),
+    ])
+
+    # Directional Indicators
+    df = df.with_columns([
+        pl.when(pl.col("_atr") > 0)
+        .then((pl.col("_smoothed_plus_dm") / pl.col("_atr")) * 100)
+        .otherwise(0)
+        .alias("di_plus"),
+        pl.when(pl.col("_atr") > 0)
+        .then((pl.col("_smoothed_minus_dm") / pl.col("_atr")) * 100)
+        .otherwise(0)
+        .alias("di_minus"),
+    ])
+
+    # Directional Index
+    df = df.with_columns(
+        pl.when((pl.col("di_plus") + pl.col("di_minus")) > 0)
+        .then(
+            ((pl.col("di_plus") - pl.col("di_minus")).abs()
+             / (pl.col("di_plus") + pl.col("di_minus")))
+            * 100
+        )
+        .otherwise(0)
+        .alias("_dx")
+    )
+
+    # ADX (smoothed DX)
+    df = df.with_columns(
+        pl.col("_dx").ewm_mean(span=period).alias("adx")
+    )
+
+    # Generate signals
+    df = df.with_columns(
+        pl.when((pl.col("adx") > adx_threshold) & (pl.col("di_plus") > pl.col("di_minus")))
+        .then(1)  # Strong uptrend
+        .when((pl.col("adx") > adx_threshold) & (pl.col("di_minus") > pl.col("di_plus")))
+        .then(-1)  # Strong downtrend
+        .otherwise(0)  # Weak trend or ranging
+        .alias("adx_signal")
+    )
+
+    return df.drop([
+        "_tr1", "_tr2", "_tr3", "_plus_dm_raw", "_minus_dm_raw",
+        "_tr", "_plus_dm", "_minus_dm", "_atr",
+        "_smoothed_plus_dm", "_smoothed_minus_dm", "_dx"
+    ])
