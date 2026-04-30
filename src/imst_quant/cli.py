@@ -756,6 +756,66 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- risk-metrics subcommand ---
+    risk_parser = subparsers.add_parser(
+        "risk-metrics", help="Calculate comprehensive portfolio risk metrics"
+    )
+    risk_parser.add_argument(
+        "--returns", help="Path to returns parquet file (default: gold/returns.parquet)"
+    )
+    risk_parser.add_argument(
+        "--return-col", default="returns", help="Column name for returns (default: returns)"
+    )
+    risk_parser.add_argument(
+        "--risk-free-rate", type=float, default=0.0001, help="Daily risk-free rate (default: 0.0001)"
+    )
+    risk_parser.add_argument(
+        "--periods", type=int, default=252, help="Trading periods per year (default: 252)"
+    )
+    risk_parser.add_argument(
+        "--var-confidence", type=float, default=0.95, help="VaR confidence level (default: 0.95)"
+    )
+    risk_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
+    # --- quality-check subcommand ---
+    quality_parser = subparsers.add_parser(
+        "quality-check", help="Validate data quality and completeness"
+    )
+    quality_parser.add_argument(
+        "--layer",
+        choices=["bronze", "silver", "gold"],
+        required=True,
+        help="Data layer to check"
+    )
+    quality_parser.add_argument(
+        "--date", help="Specific date to check (YYYY-MM-DD)"
+    )
+    quality_parser.add_argument(
+        "--fix", action="store_true", help="Attempt to fix detected issues"
+    )
+    quality_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
+    # --- signal-performance subcommand ---
+    signal_perf_parser = subparsers.add_parser(
+        "signal-performance", help="Analyze trading signal performance metrics"
+    )
+    signal_perf_parser.add_argument(
+        "--data", required=True, help="Path to parquet file with signal and returns columns"
+    )
+    signal_perf_parser.add_argument(
+        "--signal-col", default="signal", help="Signal column name (default: signal)"
+    )
+    signal_perf_parser.add_argument(
+        "--returns-col", default="returns", help="Returns column name (default: returns)"
+    )
+    signal_perf_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -3340,6 +3400,257 @@ def cmd_exposure(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_risk_metrics(args: argparse.Namespace) -> int:
+    """Calculate comprehensive portfolio risk metrics.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success)
+    """
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.risk_metrics import calculate_all_metrics
+    import polars as pl
+    import json as json_module
+
+    settings = Settings()
+
+    if args.returns:
+        returns_path = Path(args.returns)
+    else:
+        returns_path = Path(settings.data.gold_dir) / "returns.parquet"
+
+    if not returns_path.exists():
+        print(f"Error: Returns file not found: {returns_path}")
+        print("Expected columns: [date, returns] or specify with --return-col")
+        return 1
+
+    try:
+        df = pl.read_parquet(returns_path)
+    except Exception as e:
+        print(f"Error reading returns file: {e}")
+        return 1
+
+    if args.return_col not in df.columns:
+        print(f"Error: Column '{args.return_col}' not found in returns file")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    try:
+        metrics = calculate_all_metrics(
+            df,
+            risk_free_rate=args.risk_free_rate,
+            periods_per_year=args.periods,
+            var_confidence=args.var_confidence,
+            return_col=args.return_col,
+        )
+
+        if args.json:
+            print(json_module.dumps(metrics, indent=2))
+        else:
+            print("\n=== Portfolio Risk Metrics ===\n")
+            print(f"Total Return:        {metrics['total_return']:>10.2%}")
+            print(f"Annualized Return:   {metrics['annualized_return']:>10.2%}")
+            print(f"Annualized Vol:      {metrics['volatility']:>10.2%}")
+            print()
+            print(f"Sharpe Ratio:        {metrics['sharpe']:>10.3f}")
+            print(f"Sortino Ratio:       {metrics['sortino']:>10.3f}")
+            print(f"Calmar Ratio:        {metrics['calmar']:>10.3f}")
+            print()
+            print(f"Max Drawdown:        {metrics['max_drawdown']:>10.2%}")
+            print(f"VaR ({args.var_confidence:.0%}):        {metrics['var']:>10.2%}")
+            print()
+
+            # Risk assessment
+            sharpe_rating = "Excellent" if metrics['sharpe'] > 2 else "Good" if metrics['sharpe'] > 1 else "Fair" if metrics['sharpe'] > 0 else "Poor"
+            print(f"Risk Rating:         {sharpe_rating} (based on Sharpe ratio)")
+
+    except Exception as e:
+        print(f"Error calculating risk metrics: {e}")
+        return 1
+
+    return 0
+
+
+def cmd_quality_check(args: argparse.Namespace) -> int:
+    """Validate data quality and completeness.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success)
+    """
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.data_quality import check_data_quality
+    import polars as pl
+    import json as json_module
+    from datetime import datetime
+
+    settings = Settings()
+
+    # Determine directory based on layer
+    layer_dirs = {
+        "bronze": settings.data.bronze_dir,
+        "silver": settings.data.silver_dir,
+        "gold": settings.data.gold_dir,
+    }
+
+    data_dir = Path(layer_dirs[args.layer])
+
+    if not data_dir.exists():
+        print(f"Error: {args.layer} directory not found: {data_dir}")
+        return 1
+
+    # Get files to check
+    if args.date:
+        # Check specific date
+        date_str = args.date.replace("-", "")
+        pattern = f"*{date_str}*.parquet"
+    else:
+        # Check all files
+        pattern = "*.parquet"
+
+    files = list(data_dir.glob(pattern))
+
+    if not files:
+        print(f"No files found matching pattern: {pattern}")
+        return 1
+
+    print(f"\n=== Data Quality Check: {args.layer.upper()} Layer ===\n")
+    print(f"Checking {len(files)} file(s)...\n")
+
+    issues_found = []
+
+    for file in files:
+        try:
+            df = pl.read_parquet(file)
+            result = check_data_quality(df)
+
+            if not result["is_valid"]:
+                issues_found.append({
+                    "file": file.name,
+                    "issues": result["issues"],
+                })
+
+            if args.json:
+                continue
+
+            # Print results
+            status = "✓" if result["is_valid"] else "✗"
+            print(f"{status} {file.name}")
+
+            if result["issues"]:
+                for issue in result["issues"]:
+                    print(f"  ⚠️  {issue}")
+
+        except Exception as e:
+            print(f"✗ {file.name}: Error reading file - {e}")
+            issues_found.append({
+                "file": file.name,
+                "issues": [f"Read error: {e}"],
+            })
+
+    if args.json:
+        output = {
+            "layer": args.layer,
+            "files_checked": len(files),
+            "issues_count": len(issues_found),
+            "issues": issues_found,
+        }
+        print(json_module.dumps(output, indent=2))
+    else:
+        print()
+        if issues_found:
+            print(f"❌ Found {len(issues_found)} file(s) with issues")
+            if args.fix:
+                print("\n⚠️  Auto-fix not yet implemented. Please fix issues manually.")
+        else:
+            print("✅ All files passed quality checks")
+
+    return 1 if issues_found else 0
+
+
+def cmd_signal_performance(args: argparse.Namespace) -> int:
+    """Analyze trading signal performance metrics.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success)
+    """
+    from imst_quant.utils.signal_performance import analyze_signal_performance
+    import polars as pl
+    import json as json_module
+
+    data_path = Path(args.data)
+
+    if not data_path.exists():
+        print(f"Error: Data file not found: {data_path}")
+        print("Expected columns: [signal, returns] or specify with --signal-col and --returns-col")
+        return 1
+
+    try:
+        df = pl.read_parquet(data_path)
+    except Exception as e:
+        print(f"Error reading data file: {e}")
+        return 1
+
+    if args.signal_col not in df.columns or args.returns_col not in df.columns:
+        print(f"Error: Required columns not found")
+        print(f"Expected: [{args.signal_col}, {args.returns_col}]")
+        print(f"Available: {df.columns}")
+        return 1
+
+    try:
+        metrics = analyze_signal_performance(
+            df,
+            signal_col=args.signal_col,
+            returns_col=args.returns_col,
+        )
+
+        if args.json:
+            print(json_module.dumps(metrics, indent=2))
+        else:
+            print("\n=== Signal Performance Analysis ===\n")
+            print(f"Total Trades:        {metrics['total_trades']:>10,}")
+            print()
+            print(f"Win Rate:            {metrics['win_rate']:>10.2%}")
+            print(f"Average Win:         {metrics['avg_win']:>10.4f}")
+            print(f"Average Loss:        {metrics['avg_loss']:>10.4f}")
+            print(f"Win/Loss Ratio:      {metrics['win_loss_ratio']:>10.3f}")
+            print()
+            print(f"Profit Factor:       {metrics['profit_factor']:>10.3f}")
+            print(f"Total PnL:           {metrics['total_pnl']:>10.4f}")
+            print(f"Average Trade PnL:   {metrics['avg_trade_pnl']:>10.4f}")
+            print()
+            print(f"Max Win Streak:      {metrics['max_win_streak']:>10,}")
+            print(f"Max Loss Streak:     {metrics['max_loss_streak']:>10,}")
+            print()
+            print(f"Quality Score:       {metrics['quality_score']:>10.1f}/100")
+            print()
+
+            # Performance assessment
+            if metrics['quality_score'] >= 70:
+                rating = "Excellent"
+            elif metrics['quality_score'] >= 50:
+                rating = "Good"
+            elif metrics['quality_score'] >= 30:
+                rating = "Fair"
+            else:
+                rating = "Poor"
+
+            print(f"Overall Rating:      {rating}")
+
+    except Exception as e:
+        print(f"Error analyzing signal performance: {e}")
+        return 1
+
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -3389,6 +3700,9 @@ def main() -> int:
         "health": cmd_health,
         "summary": cmd_summary,
         "exposure": cmd_exposure,
+        "risk-metrics": cmd_risk_metrics,
+        "quality-check": cmd_quality_check,
+        "signal-performance": cmd_signal_performance,
     }
 
     handler = commands.get(args.command)
