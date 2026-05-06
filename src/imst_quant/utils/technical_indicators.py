@@ -529,3 +529,148 @@ def cci(
     )
 
     return df.drop(["_tp", "_tp_sma", "_mad"])
+
+
+def rsi(
+    df: pl.DataFrame,
+    price_col: str = "close",
+    period: int = 14,
+) -> pl.DataFrame:
+    """Calculate Relative Strength Index (RSI).
+
+    RSI is a momentum oscillator measuring the speed and magnitude of price changes.
+    Values range from 0 to 100, with readings above 70 indicating overbought conditions
+    and below 30 indicating oversold.
+
+    Args:
+        df: DataFrame containing price data.
+        price_col: Name of the price column. Defaults to "close".
+        period: Lookback period. Defaults to 14.
+
+    Returns:
+        DataFrame with new column:
+        - rsi: Relative Strength Index
+
+    Example:
+        >>> df = pl.DataFrame({"close": [100, 102, 101, 105, 108, 110, 107, 109]})
+        >>> result = rsi(df, period=6)
+    """
+    # Calculate price changes
+    df = df.with_columns(
+        pl.col(price_col).diff().alias("_price_change")
+    )
+
+    # Separate gains and losses
+    df = df.with_columns([
+        pl.when(pl.col("_price_change") > 0)
+          .then(pl.col("_price_change"))
+          .otherwise(0)
+          .alias("_gain"),
+        pl.when(pl.col("_price_change") < 0)
+          .then(pl.col("_price_change").abs())
+          .otherwise(0)
+          .alias("_loss")
+    ])
+
+    # Calculate average gain and loss using EMA
+    alpha = 1.0 / period
+    df = df.with_columns([
+        pl.col("_gain").ewm_mean(alpha=alpha, adjust=False).alias("_avg_gain"),
+        pl.col("_loss").ewm_mean(alpha=alpha, adjust=False).alias("_avg_loss")
+    ])
+
+    # Calculate RS and RSI
+    df = df.with_columns(
+        (pl.col("_avg_gain") / pl.col("_avg_loss")).alias("_rs")
+    )
+
+    df = df.with_columns(
+        (100 - (100 / (1 + pl.col("_rs")))).alias("rsi")
+    )
+
+    return df.drop(["_price_change", "_gain", "_loss", "_avg_gain", "_avg_loss", "_rs"])
+
+
+def detect_rsi_divergence(
+    df: pl.DataFrame,
+    price_col: str = "close",
+    rsi_col: str = "rsi",
+    lookback: int = 14,
+    threshold: float = 0.02,
+) -> pl.DataFrame:
+    """Detect bullish and bearish RSI divergences.
+
+    Divergence occurs when price and RSI move in opposite directions, often
+    signaling potential reversals.
+
+    Bullish divergence: Price makes lower low, but RSI makes higher low
+    Bearish divergence: Price makes higher high, but RSI makes lower high
+
+    Args:
+        df: DataFrame containing price and RSI data.
+        price_col: Name of the price column. Defaults to "close".
+        rsi_col: Name of the RSI column. Defaults to "rsi".
+        lookback: Period to look back for highs/lows. Defaults to 14.
+        threshold: Minimum percentage change to consider a divergence. Defaults to 0.02 (2%).
+
+    Returns:
+        DataFrame with new columns:
+        - bullish_divergence: 1 if bullish divergence detected, 0 otherwise
+        - bearish_divergence: 1 if bearish divergence detected, 0 otherwise
+
+    Example:
+        >>> df = rsi(df, period=14)
+        >>> df = detect_rsi_divergence(df, lookback=10)
+    """
+    # Calculate rolling min/max for price and RSI
+    df = df.with_columns([
+        pl.col(price_col).rolling_min(window_size=lookback).alias("_price_min"),
+        pl.col(price_col).rolling_max(window_size=lookback).alias("_price_max"),
+        pl.col(rsi_col).rolling_min(window_size=lookback).alias("_rsi_min"),
+        pl.col(rsi_col).rolling_max(window_size=lookback).alias("_rsi_max"),
+    ])
+
+    # Detect price making new lows/highs
+    df = df.with_columns([
+        (pl.col(price_col) == pl.col("_price_min")).alias("_price_at_min"),
+        (pl.col(price_col) == pl.col("_price_max")).alias("_price_at_max"),
+    ])
+
+    # Calculate percentage changes from previous extremes
+    df = df.with_columns([
+        (pl.col(price_col) / pl.col("_price_min").shift(lookback) - 1).alias("_price_pct_from_min"),
+        (pl.col(rsi_col) / pl.col("_rsi_min").shift(lookback) - 1).alias("_rsi_pct_from_min"),
+        (pl.col(price_col) / pl.col("_price_max").shift(lookback) - 1).alias("_price_pct_from_max"),
+        (pl.col(rsi_col) / pl.col("_rsi_max").shift(lookback) - 1).alias("_rsi_pct_from_max"),
+    ])
+
+    # Bullish divergence: price lower, RSI higher (at price minimum)
+    df = df.with_columns(
+        pl.when(
+            pl.col("_price_at_min") &
+            (pl.col("_price_pct_from_min") < -threshold) &
+            (pl.col("_rsi_pct_from_min") > 0)
+        )
+        .then(1)
+        .otherwise(0)
+        .alias("bullish_divergence")
+    )
+
+    # Bearish divergence: price higher, RSI lower (at price maximum)
+    df = df.with_columns(
+        pl.when(
+            pl.col("_price_at_max") &
+            (pl.col("_price_pct_from_max") > threshold) &
+            (pl.col("_rsi_pct_from_max") < 0)
+        )
+        .then(1)
+        .otherwise(0)
+        .alias("bearish_divergence")
+    )
+
+    return df.drop([
+        "_price_min", "_price_max", "_rsi_min", "_rsi_max",
+        "_price_at_min", "_price_at_max",
+        "_price_pct_from_min", "_rsi_pct_from_min",
+        "_price_pct_from_max", "_rsi_pct_from_max"
+    ])
