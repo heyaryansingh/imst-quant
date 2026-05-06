@@ -361,3 +361,123 @@ def winsorize_series(
     upper_bound = series.quantile(upper_quantile)
 
     return series.clip(lower=lower_bound, upper=upper_bound)
+
+
+def cross_sectional_rank(
+    df: pd.DataFrame,
+    column: str,
+    timestamp_col: str = "timestamp",
+    normalize: bool = True,
+) -> pd.Series:
+    """Compute cross-sectional rank normalization.
+
+    Common in quantitative finance for creating market-neutral signals by ranking
+    assets within each time period.
+
+    Args:
+        df: DataFrame with multi-asset time series data
+        column: Column to rank
+        timestamp_col: Column containing timestamps
+        normalize: If True, normalize ranks to [-1, 1] range
+
+    Returns:
+        Series with cross-sectional ranks
+
+    Example:
+        >>> df = pd.DataFrame({
+        ...     'timestamp': ['2024-01-01', '2024-01-01', '2024-01-02', '2024-01-02'],
+        ...     'ticker': ['AAPL', 'MSFT', 'AAPL', 'MSFT'],
+        ...     'return': [0.02, 0.01, -0.01, 0.03]
+        ... })
+        >>> ranks = cross_sectional_rank(df, 'return', normalize=True)
+    """
+    # Rank within each timestamp
+    ranks = df.groupby(timestamp_col)[column].rank(method='average', pct=normalize)
+
+    if normalize:
+        # Scale from [0, 1] to [-1, 1]
+        ranks = 2 * (ranks - 0.5)
+
+    logger.info("Cross-sectional ranks computed",
+                column=column,
+                normalize=normalize,
+                unique_timestamps=df[timestamp_col].nunique())
+
+    return ranks
+
+
+def momentum_zscore(
+    df: pd.DataFrame,
+    price_col: str = "close",
+    lookback: int = 20,
+    zscore_window: int = 60,
+) -> pd.Series:
+    """Calculate momentum z-score signal.
+
+    Computes momentum (rate of change) and then standardizes it using a rolling
+    z-score to identify extreme momentum events.
+
+    Args:
+        df: DataFrame with price data
+        price_col: Column containing prices
+        lookback: Period for momentum calculation (default: 20 days)
+        zscore_window: Window for z-score standardization (default: 60 days)
+
+    Returns:
+        Series with momentum z-scores
+
+    Example:
+        >>> df = pd.DataFrame({'close': np.random.randn(100).cumsum() + 100})
+        >>> signal = momentum_zscore(df, lookback=10, zscore_window=30)
+    """
+    # Calculate momentum (percentage change)
+    momentum = df[price_col].pct_change(periods=lookback)
+
+    # Calculate rolling z-score
+    rolling_mean = momentum.rolling(window=zscore_window).mean()
+    rolling_std = momentum.rolling(window=zscore_window).std()
+
+    zscore = (momentum - rolling_mean) / rolling_std
+
+    logger.info("Momentum z-score computed",
+                lookback=lookback,
+                zscore_window=zscore_window,
+                mean_zscore=zscore.mean(),
+                std_zscore=zscore.std())
+
+    return zscore
+
+
+def calculate_rolling_sharpe(
+    returns: pd.Series,
+    window: int = 60,
+    annualization_factor: int = 252,
+) -> pd.Series:
+    """Calculate rolling Sharpe ratio.
+
+    Useful for tracking strategy performance over time.
+
+    Args:
+        returns: Series of returns
+        window: Rolling window size
+        annualization_factor: Factor to annualize (252 for daily, 12 for monthly)
+
+    Returns:
+        Series with rolling Sharpe ratios
+
+    Example:
+        >>> returns = pd.Series(np.random.randn(100) * 0.01)
+        >>> sharpe = calculate_rolling_sharpe(returns, window=20)
+    """
+    rolling_mean = returns.rolling(window=window).mean()
+    rolling_std = returns.rolling(window=window).std()
+
+    # Annualized Sharpe
+    sharpe = (rolling_mean / rolling_std) * np.sqrt(annualization_factor)
+
+    logger.info("Rolling Sharpe ratio computed",
+                window=window,
+                annualization_factor=annualization_factor,
+                mean_sharpe=sharpe.mean())
+
+    return sharpe
