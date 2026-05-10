@@ -799,6 +799,65 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- clean subcommand ---
+    clean_parser = subparsers.add_parser(
+        "clean", help="Clean and preprocess data using advanced utilities"
+    )
+    clean_parser.add_argument(
+        "--input", required=True, help="Path to input parquet file"
+    )
+    clean_parser.add_argument(
+        "--output", help="Path to output parquet file (default: input_cleaned.parquet)"
+    )
+    clean_parser.add_argument(
+        "--remove-outliers", action="store_true", help="Remove statistical outliers"
+    )
+    clean_parser.add_argument(
+        "--outlier-method",
+        choices=["iqr", "zscore", "percentile"],
+        default="iqr",
+        help="Outlier detection method (default: iqr)"
+    )
+    clean_parser.add_argument(
+        "--outlier-column", help="Column to check for outliers"
+    )
+    clean_parser.add_argument(
+        "--outlier-threshold", type=float, default=3.0, help="Outlier threshold (default: 3.0)"
+    )
+    clean_parser.add_argument(
+        "--fill-missing", action="store_true", help="Fill missing values"
+    )
+    clean_parser.add_argument(
+        "--fill-method",
+        choices=["forward", "backward", "linear", "mean", "median"],
+        default="forward",
+        help="Missing value fill method (default: forward)"
+    )
+    clean_parser.add_argument(
+        "--fill-column", help="Column to fill missing values"
+    )
+    clean_parser.add_argument(
+        "--validate-prices", action="store_true", help="Validate OHLCV price data"
+    )
+    clean_parser.add_argument(
+        "--remove-duplicates", action="store_true", help="Remove duplicate rows"
+    )
+    clean_parser.add_argument(
+        "--duplicate-subset", nargs="+", help="Columns to consider for duplicates"
+    )
+    clean_parser.add_argument(
+        "--detect-gaps", action="store_true", help="Detect gaps in time series"
+    )
+    clean_parser.add_argument(
+        "--timestamp-col", default="timestamp", help="Timestamp column name (default: timestamp)"
+    )
+    clean_parser.add_argument(
+        "--expected-frequency", default="1d", help="Expected data frequency (default: 1d)"
+    )
+    clean_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     # --- signal-performance subcommand ---
     signal_perf_parser = subparsers.add_parser(
         "signal-performance", help="Analyze trading signal performance metrics"
@@ -3572,6 +3631,164 @@ def cmd_quality_check(args: argparse.Namespace) -> int:
     return 1 if issues_found else 0
 
 
+def cmd_clean(args: argparse.Namespace) -> int:
+    """Clean and preprocess data using advanced utilities.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success, 1 for error)
+    """
+    import polars as pl
+    import json as json_module
+    from imst_quant.utils.data_cleaning import (
+        remove_outliers,
+        fill_missing_data,
+        validate_price_data,
+        remove_duplicates,
+        detect_gaps,
+    )
+
+    input_path = Path(args.input)
+
+    if not input_path.exists():
+        print(f"Error: Input file not found: {input_path}")
+        return 1
+
+    try:
+        df = pl.read_parquet(input_path)
+        print(f"Loaded {len(df):,} rows from {input_path}")
+
+        results = {
+            "input_file": str(input_path),
+            "initial_rows": len(df),
+            "operations": [],
+        }
+
+        # Remove outliers
+        if args.remove_outliers:
+            if not args.outlier_column:
+                print("Error: --outlier-column required when --remove-outliers is set")
+                return 1
+
+            if args.outlier_column not in df.columns:
+                print(f"Error: Column '{args.outlier_column}' not found in data")
+                return 1
+
+            initial_rows = len(df)
+            df = remove_outliers(
+                df,
+                args.outlier_column,
+                method=args.outlier_method,
+                threshold=args.outlier_threshold
+            )
+            removed = initial_rows - len(df)
+            print(f"Removed {removed:,} outliers from '{args.outlier_column}' using {args.outlier_method} method")
+            results["operations"].append({
+                "type": "remove_outliers",
+                "column": args.outlier_column,
+                "method": args.outlier_method,
+                "rows_removed": removed
+            })
+
+        # Fill missing values
+        if args.fill_missing:
+            if not args.fill_column:
+                print("Error: --fill-column required when --fill-missing is set")
+                return 1
+
+            if args.fill_column not in df.columns:
+                print(f"Error: Column '{args.fill_column}' not found in data")
+                return 1
+
+            null_count_before = df[args.fill_column].null_count()
+            df = fill_missing_data(df, args.fill_column, method=args.fill_method)
+            null_count_after = df[args.fill_column].null_count()
+            filled = null_count_before - null_count_after
+            print(f"Filled {filled:,} missing values in '{args.fill_column}' using {args.fill_method} method")
+            results["operations"].append({
+                "type": "fill_missing",
+                "column": args.fill_column,
+                "method": args.fill_method,
+                "values_filled": filled
+            })
+
+        # Validate price data
+        if args.validate_prices:
+            initial_rows = len(df)
+            df, issues = validate_price_data(df)
+            removed = initial_rows - len(df)
+            print(f"Price validation removed {removed:,} invalid rows")
+            if issues:
+                for issue_type, count in issues.items():
+                    if count > 0:
+                        print(f"  - {issue_type}: {count:,}")
+            results["operations"].append({
+                "type": "validate_prices",
+                "rows_removed": removed,
+                "issues": issues
+            })
+
+        # Remove duplicates
+        if args.remove_duplicates:
+            df, duplicates_removed = remove_duplicates(
+                df,
+                subset=args.duplicate_subset if args.duplicate_subset else None,
+                keep="first"
+            )
+            print(f"Removed {duplicates_removed:,} duplicate rows")
+            results["operations"].append({
+                "type": "remove_duplicates",
+                "rows_removed": duplicates_removed,
+                "subset": args.duplicate_subset
+            })
+
+        # Detect gaps
+        if args.detect_gaps:
+            if args.timestamp_col not in df.columns:
+                print(f"Error: Timestamp column '{args.timestamp_col}' not found in data")
+                return 1
+
+            gaps = detect_gaps(df, args.timestamp_col, args.expected_frequency)
+            if not gaps.is_empty():
+                print(f"Detected {len(gaps):,} gaps in time series:")
+                for row in gaps.iter_rows(named=True):
+                    print(f"  Gap from {row['gap_start']} to {row['gap_end']} (duration: {row['gap_duration']})")
+                results["operations"].append({
+                    "type": "detect_gaps",
+                    "gaps_found": len(gaps),
+                    "gaps": gaps.to_dicts()
+                })
+            else:
+                print("No gaps detected in time series")
+                results["operations"].append({
+                    "type": "detect_gaps",
+                    "gaps_found": 0
+                })
+
+        # Save cleaned data
+        output_path = Path(args.output) if args.output else input_path.with_stem(input_path.stem + "_cleaned")
+        df.write_parquet(output_path)
+        print(f"\nCleaned data saved to: {output_path}")
+        print(f"Final rows: {len(df):,}")
+
+        results["output_file"] = str(output_path)
+        results["final_rows"] = len(df)
+        results["rows_removed_total"] = results["initial_rows"] - results["final_rows"]
+
+        if args.json:
+            print("\n" + json_module.dumps(results, indent=2, default=str))
+
+        return 0
+
+    except Exception as e:
+        print(f"Error processing data: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
+
+
 def cmd_signal_performance(args: argparse.Namespace) -> int:
     """Analyze trading signal performance metrics.
 
@@ -3702,6 +3919,7 @@ def main() -> int:
         "exposure": cmd_exposure,
         "risk-metrics": cmd_risk_metrics,
         "quality-check": cmd_quality_check,
+        "clean": cmd_clean,
         "signal-performance": cmd_signal_performance,
     }
 
