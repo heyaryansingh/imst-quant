@@ -214,6 +214,17 @@ from imst_quant.utils.position_sizer import (
     calculate_leverage,
     dynamic_position_sizing,
 )
+from imst_quant.utils.portfolio_health import (
+from imst_quant.utils.signal_strength import (
+    SignalStrength,
+    SignalStrengthAnalyzer,
+    compare_signal_strengths,
+)
+    HealthAlert,
+    PortfolioHealth,
+    PortfolioHealthMonitor,
+    generate_health_report,
+)
 
 __all__ = [
     # Checkpoint
@@ -387,4 +398,13 @@ __all__ = [
     "risk_parity_weights",
     "calculate_leverage",
     "dynamic_position_sizing",
+    # Portfolio health
+    "HealthAlert",
+    "PortfolioHealth",
+    "PortfolioHealthMonitor",
+    "generate_health_report",
+    # Signal strength
+    "SignalStrength",
+    "SignalStrengthAnalyzer",
+    "compare_signal_strengths",
 ]
