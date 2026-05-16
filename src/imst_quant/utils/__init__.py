@@ -215,15 +215,15 @@ from imst_quant.utils.position_sizer import (
     dynamic_position_sizing,
 )
 from imst_quant.utils.portfolio_health import (
-from imst_quant.utils.signal_strength import (
-    SignalStrength,
-    SignalStrengthAnalyzer,
-    compare_signal_strengths,
-)
     HealthAlert,
     PortfolioHealth,
     PortfolioHealthMonitor,
     generate_health_report,
+)
+from imst_quant.utils.signal_strength import (
+    SignalStrength,
+    SignalStrengthAnalyzer,
+    compare_signal_strengths,
 )
 
 __all__ = [
