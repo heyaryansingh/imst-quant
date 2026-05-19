@@ -472,3 +472,153 @@ def estimate_regime_persistence(
         persistence[str(regime)] = float(np.mean(runs)) if runs else 0.0
 
     return persistence
+
+
+def detect_momentum_regime(
+    df: pl.DataFrame,
+    price_col: str = "close",
+    fast_window: int = 10,
+    slow_window: int = 30,
+    momentum_threshold: float = 0.02
+) -> pl.DataFrame:
+    """Detect momentum regime using dual moving average crossover and strength.
+
+    Classifies market into strong momentum, weak momentum, or no momentum
+    based on moving average crossover and absolute momentum strength.
+
+    Args:
+        df: DataFrame with price data.
+        price_col: Column name for price data.
+        fast_window: Fast moving average period (default: 10).
+        slow_window: Slow moving average period (default: 30).
+        momentum_threshold: Threshold for momentum strength classification.
+
+    Returns:
+        DataFrame with momentum_regime column and momentum_strength.
+
+    Example:
+        >>> df = pl.DataFrame({"close": [100, 102, 105, 110, 108, 106]})
+        >>> result = detect_momentum_regime(df)
+    """
+    # Calculate moving averages
+    df = df.with_columns([
+        pl.col(price_col).rolling_mean(window_size=fast_window).alias("ma_fast"),
+        pl.col(price_col).rolling_mean(window_size=slow_window).alias("ma_slow"),
+    ])
+
+    # Calculate momentum strength
+    df = df.with_columns([
+        ((pl.col("ma_fast") - pl.col("ma_slow")) / pl.col("ma_slow"))
+        .alias("momentum_strength")
+    ])
+
+    # Classify momentum regime
+    df = df.with_columns([
+        pl.when(pl.col("momentum_strength") > momentum_threshold)
+        .then(pl.lit("strong_bullish"))
+        .when(pl.col("momentum_strength") < -momentum_threshold)
+        .then(pl.lit("strong_bearish"))
+        .when(
+            (pl.col("momentum_strength") >= 0) &
+            (pl.col("momentum_strength") <= momentum_threshold)
+        )
+        .then(pl.lit("weak_bullish"))
+        .when(
+            (pl.col("momentum_strength") < 0) &
+            (pl.col("momentum_strength") >= -momentum_threshold)
+        )
+        .then(pl.lit("weak_bearish"))
+        .otherwise(pl.lit("no_momentum"))
+        .alias("momentum_regime")
+    ])
+
+    return df
+
+
+def detect_liquidity_regime(
+    df: pl.DataFrame,
+    volume_col: str = "volume",
+    window: int = 20,
+    low_threshold: float = 0.7,
+    high_threshold: float = 1.3
+) -> pl.DataFrame:
+    """Detect liquidity regime based on volume patterns.
+
+    Classifies periods as low, normal, or high liquidity based on
+    volume relative to its moving average.
+
+    Args:
+        df: DataFrame with volume data.
+        volume_col: Column name for volume.
+        window: Rolling window for volume average.
+        low_threshold: Multiplier for low liquidity (default: 0.7).
+        high_threshold: Multiplier for high liquidity (default: 1.3).
+
+    Returns:
+        DataFrame with liquidity_regime column.
+
+    Example:
+        >>> df = pl.DataFrame({"volume": [1000, 1200, 800, 1500, 1100]})
+        >>> result = detect_liquidity_regime(df)
+    """
+    # Calculate rolling volume average
+    df = df.with_columns([
+        pl.col(volume_col).rolling_mean(window_size=window).alias("volume_ma")
+    ])
+
+    # Calculate volume ratio
+    df = df.with_columns([
+        (pl.col(volume_col) / pl.col("volume_ma")).alias("volume_ratio")
+    ])
+
+    # Classify liquidity regime
+    df = df.with_columns([
+        pl.when(pl.col("volume_ratio") < low_threshold)
+        .then(pl.lit("low_liquidity"))
+        .when(pl.col("volume_ratio") > high_threshold)
+        .then(pl.lit("high_liquidity"))
+        .otherwise(pl.lit("normal_liquidity"))
+        .alias("liquidity_regime")
+    ])
+
+    return df
+
+
+def combine_regime_features(
+    df: pl.DataFrame,
+    regime_cols: List[str]
+) -> pl.DataFrame:
+    """Combine multiple regime classifications into composite features.
+
+    Creates a concatenated regime label and one-hot encoded features
+    for machine learning models.
+
+    Args:
+        df: DataFrame with multiple regime columns.
+        regime_cols: List of regime column names to combine.
+
+    Returns:
+        DataFrame with composite_regime column and one-hot features.
+
+    Example:
+        >>> df = pl.DataFrame({
+        ...     "vol_regime": ["high", "low", "normal"],
+        ...     "trend_regime": ["uptrend", "ranging", "downtrend"]
+        ... })
+        >>> result = combine_regime_features(df, ["vol_regime", "trend_regime"])
+    """
+    # Create composite regime label
+    df = df.with_columns([
+        pl.concat_str(regime_cols, separator="_").alias("composite_regime")
+    ])
+
+    # One-hot encode each regime type
+    for col in regime_cols:
+        unique_values = df[col].unique().drop_nulls().to_list()
+        for val in unique_values:
+            onehot_col = f"{col}_{val}"
+            df = df.with_columns([
+                (pl.col(col) == val).cast(pl.Int8).alias(onehot_col)
+            ])
+
+    return df
