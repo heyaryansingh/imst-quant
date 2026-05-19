@@ -287,3 +287,160 @@ def calculate_all_metrics(
         "annualized_return": annualized_return,
         "volatility": volatility,
     }
+
+
+def calculate_rolling_risk_metrics(
+    returns: Union[pl.Series, pl.DataFrame],
+    window: int = 60,
+    risk_free_rate: float = 0.0,
+    periods_per_year: int = 252,
+    return_col: str = "returns",
+) -> pl.DataFrame:
+    """Calculate rolling risk metrics over time.
+
+    Computes Sharpe ratio, Sortino ratio, volatility, and VaR using
+    a rolling window, useful for analyzing time-varying risk characteristics.
+
+    Args:
+        returns: Series or DataFrame containing return data.
+        window: Rolling window size in periods (default: 60).
+        risk_free_rate: Daily risk-free rate for Sharpe/Sortino.
+        periods_per_year: Trading periods per year for annualization.
+        return_col: Column name if returns is a DataFrame.
+
+    Returns:
+        DataFrame with columns: rolling_sharpe, rolling_sortino,
+        rolling_volatility, rolling_var.
+
+    Example:
+        >>> import polars as pl
+        >>> returns = pl.Series("returns", [0.01, -0.02, 0.015] * 30)
+        >>> rolling_metrics = calculate_rolling_risk_metrics(returns, window=20)
+        >>> print(rolling_metrics.head())
+    """
+    if isinstance(returns, pl.DataFrame):
+        ret_series = returns[return_col]
+    else:
+        ret_series = returns
+
+    # Convert to numpy for rolling calculations
+    ret_np = ret_series.to_numpy()
+    n = len(ret_np)
+
+    rolling_sharpe = []
+    rolling_sortino = []
+    rolling_vol = []
+    rolling_var_vals = []
+
+    for i in range(window, n + 1):
+        window_returns = ret_np[i - window : i]
+        window_series = pl.Series(window_returns)
+
+        # Calculate metrics for this window
+        sharpe = sharpe_ratio(window_series, risk_free_rate, periods_per_year)
+        sortino = sortino_ratio(window_series, risk_free_rate, periods_per_year)
+        vol = float(window_series.std() * np.sqrt(periods_per_year))
+        var = value_at_risk(window_series, confidence_level=0.95)
+
+        rolling_sharpe.append(sharpe)
+        rolling_sortino.append(sortino)
+        rolling_vol.append(vol)
+        rolling_var_vals.append(var)
+
+    # Pad with nulls for initial window
+    padding = [None] * (window - 1)
+
+    return pl.DataFrame({
+        "rolling_sharpe": padding + rolling_sharpe,
+        "rolling_sortino": padding + rolling_sortino,
+        "rolling_volatility": padding + rolling_vol,
+        "rolling_var": padding + rolling_var_vals,
+    })
+
+
+def calculate_omega_ratio(
+    returns: Union[pl.Series, pl.DataFrame],
+    threshold: float = 0.0,
+    return_col: str = "returns",
+) -> float:
+    """Calculate Omega ratio (probability-weighted gains vs losses).
+
+    The Omega ratio measures the ratio of probability-weighted gains
+    above a threshold to probability-weighted losses below the threshold.
+    Higher values indicate better risk-adjusted returns.
+
+    Args:
+        returns: Series or DataFrame containing return data.
+        threshold: Return threshold (default: 0.0 for risk-free rate).
+        return_col: Column name if returns is a DataFrame.
+
+    Returns:
+        Omega ratio. Returns inf if no losses below threshold.
+
+    Example:
+        >>> returns = pl.Series([0.02, -0.01, 0.03, -0.02, 0.01])
+        >>> omega = calculate_omega_ratio(returns, threshold=0.0)
+        >>> print(f"Omega Ratio: {omega:.4f}")
+    """
+    if isinstance(returns, pl.DataFrame):
+        ret_series = returns[return_col]
+    else:
+        ret_series = returns
+
+    gains = ret_series.filter(ret_series > threshold) - threshold
+    losses = threshold - ret_series.filter(ret_series <= threshold)
+
+    total_gains = gains.sum() if gains.len() > 0 else 0.0
+    total_losses = losses.sum() if losses.len() > 0 else 0.0
+
+    if total_losses == 0:
+        return float('inf') if total_gains > 0 else 0.0
+
+    return float(total_gains / total_losses)
+
+
+def calculate_tail_ratio(
+    returns: Union[pl.Series, pl.DataFrame],
+    lower_percentile: float = 5.0,
+    upper_percentile: float = 95.0,
+    return_col: str = "returns",
+) -> float:
+    """Calculate tail ratio (right tail mean / left tail mean).
+
+    Measures the ratio of average returns in the right tail (gains)
+    to average returns in the left tail (losses). Higher values indicate
+    better tail risk characteristics.
+
+    Args:
+        returns: Series or DataFrame containing return data.
+        lower_percentile: Lower percentile for left tail (default: 5).
+        upper_percentile: Upper percentile for right tail (default: 95).
+        return_col: Column name if returns is a DataFrame.
+
+    Returns:
+        Tail ratio. Returns inf if left tail mean is zero.
+
+    Example:
+        >>> import numpy as np
+        >>> returns = pl.Series(np.random.randn(252) * 0.02)
+        >>> tail = calculate_tail_ratio(returns)
+        >>> print(f"Tail Ratio: {tail:.4f}")
+    """
+    if isinstance(returns, pl.DataFrame):
+        ret_series = returns[return_col]
+    else:
+        ret_series = returns
+
+    lower_threshold = ret_series.quantile(lower_percentile / 100.0, interpolation="linear")
+    upper_threshold = ret_series.quantile(upper_percentile / 100.0, interpolation="linear")
+
+    right_tail = ret_series.filter(ret_series >= upper_threshold)
+    left_tail = ret_series.filter(ret_series <= lower_threshold)
+
+    right_mean = right_tail.mean() if right_tail.len() > 0 else 0.0
+    left_mean = left_tail.mean() if left_tail.len() > 0 else 0.0
+
+    if abs(left_mean) < 1e-10:
+        return float('inf') if right_mean > 0 else 0.0
+
+    return float(abs(right_mean / left_mean))
