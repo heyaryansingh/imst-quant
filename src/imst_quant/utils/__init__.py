@@ -259,6 +259,43 @@ from imst_quant.utils.mean_reversion import (
     test_mean_reversion,
     variance_ratio_test,
 )
+from imst_quant.utils.cornish_fisher_var import (
+    RiskComparison,
+    cornish_fisher_cvar,
+    cornish_fisher_var,
+    jarque_bera_test,
+    modified_sharpe_ratio,
+    risk_summary,
+)
+from imst_quant.utils.correlation_regime import (
+    CorrelationRegime,
+    CorrelationRegimeResult,
+    CorrelationStability,
+    correlation_divergence,
+    correlation_stability,
+    detect_correlation_regime,
+    eigenvalue_concentration,
+    rolling_correlation_matrix,
+)
+from imst_quant.utils.signal_decay import (
+    DecayCurve,
+    StalenessResult,
+    decay_report,
+    detect_signal_staleness,
+    measure_signal_decay,
+    rolling_signal_ic,
+    signal_half_life,
+)
+from imst_quant.utils.portfolio_turnover import (
+    TurnoverCost,
+    TurnoverDecomposition,
+    TurnoverSummary,
+    calculate_turnover,
+    estimate_turnover_cost,
+    turnover_budget,
+    turnover_decomposition,
+    turnover_summary,
+)
 
 __all__ = [
     # Checkpoint
@@ -471,4 +508,37 @@ __all__ = [
     "rolling_variance_ratio",
     "test_mean_reversion",
     "variance_ratio_test",
+    # Cornish-Fisher VaR
+    "RiskComparison",
+    "cornish_fisher_cvar",
+    "cornish_fisher_var",
+    "jarque_bera_test",
+    "modified_sharpe_ratio",
+    "risk_summary",
+    # Correlation regime detection
+    "CorrelationRegime",
+    "CorrelationRegimeResult",
+    "CorrelationStability",
+    "correlation_divergence",
+    "correlation_stability",
+    "detect_correlation_regime",
+    "eigenvalue_concentration",
+    "rolling_correlation_matrix",
+    # Signal decay analysis
+    "DecayCurve",
+    "StalenessResult",
+    "decay_report",
+    "detect_signal_staleness",
+    "measure_signal_decay",
+    "rolling_signal_ic",
+    "signal_half_life",
+    # Portfolio turnover analysis
+    "TurnoverCost",
+    "TurnoverDecomposition",
+    "TurnoverSummary",
+    "calculate_turnover",
+    "estimate_turnover_cost",
+    "turnover_budget",
+    "turnover_decomposition",
+    "turnover_summary",
 ]
