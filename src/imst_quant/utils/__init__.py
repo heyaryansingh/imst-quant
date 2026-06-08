@@ -21,6 +21,7 @@ This package provides utility functions for:
 - Volatility forecasting (EWMA, GARCH, historical, volatility cone)
 - Returns distribution analysis (skewness, kurtosis, normality tests)
 - Signal backtesting (quick signal validation, performance metrics)
+- Mean reversion detection (Hurst exponent, ADF test, variance ratio, half-life)
 """
 
 from imst_quant.utils.attribution import (
@@ -41,6 +42,15 @@ from imst_quant.utils.drawdown_analysis import (
     drawdown_statistics,
     identify_drawdown_periods,
     worst_drawdowns,
+)
+from imst_quant.utils.drawdown_recovery import (
+    RecoveryAnalysis,
+    analyze_recovery_periods,
+    estimate_recovery_time,
+    recovery_by_depth_bucket,
+    recovery_statistics,
+    recovery_velocity,
+    underwater_analysis as underwater_analysis_detailed,
 )
 from imst_quant.utils.regime_detection import (
     MarketRegime,
@@ -225,6 +235,30 @@ from imst_quant.utils.signal_strength import (
     SignalStrengthAnalyzer,
     compare_signal_strengths,
 )
+from imst_quant.utils.portfolio_snapshot import (
+    HoldingSnapshot,
+    PortfolioSnapshot,
+    check_alerts,
+    compare_snapshots,
+    format_snapshot_json,
+    format_snapshot_text,
+    generate_snapshot,
+    snapshot_to_dataframe,
+)
+from imst_quant.utils.mean_reversion import (
+    MeanReversionResult,
+    VarianceRatioResult,
+    adf_test,
+    estimate_half_life,
+    find_mean_reverting_pairs,
+    generate_mean_reversion_report,
+    hurst_exponent,
+    rolling_half_life,
+    rolling_hurst,
+    rolling_variance_ratio,
+    test_mean_reversion,
+    variance_ratio_test,
+)
 
 __all__ = [
     # Checkpoint
@@ -264,6 +298,14 @@ __all__ = [
     "drawdown_statistics",
     "worst_drawdowns",
     "drawdown_duration_analysis",
+    # Drawdown recovery analysis
+    "RecoveryAnalysis",
+    "analyze_recovery_periods",
+    "estimate_recovery_time",
+    "recovery_by_depth_bucket",
+    "recovery_statistics",
+    "recovery_velocity",
+    "underwater_analysis_detailed",
     # Regime detection
     "VolatilityRegime",
     "TrendRegime",
@@ -407,4 +449,26 @@ __all__ = [
     "SignalStrength",
     "SignalStrengthAnalyzer",
     "compare_signal_strengths",
+    # Portfolio snapshot
+    "HoldingSnapshot",
+    "PortfolioSnapshot",
+    "check_alerts",
+    "compare_snapshots",
+    "format_snapshot_json",
+    "format_snapshot_text",
+    "generate_snapshot",
+    "snapshot_to_dataframe",
+    # Mean reversion analysis
+    "MeanReversionResult",
+    "VarianceRatioResult",
+    "adf_test",
+    "estimate_half_life",
+    "find_mean_reverting_pairs",
+    "generate_mean_reversion_report",
+    "hurst_exponent",
+    "rolling_half_life",
+    "rolling_hurst",
+    "rolling_variance_ratio",
+    "test_mean_reversion",
+    "variance_ratio_test",
 ]
