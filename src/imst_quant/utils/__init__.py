@@ -29,6 +29,8 @@ This package provides utility functions for:
 - Alpha metrics (decomposition, fundamental law, information ratio)
 - Rolling performance (returns, volatility, Sharpe, Sortino, beta, alpha)
 - Recovery speed analysis (recovery rate, velocity, pattern classification)
+- Covariance shrinkage (Ledoit-Wolf, OAS, identity, custom target estimators)
+- Drawdown circuit breaker (tiered alerts, position scaling, cooldown, simulation)
 """
 
 from imst_quant.utils.attribution import (
@@ -395,6 +397,21 @@ from imst_quant.utils.recovery_speed import (
     classify_recovery_pattern,
     recovery_efficiency_score,
 )
+from imst_quant.utils.covariance_shrinkage import (
+    ShrinkageResult,
+    ledoit_wolf_shrinkage,
+    oas_shrinkage,
+    identity_shrinkage,
+    custom_target_shrinkage,
+    compare_shrinkage_methods,
+)
+from imst_quant.utils.drawdown_circuit_breaker import (
+    CircuitAction,
+    CircuitEvent,
+    CircuitState,
+    DrawdownCircuitBreaker,
+    simulate_circuit_breaker,
+)
 
 __all__ = [
     # Checkpoint
@@ -702,4 +719,17 @@ __all__ = [
     "analyze_recovery_velocity",
     "classify_recovery_pattern",
     "recovery_efficiency_score",
+    # Covariance shrinkage
+    "ShrinkageResult",
+    "ledoit_wolf_shrinkage",
+    "oas_shrinkage",
+    "identity_shrinkage",
+    "custom_target_shrinkage",
+    "compare_shrinkage_methods",
+    # Drawdown circuit breaker
+    "CircuitAction",
+    "CircuitEvent",
+    "CircuitState",
+    "DrawdownCircuitBreaker",
+    "simulate_circuit_breaker",
 ]
