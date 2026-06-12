@@ -22,6 +22,13 @@ This package provides utility functions for:
 - Returns distribution analysis (skewness, kurtosis, normality tests)
 - Signal backtesting (quick signal validation, performance metrics)
 - Mean reversion detection (Hurst exponent, ADF test, variance ratio, half-life)
+- Sentiment signal conversion (threshold, momentum, contrarian, crossover)
+- Scenario analysis (custom stress tests, historical crises, sensitivity sweeps)
+- Equity curve analysis (construction, statistics, regimes, rolling CAGR)
+- Concentration metrics (Herfindahl, effective N, Gini, Shannon entropy)
+- Alpha metrics (decomposition, fundamental law, information ratio)
+- Rolling performance (returns, volatility, Sharpe, Sortino, beta, alpha)
+- Recovery speed analysis (recovery rate, velocity, pattern classification)
 """
 
 from imst_quant.utils.attribution import (
@@ -296,6 +303,98 @@ from imst_quant.utils.portfolio_turnover import (
     turnover_decomposition,
     turnover_summary,
 )
+from imst_quant.utils.rebalance_signals import (
+    DriftMetrics,
+    RebalanceOrder,
+    RebalanceSummary,
+    calculate_drift,
+    calendar_rebalance_signal,
+    generate_rebalance_orders,
+    rebalance_summary,
+    threshold_rebalance_signal,
+    volatility_adjusted_threshold,
+)
+from imst_quant.utils.drawdown_position_scaling import (
+    ScalingConfig,
+    ScalingState,
+    apply_drawdown_scaling,
+    calculate_current_drawdown,
+    concave_scale_factor,
+    convex_scale_factor,
+    drawdown_scaling_report,
+    get_scaling_state,
+    linear_scale_factor,
+    step_scale_factor,
+)
+from imst_quant.utils.sentiment_signals import (
+    SentimentSignalConfig,
+    sentiment_to_signal,
+    sentiment_momentum_signal,
+    sentiment_extreme_signal,
+    sentiment_crossover_signal,
+    composite_sentiment_signal,
+    calculate_sentiment_divergence,
+)
+from imst_quant.utils.scenario_analysis import (
+    Scenario,
+    ScenarioResult,
+    ScenarioAnalysisReport,
+    define_scenario,
+    apply_scenario,
+    run_scenario_analysis,
+    historical_scenario_lookup,
+    list_historical_scenarios,
+    scenario_sensitivity,
+    custom_stress_test,
+)
+from imst_quant.utils.equity_curve import (
+    EquityCurveStats,
+    PeriodReturn,
+    build_equity_curve,
+    equity_curve_statistics,
+    equity_curve_regimes,
+    compare_equity_curves,
+    rolling_cagr,
+    time_period_returns,
+)
+from imst_quant.utils.concentration_metrics import (
+    herfindahl_index,
+    effective_n,
+    concentration_ratio,
+    gini_coefficient,
+    shannon_entropy,
+    calculate_all_concentration,
+)
+from imst_quant.utils.alpha_metrics import (
+    AlphaDecomposition,
+    AlphaMetrics,
+    calculate_fundamental_law_alpha,
+    decompose_information_ratio,
+)
+from imst_quant.utils.rolling_performance import (
+    calculate_rolling_returns,
+    calculate_rolling_volatility,
+    calculate_rolling_sharpe,
+    calculate_rolling_sortino,
+    calculate_rolling_calmar,
+    calculate_rolling_drawdown,
+    calculate_rolling_beta,
+    calculate_rolling_alpha,
+    calculate_rolling_information_ratio,
+    calculate_rolling_omega,
+    calculate_rolling_win_rate,
+    calculate_rolling_profit_factor,
+    calculate_rolling_ulcer_index,
+    calculate_comprehensive_rolling_metrics,
+)
+from imst_quant.utils.recovery_speed import (
+    RecoveryPattern,
+    RecoveryMetrics,
+    calculate_recovery_rate,
+    analyze_recovery_velocity,
+    classify_recovery_pattern,
+    recovery_efficiency_score,
+)
 
 __all__ = [
     # Checkpoint
@@ -541,4 +640,66 @@ __all__ = [
     "turnover_budget",
     "turnover_decomposition",
     "turnover_summary",
+    # Sentiment signals
+    "SentimentSignalConfig",
+    "sentiment_to_signal",
+    "sentiment_momentum_signal",
+    "sentiment_extreme_signal",
+    "sentiment_crossover_signal",
+    "composite_sentiment_signal",
+    "calculate_sentiment_divergence",
+    # Scenario analysis
+    "Scenario",
+    "ScenarioResult",
+    "ScenarioAnalysisReport",
+    "define_scenario",
+    "apply_scenario",
+    "run_scenario_analysis",
+    "historical_scenario_lookup",
+    "list_historical_scenarios",
+    "scenario_sensitivity",
+    "custom_stress_test",
+    # Equity curve analysis
+    "EquityCurveStats",
+    "PeriodReturn",
+    "build_equity_curve",
+    "equity_curve_statistics",
+    "equity_curve_regimes",
+    "compare_equity_curves",
+    "rolling_cagr",
+    "time_period_returns",
+    # Concentration metrics
+    "herfindahl_index",
+    "effective_n",
+    "concentration_ratio",
+    "gini_coefficient",
+    "shannon_entropy",
+    "calculate_all_concentration",
+    # Alpha metrics
+    "AlphaDecomposition",
+    "AlphaMetrics",
+    "calculate_fundamental_law_alpha",
+    "decompose_information_ratio",
+    # Rolling performance
+    "calculate_rolling_returns",
+    "calculate_rolling_volatility",
+    "calculate_rolling_sharpe",
+    "calculate_rolling_sortino",
+    "calculate_rolling_calmar",
+    "calculate_rolling_drawdown",
+    "calculate_rolling_beta",
+    "calculate_rolling_alpha",
+    "calculate_rolling_information_ratio",
+    "calculate_rolling_omega",
+    "calculate_rolling_win_rate",
+    "calculate_rolling_profit_factor",
+    "calculate_rolling_ulcer_index",
+    "calculate_comprehensive_rolling_metrics",
+    # Recovery speed
+    "RecoveryPattern",
+    "RecoveryMetrics",
+    "calculate_recovery_rate",
+    "analyze_recovery_velocity",
+    "classify_recovery_pattern",
+    "recovery_efficiency_score",
 ]
