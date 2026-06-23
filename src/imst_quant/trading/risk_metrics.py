@@ -163,6 +163,36 @@ def calculate_sharpe_ratio(
     return (mean_excess / std_excess) * (periods_per_year**0.5)
 
 
+def calculate_omega_ratio(
+    returns: pl.Series, threshold: float = 0.0, periods_per_year: int = 252
+) -> float:
+    """Calculate Omega ratio.
+
+    Omega ratio measures the probability-weighted ratio of gains versus losses
+    relative to a threshold return. It captures the entire return distribution
+    shape, unlike Sharpe which only uses mean and variance.
+
+    Args:
+        returns: Series of returns.
+        threshold: Threshold return level (default: 0 for risk-free rate).
+        periods_per_year: Number of periods per year (default: 252).
+
+    Returns:
+        Omega ratio (higher is better, >1 indicates positive expectancy).
+    """
+    if len(returns) == 0:
+        return 0.0
+
+    excess_returns = returns - threshold
+    gains = excess_returns.filter(excess_returns > 0).sum()
+    losses = abs(excess_returns.filter(excess_returns < 0).sum())
+
+    if losses == 0:
+        return float("inf") if gains > 0 else 1.0
+
+    return float(gains / losses)
+
+
 def calculate_risk_metrics(
     returns: pl.Series,
     risk_free_rate: float = 0.0,
@@ -182,6 +212,7 @@ def calculate_risk_metrics(
             - sharpe_ratio: Annualized Sharpe ratio
             - sortino_ratio: Sortino ratio
             - calmar_ratio: Calmar ratio
+            - omega_ratio: Omega ratio
             - max_drawdown: Maximum drawdown
             - var_95: Value at Risk at 95% confidence
             - cvar_95: Conditional VaR at 95% confidence
@@ -193,6 +224,7 @@ def calculate_risk_metrics(
             "sharpe_ratio": 0.0,
             "sortino_ratio": 0.0,
             "calmar_ratio": 0.0,
+            "omega_ratio": 0.0,
             "max_drawdown": 0.0,
             "var_95": 0.0,
             "cvar_95": 0.0,
@@ -208,6 +240,7 @@ def calculate_risk_metrics(
         "sharpe_ratio": calculate_sharpe_ratio(returns, risk_free_rate, periods_per_year),
         "sortino_ratio": calculate_sortino_ratio(returns, risk_free_rate),
         "calmar_ratio": calculate_calmar_ratio(returns, periods_per_year),
+        "omega_ratio": calculate_omega_ratio(returns, risk_free_rate, periods_per_year),
         "max_drawdown": calculate_max_drawdown(equity_curve),
         "var_95": calculate_var(returns, var_confidence),
         "cvar_95": calculate_cvar(returns, var_confidence),
