@@ -481,3 +481,117 @@ def calculate_rolling_sharpe(
                 mean_sharpe=sharpe.mean())
 
     return sharpe
+
+
+def calculate_rolling_correlation(
+    series1: pd.Series,
+    series2: pd.Series,
+    window: int = 60,
+    min_periods: Optional[int] = None,
+) -> pd.Series:
+    """Calculate rolling correlation between two series.
+
+    Useful for monitoring changing relationships between assets or factors.
+
+    Args:
+        series1: First time series
+        series2: Second time series
+        window: Rolling window size
+        min_periods: Minimum observations required (default: window)
+
+    Returns:
+        Series with rolling correlations
+
+    Example:
+        >>> stock_returns = pd.Series(np.random.randn(100) * 0.01)
+        >>> market_returns = pd.Series(np.random.randn(100) * 0.01)
+        >>> rolling_corr = calculate_rolling_correlation(stock_returns, market_returns, window=20)
+    """
+    if min_periods is None:
+        min_periods = window
+
+    rolling_corr = series1.rolling(window=window, min_periods=min_periods).corr(series2)
+
+    logger.info("Rolling correlation computed",
+                window=window,
+                min_periods=min_periods,
+                mean_corr=rolling_corr.mean(),
+                std_corr=rolling_corr.std())
+
+    return rolling_corr
+
+
+def calculate_autocorrelation(
+    series: pd.Series,
+    max_lags: int = 20,
+) -> pd.Series:
+    """Calculate autocorrelation function (ACF) for a time series.
+
+    Useful for detecting mean reversion, momentum, or patterns in returns.
+
+    Args:
+        series: Input time series
+        max_lags: Maximum number of lags to compute (default: 20)
+
+    Returns:
+        Series with autocorrelations indexed by lag
+
+    Example:
+        >>> returns = pd.Series(np.random.randn(100) * 0.01)
+        >>> acf = calculate_autocorrelation(returns, max_lags=10)
+        >>> print(f"Lag-1 autocorr: {acf.iloc[1]:.3f}")
+    """
+    autocorr_values = [series.autocorr(lag=lag) for lag in range(max_lags + 1)]
+    acf = pd.Series(autocorr_values, index=range(max_lags + 1))
+
+    logger.info("Autocorrelation computed",
+                max_lags=max_lags,
+                lag1_autocorr=acf.iloc[1] if len(acf) > 1 else None,
+                significant_lags=sum(abs(acf) > 2 / np.sqrt(len(series))))
+
+    return acf
+
+
+def calculate_beta(
+    asset_returns: pd.Series,
+    market_returns: pd.Series,
+    window: Optional[int] = None,
+) -> Union[float, pd.Series]:
+    """Calculate beta (systematic risk) of an asset relative to the market.
+
+    Args:
+        asset_returns: Asset return series
+        market_returns: Market/benchmark return series
+        window: Rolling window size (None = single beta for entire period)
+
+    Returns:
+        Beta value(s) - float if window=None, Series if rolling
+
+    Example:
+        >>> stock = pd.Series(np.random.randn(100) * 0.02)
+        >>> market = pd.Series(np.random.randn(100) * 0.01)
+        >>> beta = calculate_beta(stock, market)
+        >>> rolling_beta = calculate_beta(stock, market, window=60)
+    """
+    if window is None:
+        # Calculate single beta
+        covariance = asset_returns.cov(market_returns)
+        market_variance = market_returns.var()
+
+        if market_variance == 0:
+            return 0.0
+
+        beta = covariance / market_variance
+        logger.info("Beta calculated", beta=beta)
+        return beta
+    else:
+        # Calculate rolling beta
+        rolling_cov = asset_returns.rolling(window=window).cov(market_returns)
+        rolling_var = market_returns.rolling(window=window).var()
+
+        beta = rolling_cov / rolling_var
+        logger.info("Rolling beta calculated",
+                    window=window,
+                    mean_beta=beta.mean(),
+                    std_beta=beta.std())
+        return beta
