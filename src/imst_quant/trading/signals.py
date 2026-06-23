@@ -869,3 +869,136 @@ def adx_signal(
         "_tr", "_plus_dm", "_minus_dm", "_atr",
         "_smoothed_plus_dm", "_smoothed_minus_dm", "_dx"
     ])
+
+
+def bollinger_bands_signal(
+    df: pl.DataFrame,
+    price_col: str = "close",
+    period: int = 20,
+    std_dev: float = 2.0,
+) -> pl.DataFrame:
+    """Generate Bollinger Bands mean reversion signals.
+
+    Bollinger Bands identify overbought (price near upper band) and oversold
+    (price near lower band) conditions. Generates contrarian signals when
+    price touches or crosses bands.
+
+    Args:
+        df: DataFrame containing price data.
+        price_col: Column name for prices. Defaults to "close".
+        period: Moving average period. Defaults to 20.
+        std_dev: Standard deviation multiplier for bands. Defaults to 2.0.
+
+    Returns:
+        DataFrame with new columns:
+        - bb_middle: Middle band (SMA)
+        - bb_upper: Upper band (SMA + std_dev * volatility)
+        - bb_lower: Lower band (SMA - std_dev * volatility)
+        - bb_width: Band width (upper - lower)
+        - bb_position: Price position within bands (0-1 scale)
+        - bb_signal: -1 (overbought), 1 (oversold), 0 (neutral)
+
+    Example:
+        >>> df = pl.DataFrame({"close": [100, 102, 101, 105, 108, 106, 103]})
+        >>> result = bollinger_bands_signal(df, period=5, std_dev=2.0)
+    """
+    df = df.with_columns([
+        pl.col(price_col).rolling_mean(window_size=period).alias("bb_middle"),
+        pl.col(price_col).rolling_std(window_size=period).alias("_bb_std"),
+    ])
+
+    df = df.with_columns([
+        (pl.col("bb_middle") + std_dev * pl.col("_bb_std")).alias("bb_upper"),
+        (pl.col("bb_middle") - std_dev * pl.col("_bb_std")).alias("bb_lower"),
+    ])
+
+    df = df.with_columns([
+        (pl.col("bb_upper") - pl.col("bb_lower")).alias("bb_width"),
+        ((pl.col(price_col) - pl.col("bb_lower")) /
+         (pl.col("bb_upper") - pl.col("bb_lower"))).alias("bb_position"),
+    ])
+
+    # Generate contrarian signals
+    df = df.with_columns(
+        pl.when(pl.col(price_col) <= pl.col("bb_lower"))
+        .then(1)  # Oversold - buy signal
+        .when(pl.col(price_col) >= pl.col("bb_upper"))
+        .then(-1)  # Overbought - sell signal
+        .otherwise(0)
+        .alias("bb_signal")
+    )
+
+    return df.drop("_bb_std")
+
+
+def rsi_signal(
+    df: pl.DataFrame,
+    price_col: str = "close",
+    period: int = 14,
+    overbought: float = 70.0,
+    oversold: float = 30.0,
+) -> pl.DataFrame:
+    """Generate RSI (Relative Strength Index) signals.
+
+    RSI measures momentum and identifies overbought/oversold conditions.
+    Generates contrarian signals when RSI crosses threshold levels.
+
+    Args:
+        df: DataFrame containing price data.
+        price_col: Column name for prices. Defaults to "close".
+        period: RSI calculation period. Defaults to 14.
+        overbought: Overbought threshold (0-100). Defaults to 70.
+        oversold: Oversold threshold (0-100). Defaults to 30.
+
+    Returns:
+        DataFrame with new columns:
+        - rsi: RSI value (0-100 scale)
+        - rsi_signal: -1 (overbought), 1 (oversold), 0 (neutral)
+
+    Example:
+        >>> df = pl.DataFrame({"close": [100, 102, 101, 105, 108, 106, 103, 107]})
+        >>> result = rsi_signal(df, period=5, overbought=65, oversold=35)
+    """
+    # Calculate price changes
+    df = df.with_columns(
+        pl.col(price_col).diff().alias("_price_change")
+    )
+
+    # Separate gains and losses
+    df = df.with_columns([
+        pl.when(pl.col("_price_change") > 0)
+        .then(pl.col("_price_change"))
+        .otherwise(0.0)
+        .alias("_gain"),
+        pl.when(pl.col("_price_change") < 0)
+        .then(pl.col("_price_change").abs())
+        .otherwise(0.0)
+        .alias("_loss"),
+    ])
+
+    # Calculate average gains and losses using EMA
+    df = df.with_columns([
+        pl.col("_gain").ewm_mean(span=period).alias("_avg_gain"),
+        pl.col("_loss").ewm_mean(span=period).alias("_avg_loss"),
+    ])
+
+    # Calculate RS and RSI
+    df = df.with_columns(
+        (pl.col("_avg_gain") / pl.col("_avg_loss")).alias("_rs")
+    )
+
+    df = df.with_columns(
+        (100.0 - (100.0 / (1.0 + pl.col("_rs")))).alias("rsi")
+    )
+
+    # Generate contrarian signals
+    df = df.with_columns(
+        pl.when(pl.col("rsi") <= oversold)
+        .then(1)  # Oversold - buy signal
+        .when(pl.col("rsi") >= overbought)
+        .then(-1)  # Overbought - sell signal
+        .otherwise(0)
+        .alias("rsi_signal")
+    )
+
+    return df.drop(["_price_change", "_gain", "_loss", "_avg_gain", "_avg_loss", "_rs"])
