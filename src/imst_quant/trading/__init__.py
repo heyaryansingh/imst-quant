@@ -19,6 +19,12 @@ Example:
 
 from .backtest import run_backtest
 from .policy import DynamicThresholdPolicy, FixedThresholdPolicy
+from .position_pyramiding import (
+    PyramidLevel,
+    generate_pyramid_levels,
+    next_pyramid_trigger,
+    total_position_size,
+)
 from .position_sizing import (
     PositionConfig,
     PositionSizer,
@@ -35,6 +41,11 @@ from .signals import (
     prediction_to_signal,
     signal_strength,
     volatility_adjusted_signal,
+)
+from .trailing_stop import (
+    atr_trailing_stop,
+    check_stop_triggered,
+    percent_trailing_stop,
 )
 from .walk_forward import (
     WalkForwardConfig,
@@ -67,4 +78,13 @@ __all__ = [
     "WalkForwardValidator",
     "WalkForwardConfig",
     "WindowResult",
+    # Trailing stop
+    "atr_trailing_stop",
+    "percent_trailing_stop",
+    "check_stop_triggered",
+    # Position pyramiding
+    "PyramidLevel",
+    "generate_pyramid_levels",
+    "next_pyramid_trigger",
+    "total_position_size",
 ]
