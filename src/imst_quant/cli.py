@@ -802,6 +802,30 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- deflated-sharpe subcommand ---
+    deflated_sharpe_parser = subparsers.add_parser(
+        "deflated-sharpe",
+        help="Compute the Deflated Sharpe Ratio adjusted for multiple strategy trials",
+    )
+    deflated_sharpe_parser.add_argument(
+        "--returns", help="Path to returns parquet file (default: gold/returns.parquet)"
+    )
+    deflated_sharpe_parser.add_argument(
+        "--return-col", default="returns", help="Column name for returns (default: returns)"
+    )
+    deflated_sharpe_parser.add_argument(
+        "--n-trials",
+        type=int,
+        default=1,
+        help="Number of independent strategy variants tried before this one was selected (default: 1)",
+    )
+    deflated_sharpe_parser.add_argument(
+        "--periods", type=int, default=252, help="Trading periods per year for annualization (default: 252)"
+    )
+    deflated_sharpe_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     # --- quality-check subcommand ---
     quality_parser = subparsers.add_parser(
         "quality-check", help="Validate data quality and completeness"
@@ -3639,6 +3663,71 @@ def cmd_var_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_deflated_sharpe(args: argparse.Namespace) -> int:
+    """Compute the Deflated Sharpe Ratio for a return series.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success)
+    """
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.deflated_sharpe import deflated_sharpe_ratio_from_returns
+    import polars as pl
+    import json as json_module
+
+    settings = Settings()
+
+    if args.returns:
+        returns_path = Path(args.returns)
+    else:
+        returns_path = Path(settings.data.gold_dir) / "returns.parquet"
+
+    if not returns_path.exists():
+        print(f"Error: Returns file not found: {returns_path}")
+        print("Expected columns: [date, returns] or specify with --return-col")
+        return 1
+
+    try:
+        df = pl.read_parquet(returns_path)
+    except Exception as e:
+        print(f"Error reading returns file: {e}")
+        return 1
+
+    if args.return_col not in df.columns:
+        print(f"Error: Column '{args.return_col}' not found in returns file")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    returns = df[args.return_col].to_numpy()
+
+    try:
+        result = deflated_sharpe_ratio_from_returns(
+            returns, n_trials=args.n_trials, periods_per_year=args.periods
+        )
+
+        if args.json:
+            print(json_module.dumps(result, indent=2, default=float))
+        else:
+            print("\n=== Deflated Sharpe Ratio ===\n")
+            print(f"Observations:          {result['n_observations']:>10}")
+            print(f"Trials:                 {result['n_trials']:>10}")
+            print(f"Sharpe Ratio:          {result['sharpe_ratio']:>10.4f}")
+            print(f"Expected Max Sharpe:   {result['expected_max_sharpe']:>10.4f}")
+            print(f"Sharpe StdErr:         {result['sharpe_stderr']:>10.4f}")
+            print(f"Deflated Sharpe Ratio: {result['deflated_sharpe_ratio']:>10.4f}")
+            print()
+            verdict = "SKILL LIKELY GENUINE" if result["deflated_sharpe_ratio"] > 0.95 else "INSUFFICIENT EVIDENCE OF SKILL"
+            print(f"Verdict: {verdict}")
+
+    except Exception as e:
+        print(f"Error computing Deflated Sharpe Ratio: {e}")
+        return 1
+
+    return 0
+
+
 def cmd_quality_check(args: argparse.Namespace) -> int:
     """Validate data quality and completeness.
 
@@ -4026,6 +4115,7 @@ def main() -> int:
         "exposure": cmd_exposure,
         "risk-metrics": cmd_risk_metrics,
         "var-backtest": cmd_var_backtest,
+        "deflated-sharpe": cmd_deflated_sharpe,
         "quality-check": cmd_quality_check,
         "clean": cmd_clean,
         "signal-performance": cmd_signal_performance,
