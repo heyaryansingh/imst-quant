@@ -779,6 +779,29 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- var-backtest subcommand ---
+    var_backtest_parser = subparsers.add_parser(
+        "var-backtest", help="Backtest a VaR model with Kupiec and Christoffersen tests"
+    )
+    var_backtest_parser.add_argument(
+        "--returns", help="Path to returns parquet file (default: gold/returns.parquet)"
+    )
+    var_backtest_parser.add_argument(
+        "--return-col", default="returns", help="Column name for returns (default: returns)"
+    )
+    var_backtest_parser.add_argument(
+        "--var-col",
+        default=None,
+        help="Column with per-period VaR forecasts. If omitted, a constant "
+        "historical VaR over the full sample is used.",
+    )
+    var_backtest_parser.add_argument(
+        "--var-confidence", type=float, default=0.95, help="VaR confidence level (default: 0.95)"
+    )
+    var_backtest_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     # --- quality-check subcommand ---
     quality_parser = subparsers.add_parser(
         "quality-check", help="Validate data quality and completeness"
@@ -3532,6 +3555,90 @@ def cmd_risk_metrics(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_var_backtest(args: argparse.Namespace) -> int:
+    """Backtest a VaR model using Kupiec and Christoffersen tests.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success)
+    """
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.var_backtesting import var_backtest_summary
+    from imst_quant.utils.var_calculator import VaRCalculator
+    import polars as pl
+    import json as json_module
+    import numpy as np
+
+    settings = Settings()
+
+    if args.returns:
+        returns_path = Path(args.returns)
+    else:
+        returns_path = Path(settings.data.gold_dir) / "returns.parquet"
+
+    if not returns_path.exists():
+        print(f"Error: Returns file not found: {returns_path}")
+        print("Expected columns: [date, returns] or specify with --return-col")
+        return 1
+
+    try:
+        df = pl.read_parquet(returns_path)
+    except Exception as e:
+        print(f"Error reading returns file: {e}")
+        return 1
+
+    if args.return_col not in df.columns:
+        print(f"Error: Column '{args.return_col}' not found in returns file")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    returns = df[args.return_col].to_numpy()
+
+    try:
+        if args.var_col:
+            if args.var_col not in df.columns:
+                print(f"Error: Column '{args.var_col}' not found in returns file")
+                print(f"Available columns: {df.columns}")
+                return 1
+            var_forecasts = df[args.var_col].to_numpy()
+        else:
+            calc = VaRCalculator(
+                pl.Series(returns).to_pandas(),
+                confidence_level=args.var_confidence,
+                method="historical",
+            )
+            var_forecasts = np.full(len(returns), calc.calculate_var())
+
+        summary = var_backtest_summary(
+            returns, var_forecasts, confidence_level=args.var_confidence
+        )
+
+        if args.json:
+            print(json_module.dumps(summary, indent=2, default=float))
+        else:
+            print("\n=== VaR Backtest Summary ===\n")
+            print(f"Observations:        {summary['num_observations']:>10}")
+            print(f"Violations:          {summary['num_violations']:>10}")
+            print(f"Violation Rate:      {summary['violation_rate']:>10.2%}")
+            print(f"Expected Rate:       {summary['expected_rate']:>10.2%}")
+            print()
+            kupiec = summary["kupiec_pof"]
+            print(f"Kupiec POF LR-stat:  {kupiec['lr_statistic']:>10.3f}  (p={kupiec['p_value']:.3f})")
+            indep = summary["christoffersen_independence"]
+            print(f"Independence LR-stat:{indep['lr_statistic']:>10.3f}  (p={indep['p_value']:.3f})")
+            print()
+            verdict = "ADEQUATE" if summary["model_adequate"] else "INADEQUATE"
+            print(f"Model Verdict:       {verdict}")
+
+    except Exception as e:
+        print(f"Error running VaR backtest: {e}")
+        return 1
+
+    return 0
+
+
 def cmd_quality_check(args: argparse.Namespace) -> int:
     """Validate data quality and completeness.
 
@@ -3918,6 +4025,7 @@ def main() -> int:
         "summary": cmd_summary,
         "exposure": cmd_exposure,
         "risk-metrics": cmd_risk_metrics,
+        "var-backtest": cmd_var_backtest,
         "quality-check": cmd_quality_check,
         "clean": cmd_clean,
         "signal-performance": cmd_signal_performance,

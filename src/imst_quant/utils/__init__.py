@@ -227,6 +227,13 @@ from imst_quant.utils.var_calculator import (
     calculate_portfolio_var,
     stress_test_var,
 )
+from imst_quant.utils.var_backtesting import (
+    christoffersen_conditional_coverage_test,
+    christoffersen_independence_test,
+    compute_violations,
+    kupiec_pof_test,
+    var_backtest_summary,
+)
 from imst_quant.utils.position_sizer import (
     PositionSizer,
     risk_parity_weights,
@@ -588,6 +595,12 @@ __all__ = [
     "VaRCalculator",
     "calculate_portfolio_var",
     "stress_test_var",
+    # VaR backtesting
+    "christoffersen_conditional_coverage_test",
+    "christoffersen_independence_test",
+    "compute_violations",
+    "kupiec_pof_test",
+    "var_backtest_summary",
     # Position sizer
     "PositionSizer",
     "risk_parity_weights",
