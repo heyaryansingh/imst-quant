@@ -922,6 +922,26 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- hurst subcommand ---
+    hurst_parser = subparsers.add_parser(
+        "hurst",
+        help="Estimate the Hurst exponent and run variance ratio tests on a return series",
+    )
+    hurst_parser.add_argument(
+        "--returns", help="Path to returns parquet file (default: gold/returns.parquet)"
+    )
+    hurst_parser.add_argument(
+        "--return-col", default="returns", help="Column name for returns (default: returns)"
+    )
+    hurst_parser.add_argument(
+        "--lags",
+        default="2,5,10",
+        help="Comma-separated lags for variance ratio tests (default: 2,5,10)",
+    )
+    hurst_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -3728,6 +3748,77 @@ def cmd_deflated_sharpe(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_hurst(args: argparse.Namespace) -> int:
+    """Estimate the Hurst exponent and variance ratios for a return series.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success)
+    """
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.hurst_exponent import analyze_hurst
+    import polars as pl
+    import json as json_module
+
+    settings = Settings()
+
+    if args.returns:
+        returns_path = Path(args.returns)
+    else:
+        returns_path = Path(settings.data.gold_dir) / "returns.parquet"
+
+    if not returns_path.exists():
+        print(f"Error: Returns file not found: {returns_path}")
+        print("Expected columns: [date, returns] or specify with --return-col")
+        return 1
+
+    try:
+        df = pl.read_parquet(returns_path)
+    except Exception as e:
+        print(f"Error reading returns file: {e}")
+        return 1
+
+    if args.return_col not in df.columns:
+        print(f"Error: Column '{args.return_col}' not found in returns file")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    returns = df[args.return_col].to_numpy()
+
+    try:
+        lags = tuple(int(x) for x in args.lags.split(","))
+    except ValueError:
+        print(f"Error: Invalid --lags value '{args.lags}', expected e.g. 2,5,10")
+        return 1
+
+    try:
+        result = analyze_hurst(returns, variance_ratio_lags=lags)
+
+        if args.json:
+            print(json_module.dumps(result, indent=2, default=float))
+        else:
+            print("\n=== Hurst Exponent Analysis ===\n")
+            print(f"Observations:        {result['n_observations']:>10}")
+            print(f"Hurst (R/S):         {result['hurst_rs']:>10.4f}  (fit R2 {result['hurst_rs_r_squared']:.3f})")
+            print(f"Hurst (agg var):     {result['hurst_aggvar']:>10.4f}")
+            print(f"Regime:              {result['regime']:>15}")
+            print("\nVariance ratio tests:")
+            for vr in result["variance_ratios"]:
+                print(
+                    f"  lag {vr['lag']:>3}: VR {vr['variance_ratio']:.4f}  "
+                    f"z {vr['z_score']:+.2f}  p {vr['p_value']:.4f}  -> {vr['interpretation']}"
+                )
+            print()
+
+    except Exception as e:
+        print(f"Error computing Hurst analysis: {e}")
+        return 1
+
+    return 0
+
+
 def cmd_quality_check(args: argparse.Namespace) -> int:
     """Validate data quality and completeness.
 
@@ -4119,6 +4210,7 @@ def main() -> int:
         "quality-check": cmd_quality_check,
         "clean": cmd_clean,
         "signal-performance": cmd_signal_performance,
+        "hurst": cmd_hurst,
     }
 
     handler = commands.get(args.command)
