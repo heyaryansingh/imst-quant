@@ -967,6 +967,39 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- changepoint subcommand ---
+    changepoint_parser = subparsers.add_parser(
+        "changepoint",
+        help="Detect mean-shift and volatility change points in a return series",
+    )
+    changepoint_parser.add_argument(
+        "--returns", help="Path to returns parquet file (default: gold/returns.parquet)"
+    )
+    changepoint_parser.add_argument(
+        "--return-col", default="returns", help="Column name for returns (default: returns)"
+    )
+    changepoint_parser.add_argument(
+        "--threshold",
+        type=float,
+        default=8.0,
+        help="CUSUM alarm threshold in cumulated std devs (default: 8.0)",
+    )
+    changepoint_parser.add_argument(
+        "--drift",
+        type=float,
+        default=0.5,
+        help="CUSUM drift allowance per step (default: 0.5)",
+    )
+    changepoint_parser.add_argument(
+        "--min-segment",
+        type=int,
+        default=30,
+        help="Minimum segment length for variance segmentation (default: 30)",
+    )
+    changepoint_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -3914,6 +3947,82 @@ def cmd_turbulence(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_changepoint(args: argparse.Namespace) -> int:
+    """Detect mean-shift and volatility change points in a return series.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success)
+    """
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.change_point import analyze_change_points
+    import polars as pl
+    import json as json_module
+
+    settings = Settings()
+
+    if args.returns:
+        returns_path = Path(args.returns)
+    else:
+        returns_path = Path(settings.data.gold_dir) / "returns.parquet"
+
+    if not returns_path.exists():
+        print(f"Error: Returns file not found: {returns_path}")
+        print("Expected columns: [date, returns] or specify with --return-col")
+        return 1
+
+    try:
+        df = pl.read_parquet(returns_path)
+    except Exception as e:
+        print(f"Error reading returns file: {e}")
+        return 1
+
+    if args.return_col not in df.columns:
+        print(f"Error: Column '{args.return_col}' not found in returns file")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    returns = df[args.return_col].to_numpy()
+
+    try:
+        result = analyze_change_points(
+            returns,
+            cusum_threshold=args.threshold,
+            cusum_drift=args.drift,
+            min_segment=args.min_segment,
+        )
+
+        if args.json:
+            print(json_module.dumps(result, indent=2, default=float))
+        else:
+            mean_shift = result["mean_shift"]
+            variance = result["variance"]
+            print("\n=== Change-Point Analysis ===\n")
+            print(f"Observations:        {result['n_observations']:>10}")
+            print(f"Stability:           {result['stability']:>10}")
+            print(f"\nMean-shift alarms (CUSUM, threshold {mean_shift['threshold']:.1f}):")
+            if mean_shift["alarms"]:
+                for alarm in mean_shift["alarms"]:
+                    print(f"  index {alarm['index']:>6}  direction {alarm['direction']}")
+            else:
+                print("  none")
+            print(f"\nVariance breaks (ICSS): {variance['n_breaks']}")
+            for seg in variance["segments"]:
+                print(
+                    f"  [{seg['start']:>6}, {seg['end']:>6})  "
+                    f"vol {seg['volatility']:.5f}"
+                )
+            print()
+
+    except Exception as e:
+        print(f"Error computing change points: {e}")
+        return 1
+
+    return 0
+
+
 def cmd_quality_check(args: argparse.Namespace) -> int:
     """Validate data quality and completeness.
 
@@ -4307,6 +4416,7 @@ def main() -> int:
         "signal-performance": cmd_signal_performance,
         "hurst": cmd_hurst,
         "turbulence": cmd_turbulence,
+        "changepoint": cmd_changepoint,
     }
 
     handler = commands.get(args.command)
