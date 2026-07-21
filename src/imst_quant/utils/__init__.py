@@ -445,6 +445,16 @@ from imst_quant.utils.higher_moments import (
     downside_beta,
     upside_beta,
 )
+from imst_quant.utils.triple_barrier import (
+    ewm_volatility,
+    label_distribution,
+    triple_barrier_labels,
+)
+from imst_quant.utils.fractional_diff import (
+    ffd_weights,
+    frac_diff_ffd,
+    memory_vs_stationarity,
+)
 
 __all__ = [
     # Checkpoint
@@ -793,4 +803,12 @@ __all__ = [
     "coskewness",
     "downside_beta",
     "upside_beta",
+    # Triple-barrier labeling
+    "ewm_volatility",
+    "label_distribution",
+    "triple_barrier_labels",
+    # Fractional differentiation
+    "ffd_weights",
+    "frac_diff_ffd",
+    "memory_vs_stationarity",
 ]
