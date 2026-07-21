@@ -942,6 +942,31 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- turbulence subcommand ---
+    turbulence_parser = subparsers.add_parser(
+        "turbulence",
+        help="Compute the Mahalanobis turbulence index and absorption ratio from multi-asset returns",
+    )
+    turbulence_parser.add_argument(
+        "--returns",
+        required=True,
+        help="Path to wide parquet file with one return column per asset (non-numeric columns ignored)",
+    )
+    turbulence_parser.add_argument(
+        "--lookback",
+        type=int,
+        help="Trailing window for mean/covariance estimation (default: full sample)",
+    )
+    turbulence_parser.add_argument(
+        "--quantile",
+        type=float,
+        default=0.9,
+        help="Quantile threshold for flagging turbulent periods (default: 0.9)",
+    )
+    turbulence_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -3819,6 +3844,76 @@ def cmd_hurst(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_turbulence(args: argparse.Namespace) -> int:
+    """Compute the turbulence index and absorption ratio for multi-asset returns.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success)
+    """
+    from imst_quant.utils.turbulence_index import (
+        absorption_ratio,
+        turbulence_index,
+        turbulence_regimes,
+    )
+    import polars as pl
+    import json as json_module
+
+    returns_path = Path(args.returns)
+    if not returns_path.exists():
+        print(f"Error: Returns file not found: {returns_path}")
+        return 1
+
+    try:
+        df = pl.read_parquet(returns_path)
+    except Exception as e:
+        print(f"Error reading returns file: {e}")
+        return 1
+
+    numeric_cols = [
+        c for c, dt in zip(df.columns, df.dtypes) if dt.is_numeric()
+    ]
+    if len(numeric_cols) < 2:
+        print(f"Error: Need at least 2 numeric asset columns, found {numeric_cols}")
+        return 1
+
+    matrix = df.select(numeric_cols).to_numpy()
+
+    try:
+        turb = turbulence_index(matrix, lookback=args.lookback)
+        regimes = turbulence_regimes(turb["turbulence"], quantile=args.quantile)
+        absorption = absorption_ratio(matrix)
+
+        if args.json:
+            payload = {
+                "assets": numeric_cols,
+                "turbulence": {k: v for k, v in turb.items() if k != "turbulence"},
+                "regimes": {k: v for k, v in regimes.items() if k != "is_turbulent"},
+                "absorption": {
+                    k: v for k, v in absorption.items() if k != "eigenvalue_share"
+                },
+            }
+            print(json_module.dumps(payload, indent=2, default=float))
+        else:
+            print("\n=== Market Turbulence ===\n")
+            print(f"Assets:                {len(numeric_cols):>10}")
+            print(f"Mean turbulence:       {turb['mean_turbulence']:>10.3f}")
+            print(f"Max turbulence:        {turb['max_turbulence']:>10.3f}")
+            print(f"Current turbulence:    {turb['current_turbulence']:>10.3f}")
+            print(f"Turbulent periods:     {regimes['n_turbulent']:>10} ({regimes['pct_turbulent']:.1%})")
+            print(f"Currently turbulent:   {'YES' if regimes['currently_turbulent'] else 'no':>10}")
+            print(f"Absorption ratio:      {absorption['absorption_ratio']:>10.3f}  (top {absorption['n_components']} of {absorption['n_assets']} components)")
+            print()
+
+    except Exception as e:
+        print(f"Error computing turbulence: {e}")
+        return 1
+
+    return 0
+
+
 def cmd_quality_check(args: argparse.Namespace) -> int:
     """Validate data quality and completeness.
 
@@ -4211,6 +4306,7 @@ def main() -> int:
         "clean": cmd_clean,
         "signal-performance": cmd_signal_performance,
         "hurst": cmd_hurst,
+        "turbulence": cmd_turbulence,
     }
 
     handler = commands.get(args.command)
