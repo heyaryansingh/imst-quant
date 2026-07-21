@@ -426,6 +426,25 @@ from imst_quant.utils.drawdown_circuit_breaker import (
     DrawdownCircuitBreaker,
     simulate_circuit_breaker,
 )
+from imst_quant.utils.change_point import (
+    analyze_change_points,
+    cusum_mean_shift,
+    icss_variance_breaks,
+)
+from imst_quant.utils.conditional_drawdown import (
+    analyze_drawdown_risk,
+    cdar_ratio,
+    conditional_drawdown_at_risk,
+    drawdown_at_risk,
+    drawdown_series,
+)
+from imst_quant.utils.higher_moments import (
+    analyze_higher_moments,
+    cokurtosis,
+    coskewness,
+    downside_beta,
+    upside_beta,
+)
 
 __all__ = [
     # Checkpoint
@@ -758,4 +777,20 @@ __all__ = [
     "CircuitState",
     "DrawdownCircuitBreaker",
     "simulate_circuit_breaker",
+    # Change-point detection
+    "analyze_change_points",
+    "cusum_mean_shift",
+    "icss_variance_breaks",
+    # Conditional drawdown (DaR / CDaR)
+    "analyze_drawdown_risk",
+    "cdar_ratio",
+    "conditional_drawdown_at_risk",
+    "drawdown_at_risk",
+    "drawdown_series",
+    # Higher-moment systematic risk
+    "analyze_higher_moments",
+    "cokurtosis",
+    "coskewness",
+    "downside_beta",
+    "upside_beta",
 ]
