@@ -323,7 +323,8 @@ class TestPortfolioTurnover:
         before = {"AAPL": 0.5, "MSFT": 0.5}
         after = {"AAPL": 0.3, "MSFT": 0.7}
         t = calculate_turnover(before, after, one_way=True)
-        assert t == pytest.approx(0.1)
+        # 0.2 sold from AAPL, 0.2 bought into MSFT -> one-way = 0.4 / 2 = 0.2
+        assert t == pytest.approx(0.2)
 
     def test_calculate_turnover_two_way(self):
         """Two-way turnover should be double one-way."""
