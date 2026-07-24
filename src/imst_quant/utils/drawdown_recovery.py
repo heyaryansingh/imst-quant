@@ -371,6 +371,15 @@ def _estimate_recovery_historical(
                 "prob_recover_252d": 0.0,
             }
 
+        if current_drawdown >= 1.0:
+            return {
+                "expected_days": float("inf"),
+                "confidence_interval_90": (float("inf"), float("inf")),
+                "prob_recover_30d": 0.0,
+                "prob_recover_90d": 0.0,
+                "prob_recover_252d": 0.0,
+            }
+
         # Approximate recovery time: ln(1/(1-dd)) / ln(1+r)
         expected_days = np.log(1 / (1 - current_drawdown)) / np.log(1 + mean_return)
 

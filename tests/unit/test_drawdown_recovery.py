@@ -92,6 +92,13 @@ class TestEstimateRecoveryTime:
         result = estimate_recovery_time(returns, current_drawdown=0.10, method="historical")
         assert result["expected_days"] == float("inf")
 
+    def test_full_drawdown_gives_infinite_historical_estimate(self):
+        returns = [0.01, 0.02, 0.015, 0.005]
+        result = estimate_recovery_time(returns, current_drawdown=1.0, method="historical")
+        assert result["expected_days"] == float("inf")
+        assert result["confidence_interval_90"] == (float("inf"), float("inf"))
+        assert result["prob_recover_252d"] == 0.0
+
 
 class TestUnderwaterAnalysis:
     def test_empty_returns_empty_frame(self):
