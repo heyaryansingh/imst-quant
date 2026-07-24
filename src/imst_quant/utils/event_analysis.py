@@ -96,7 +96,7 @@ class EventStudyAnalyzer:
         try:
             beta = np.linalg.lstsq(X, y, rcond=None)[0]
             alpha, market_beta = beta[0], beta[1]
-        except:
+        except np.linalg.LinAlgError:
             alpha, market_beta = 0, 1
 
         # Event period returns
