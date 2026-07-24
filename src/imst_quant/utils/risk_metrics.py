@@ -444,3 +444,90 @@ def calculate_tail_ratio(
         return float('inf') if right_mean > 0 else 0.0
 
     return float(abs(right_mean / left_mean))
+
+
+def gain_to_pain_ratio(
+    returns: Union[pl.Series, pl.DataFrame],
+    return_col: str = "returns",
+) -> float:
+    """Calculate the Gain to Pain ratio (Schwager).
+
+    Sum of all returns divided by the absolute sum of losing-period
+    returns. Unlike Sharpe/Sortino it is not annualized or scaled by
+    volatility, so it is comparable across strategies with very
+    different return distributions.
+
+    Args:
+        returns: Series or DataFrame containing return data.
+        return_col: Column name if returns is a DataFrame.
+
+    Returns:
+        Gain to pain ratio. Returns inf if there are no losing periods.
+
+    Example:
+        >>> returns = pl.Series([0.02, -0.01, 0.03, -0.02, 0.01])
+        >>> gpr = gain_to_pain_ratio(returns)
+        >>> print(f"Gain to Pain Ratio: {gpr:.4f}")
+    """
+    if isinstance(returns, pl.DataFrame):
+        ret_series = returns[return_col]
+    else:
+        ret_series = returns
+
+    losses = ret_series.filter(ret_series < 0)
+    total_pain = abs(losses.sum()) if losses.len() > 0 else 0.0
+
+    if total_pain == 0:
+        total_gain = ret_series.sum()
+        return float('inf') if total_gain and total_gain > 0 else 0.0
+
+    return float(ret_series.sum() / total_pain)
+
+
+def burke_ratio(
+    returns: Union[pl.Series, pl.DataFrame],
+    risk_free_rate: float = 0.0,
+    periods_per_year: int = 252,
+    return_col: str = "returns",
+) -> float:
+    """Calculate the Burke ratio (excess return / sqrt of sum of squared drawdowns).
+
+    Similar to Calmar but penalizes the full drawdown path rather than
+    only the single worst drawdown, so it is less sensitive to one
+    outlier trough.
+
+    Args:
+        returns: Series or DataFrame containing return data.
+        risk_free_rate: Daily risk-free rate.
+        periods_per_year: Number of periods per year for annualization.
+        return_col: Column name if returns is a DataFrame.
+
+    Returns:
+        Burke ratio. Returns 0.0 if there are no drawdowns.
+
+    Example:
+        >>> returns = pl.Series([0.01, -0.02, 0.015, -0.005, 0.02])
+        >>> burke = burke_ratio(returns)
+        >>> print(f"Burke Ratio: {burke:.4f}")
+    """
+    if isinstance(returns, pl.DataFrame):
+        ret_series = returns[return_col]
+    else:
+        ret_series = returns
+
+    excess_returns = ret_series - risk_free_rate
+    mean_excess = excess_returns.mean()
+    if mean_excess is None:
+        return 0.0
+    annualized_excess = mean_excess * periods_per_year
+
+    cumulative = (1 + ret_series).cum_prod()
+    running_max = cumulative.cum_max()
+    drawdowns = (running_max - cumulative) / running_max
+
+    sum_sq_drawdown = (drawdowns ** 2).sum()
+
+    if not sum_sq_drawdown:
+        return 100.0 if annualized_excess > 0 else 0.0
+
+    return float(annualized_excess / np.sqrt(sum_sq_drawdown))

@@ -213,7 +213,7 @@ def adf_test(
 
         # t-statistic for the coefficient on y_lag (index 1)
         adf_stat = coeffs[1] / se[1]
-    except Exception:
+    except (np.linalg.LinAlgError, ZeroDivisionError, IndexError, FloatingPointError):
         adf_stat = 0.0
 
     # Approximate critical values (MacKinnon 1994 for n=250, with constant)
