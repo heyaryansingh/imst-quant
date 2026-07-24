@@ -201,7 +201,10 @@ def _calculate_half_life(spread: pl.Series) -> float:
     # Simple OLS
     x_mean = x.mean()
     y_mean = y.mean()
-    beta = ((x - x_mean) * (y - y_mean)).sum() / ((x - x_mean) ** 2).sum()
+    x_var = ((x - x_mean) ** 2).sum()
+    if x_var <= 0:
+        return float('inf')
+    beta = ((x - x_mean) * (y - y_mean)).sum() / x_var
 
     if beta >= 0:
         return float('inf')
