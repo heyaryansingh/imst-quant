@@ -190,13 +190,14 @@ class SquareRootModel:
         spread_dollars = spread_cost * trade_size / 2  # Half spread
 
         total_cost = impact_dollars + spread_dollars
+        notional = trade_size * current_price
 
         return {
             'impact_fraction': impact_fraction,
             'impact_bps': impact_fraction * 10000,
             'spread_cost_bps': self.params.spread_bps / 2,
             'total_cost': total_cost,
-            'total_cost_bps': (total_cost / (trade_size * current_price)) * 10000,
+            'total_cost_bps': (total_cost / notional * 10000) if notional else 0.0,
             'participation_rate': participation
         }
 
