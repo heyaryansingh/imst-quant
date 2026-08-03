@@ -362,16 +362,19 @@ def _estimate_recovery_historical(
     if not similar_recoveries:
         # Fallback: use mean return to estimate recovery
         mean_return = float(np.mean(returns))
-        if mean_return <= 0:
-            return {
-                "expected_days": float("inf"),
-                "confidence_interval_90": (float("inf"), float("inf")),
-                "prob_recover_30d": 0.0,
-                "prob_recover_90d": 0.0,
-                "prob_recover_252d": 0.0,
-            }
 
-        if current_drawdown >= 1.0:
+        # A flat series rarely averages to exactly 0.0 -- float accumulation
+        # leaves a residue around 1e-18, which passes a `<= 0` guard and then
+        # underflows `log(1 + x)` to a zero denominator. Anything below the
+        # noise floor is drift-free and never recovers.
+        # ponytail: 1e-12 is far under any real return; widen if this is ever
+        # fed returns already scaled down to basis points.
+        drift_floor = 1e-12
+
+        # log1p, not log(1 + x), so tiny-but-real drift keeps its precision.
+        growth_rate = float(np.log1p(mean_return)) if mean_return > drift_floor else 0.0
+
+        if growth_rate <= 0 or current_drawdown >= 1.0:
             return {
                 "expected_days": float("inf"),
                 "confidence_interval_90": (float("inf"), float("inf")),
@@ -381,7 +384,7 @@ def _estimate_recovery_historical(
             }
 
         # Approximate recovery time: ln(1/(1-dd)) / ln(1+r)
-        expected_days = np.log(1 / (1 - current_drawdown)) / np.log(1 + mean_return)
+        expected_days = -np.log1p(-current_drawdown) / growth_rate
 
         return {
             "expected_days": float(expected_days),

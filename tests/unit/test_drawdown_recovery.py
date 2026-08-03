@@ -1,5 +1,7 @@
 """Tests for drawdown recovery analysis utilities."""
 
+import warnings
+
 import polars as pl
 import pytest
 
@@ -72,6 +74,36 @@ class TestEstimateRecoveryTime:
         assert "prob_recover_30d" in result
         assert "prob_recover_90d" in result
         assert "prob_recover_252d" in result
+
+    def test_zero_drift_returns_infinite_recovery_without_warning(self):
+        """A series summing to ~0 must not divide by an underflowed log."""
+        # These four returns cancel out, but float accumulation leaves a
+        # residue near 1e-18, so mean_return > 0 while log(1 + mean) == 0.
+        returns = [0.01, -0.02, 0.015, -0.005] * 50
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            result = estimate_recovery_time(
+                returns, current_drawdown=0.05, method="historical"
+            )
+        assert result["expected_days"] == float("inf")
+        assert result["prob_recover_252d"] == 0.0
+
+    def test_positive_drift_gives_finite_recovery_estimate(self):
+        """With real positive drift the fallback still returns a number."""
+        returns = [0.01] * 100
+        result = estimate_recovery_time(
+            returns, current_drawdown=0.10, method="historical"
+        )
+        assert 0 < result["expected_days"] < float("inf")
+        # ln(1/0.9) / ln(1.01) ~= 10.6 periods
+        assert result["expected_days"] == pytest.approx(10.59, abs=0.1)
+
+    def test_negative_drift_returns_infinite_recovery(self):
+        returns = [-0.01] * 100
+        result = estimate_recovery_time(
+            returns, current_drawdown=0.10, method="historical"
+        )
+        assert result["expected_days"] == float("inf")
 
     def test_monte_carlo_method_returns_expected_keys(self):
         returns = [0.01, -0.005, 0.008, -0.003] * 30
