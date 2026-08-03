@@ -40,12 +40,21 @@ def _returns_and_vol(df: pl.DataFrame) -> tuple:
         return 0.0, 0.0, 0.0
     df = df.sort("date")
     closes = df["close"].to_list()
-    rets = [(closes[i] / closes[i - 1] - 1) for i in range(1, len(closes))]
+    # A zero or missing close is a data-quality artifact, not a 100% loss --
+    # drop any interval touching one rather than dividing by it or emitting
+    # a -100% return.
+    rets = [
+        closes[i] / closes[i - 1] - 1
+        for i in range(1, len(closes))
+        if closes[i] and closes[i - 1]
+    ]
     if not rets:
         return 0.0, 0.0, 0.0
     ret_1d = rets[-1]
-    ret_5d = (closes[-1] / closes[-5] - 1) if len(closes) >= 5 else ret_1d
-    vol = (sum((r - sum(rets) / len(rets)) ** 2 for r in rets) / len(rets)) ** 0.5
+    # Five trading days back is closes[-6]: indices -6..-1 span five intervals.
+    ret_5d = (closes[-1] / closes[-6] - 1) if len(closes) >= 6 and closes[-6] else ret_1d
+    mean_ret = sum(rets) / len(rets)
+    vol = (sum((r - mean_ret) ** 2 for r in rets) / len(rets)) ** 0.5
     return ret_1d, ret_5d, vol
 
 
