@@ -84,29 +84,38 @@ def calculate_sortino_ratio(
     Sortino ratio penalizes only downside volatility, unlike Sharpe which
     penalizes all volatility.
 
+    The denominator is the downside deviation: the root-mean-square shortfall
+    below ``target_return``, averaged over *all* periods. It is not the
+    standard deviation of the losing periods -- that measures how much the
+    losses differ from each other, so a strategy losing an identical amount
+    every period would score as having no downside risk at all.
+
     Args:
         returns: Series of returns.
         risk_free_rate: Risk-free rate to subtract (default: 0).
         target_return: Target return threshold (default: 0).
 
     Returns:
-        Sortino ratio (higher is better).
+        Sortino ratio (higher is better). Returns ``inf`` when returns clear
+        the target every period, and ``-inf`` when they never do and the mean
+        is below it.
     """
     if len(returns) == 0:
         return 0.0
 
     excess_returns = returns - risk_free_rate
-    mean_excess = float(excess_returns.mean())
+    mean_excess = float(excess_returns.mean()) - target_return
 
-    downside_returns = excess_returns.filter(excess_returns < target_return)
-    if len(downside_returns) == 0:
-        return float("inf") if mean_excess > 0 else 0.0
+    shortfalls = (excess_returns - target_return).clip(upper_bound=0.0)
+    downside_deviation = float((shortfalls**2).mean()) ** 0.5
 
-    downside_std = float(downside_returns.std())
-    if downside_std == 0:
+    if downside_deviation == 0:
+        # No period fell below the target: unbounded ratio, signed by the mean.
+        if mean_excess > 0:
+            return float("inf")
         return 0.0
 
-    return mean_excess / downside_std
+    return mean_excess / downside_deviation
 
 
 def calculate_calmar_ratio(returns: pl.Series, periods_per_year: int = 252) -> float:
