@@ -142,16 +142,54 @@ class TestWindowGeneration:
         small_wins = v_small._generate_windows(len(daily_data))
         assert len(small_wins) > len(large_wins)
 
-    def test_min_train_size_respected(self):
-        """Windows below min_train_size should be skipped."""
+    def test_min_train_size_respected_when_anchored(self):
+        """Anchored windows below min_train_size should be skipped."""
+        config = WalkForwardConfig(
+            train_size=100,
+            test_size=50,
+            step_size=50,
+            min_train_size=200,
+            anchored=True,
+        )
+        validator = WalkForwardValidator(config=config)
+        # Anchored training windows grow from index 0, so the first windows
+        # (100, 150 periods) are skipped and only those >= 200 survive.
+        windows = validator._generate_windows(500)
+        assert len(windows) > 0
+        for train_start, train_end, _, _ in windows:
+            assert train_start == 0
+            assert train_end - train_start >= 200
+
+    def test_min_train_size_clamped_when_rolling(self):
+        """Rolling mode must not silently reject every window."""
         config = WalkForwardConfig(
             train_size=100, test_size=50, step_size=50, min_train_size=200
         )
+        # Rolling windows are always exactly train_size wide, so an
+        # unreachable minimum is clamped rather than emptying the result.
+        assert config.min_train_size == 100
         validator = WalkForwardValidator(config=config)
-        # With min_train_size=200 but train_size=100, non-anchored windows
-        # will have actual_train_size=100 < 200, so all get skipped
-        windows = validator._generate_windows(500)
-        assert len(windows) == 0
+        assert len(validator._generate_windows(500)) > 0
+
+    def test_default_min_train_size_does_not_block_small_train_size(self):
+        """train_size below the 126 default must still produce windows."""
+        validator = WalkForwardValidator(
+            train_size=60, test_size=20, step_size=20
+        )
+        assert len(validator._generate_windows(300)) > 0
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"train_size": 0},
+            {"test_size": 0},
+            {"step_size": -1},
+        ],
+    )
+    def test_non_positive_window_sizes_rejected(self, kwargs):
+        """Non-positive window sizes should fail fast."""
+        with pytest.raises(ValueError):
+            WalkForwardConfig(**kwargs)
 
 
 # ---------------------------------------------------------------------------

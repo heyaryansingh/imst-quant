@@ -71,7 +71,11 @@ class WalkForwardConfig:
         test_size: Number of periods for test window.
         step_size: Number of periods to step forward.
         anchored: If True, training always starts from beginning.
-        min_train_size: Minimum training periods required.
+        min_train_size: Minimum training periods required. In rolling mode
+            this is clamped to ``train_size``: rolling windows are a fixed
+            ``train_size`` wide, so a larger minimum can only ever reject
+            every window. In anchored mode the training window grows, so the
+            minimum is honoured as written.
         optimization_metric: Metric to optimize during training.
         higher_is_better: Whether higher metric values are better.
     """
@@ -83,6 +87,26 @@ class WalkForwardConfig:
     min_train_size: int = 126
     optimization_metric: str = "sharpe"
     higher_is_better: bool = True
+
+    def __post_init__(self) -> None:
+        """Validate window sizes and clamp ``min_train_size`` in rolling mode.
+
+        Rolling windows are always exactly ``train_size`` wide, so a
+        ``min_train_size`` above that rejects every window and yields an empty
+        result -- which reads as "the strategy produced no trades" rather than
+        "the configuration is impossible". The default of 126 triggers this for
+        any ``train_size`` below 126, so clamp instead of failing silently.
+
+        Raises:
+            ValueError: If any window size is not a positive integer.
+        """
+        for name in ("train_size", "test_size", "step_size"):
+            value = getattr(self, name)
+            if value <= 0:
+                raise ValueError(f"{name} must be positive, got {value}")
+
+        if not self.anchored:
+            self.min_train_size = min(self.min_train_size, self.train_size)
 
 
 class WalkForwardValidator:
