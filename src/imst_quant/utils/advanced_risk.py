@@ -89,9 +89,11 @@ def tail_risk_metrics(returns: pd.Series) -> Dict[str, float]:
     left_tail = returns_clean.quantile(0.05)
     tail_ratio = abs(right_tail / left_tail) if left_tail != 0 else np.inf
 
-    # Downside deviation (semi-deviation)
-    downside_returns = returns_clean[returns_clean < 0]
-    downside_deviation = downside_returns.std() if len(downside_returns) > 0 else 0
+    # Downside deviation: RMS shortfall below zero over all periods, not the
+    # std of the losing periods -- the latter reads a steady, identical loss
+    # every period as zero downside risk.
+    shortfalls = np.minimum(returns_clean.to_numpy(), 0.0)
+    downside_deviation = float(np.sqrt(np.mean(shortfalls**2))) if len(returns_clean) else 0.0
 
     # Sortino ratio (assuming 0% risk-free rate)
     mean_return = returns_clean.mean()

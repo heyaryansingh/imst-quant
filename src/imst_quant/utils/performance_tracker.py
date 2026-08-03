@@ -106,12 +106,19 @@ class PerformanceTracker:
             Dict with all current performance metrics
         """
         if len(self.equity_curve) < 2:
+            # Same keys as the populated path: callers indexing
+            # metrics["sortino_ratio"] should not KeyError on a fresh tracker.
             return {
                 "total_return": 0.0,
                 "current_capital": self.current_capital,
                 "max_drawdown": 0.0,
                 "sharpe_ratio": 0.0,
+                "sortino_ratio": 0.0,
+                "calmar_ratio": 0.0,
+                "volatility": 0.0,
                 "win_rate": 0.0,
+                "total_trades": len(self.trades),
+                "days_active": len(self.daily_returns),
             }
 
         # Total return
@@ -137,11 +144,17 @@ class PerformanceTracker:
             profitable_trades = sum(1 for t in self.trades if t.get("pnl", 0) > 0)
             win_rate = profitable_trades / len(self.trades)
 
-        # Sortino ratio (downside deviation)
-        downside_returns = returns_series[returns_series < 0]
-        if len(downside_returns) > 0:
-            downside_std = downside_returns.std()
-            sortino = (returns_series.mean() / downside_std) * np.sqrt(252) if downside_std > 0 else 0
+        # Sortino ratio. The denominator is the RMS shortfall below zero over
+        # all periods, not the std of the losing periods -- the latter scores
+        # a steady, identical loss every period as having zero downside risk.
+        if len(returns_series) > 0:
+            shortfalls = np.minimum(returns_series.to_numpy(), 0.0)
+            downside_deviation = float(np.sqrt(np.mean(shortfalls**2)))
+            sortino = (
+                (returns_series.mean() / downside_deviation) * np.sqrt(252)
+                if downside_deviation > 0
+                else 0.0
+            )
         else:
             sortino = 0.0
 
