@@ -154,7 +154,8 @@ class PerformanceAttributor:
         combined = portfolio_sectors.join(
             benchmark_sectors,
             on=sector_col,
-            how="outer",
+            how="full",
+            coalesce=True,
             suffix="_b",
         ).fill_null(0)
 

@@ -55,10 +55,13 @@ def calculate_drift(
         >>> print(drift["absolute_drift"][0])  # 0.05
     """
     # Join current and target weights
+    # coalesce keeps a single symbol column; without it polars emits a separate
+    # right-hand key and leaves symbol null for target-only positions.
     drift_df = current_weights.join(
         target_weights,
         on=symbol_col,
-        how="outer",
+        how="full",
+        coalesce=True,
         suffix="_target"
     )
 
