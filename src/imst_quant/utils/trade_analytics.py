@@ -170,14 +170,15 @@ def calculate_consecutive_metrics(
         (pl.col(pnl_col) > 0).cast(pl.Int32).alias("is_win")
     )
 
-    # Calculate streak changes
+    # Calculate streak changes. The first row has no predecessor, so it must be
+    # treated as the start of a streak rather than a null that splits it off.
     df_streaks = df_streaks.with_columns(
-        (pl.col("is_win") != pl.col("is_win").shift(1)).alias("streak_change")
+        (pl.col("is_win") != pl.col("is_win").shift(1)).fill_null(True).alias("streak_change")
     )
 
     # Group by streaks
     df_streaks = df_streaks.with_columns(
-        pl.col("streak_change").cumsum().alias("streak_id")
+        pl.col("streak_change").cum_sum().alias("streak_id")
     )
 
     # Calculate streak lengths
@@ -193,8 +194,10 @@ def calculate_consecutive_metrics(
     max_win_streak = win_streaks["length"].max() if len(win_streaks) > 0 else 0
     max_loss_streak = loss_streaks["length"].max() if len(loss_streaks) > 0 else 0
 
-    # Current streak
-    last_streak = streak_lengths.tail(1)
+    # Current streak. group_by does not preserve input order, so the running
+    # streak has to be looked up by id rather than taken off the tail.
+    current_id = df_streaks["streak_id"][-1]
+    last_streak = streak_lengths.filter(pl.col("streak_id") == current_id)
     if len(last_streak) > 0:
         current_length = last_streak["length"][0]
         is_win = last_streak["is_win"][0]
@@ -275,7 +278,7 @@ def calculate_drawdown_duration(
 
     # Calculate running maximum
     df_dd = df.with_columns(
-        pl.col(equity_col).cummax().alias("running_max")
+        pl.col(equity_col).cum_max().alias("running_max")
     )
 
     # Calculate drawdown
@@ -285,11 +288,13 @@ def calculate_drawdown_duration(
 
     # Identify drawdown periods
     df_dd = df_dd.with_columns(
-        (pl.col("in_drawdown") != pl.col("in_drawdown").shift(1)).alias("dd_change")
+        (pl.col("in_drawdown") != pl.col("in_drawdown").shift(1))
+        .fill_null(True)
+        .alias("dd_change")
     )
 
     df_dd = df_dd.with_columns(
-        pl.col("dd_change").cumsum().alias("dd_period_id")
+        pl.col("dd_change").cum_sum().alias("dd_period_id")
     )
 
     # Calculate duration of each drawdown period
