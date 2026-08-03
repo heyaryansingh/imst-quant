@@ -96,8 +96,8 @@ def _calculate_returns_stats(df: pl.DataFrame) -> Dict[str, float]:
     if returns_clean.is_empty():
         return {}
 
-    positive_returns = returns_clean.filter(pl.col("returns") > 0)
-    negative_returns = returns_clean.filter(pl.col("returns") < 0)
+    positive_returns = returns_clean.filter(returns_clean > 0)
+    negative_returns = returns_clean.filter(returns_clean < 0)
 
     return {
         "mean_return": returns_clean.mean(),
@@ -130,9 +130,14 @@ def _calculate_risk_metrics(
     excess_returns = returns - risk_free_rate
     sharpe = (excess_returns.mean() / excess_returns.std()) * (252 ** 0.5) if excess_returns.std() > 0 else 0.0
 
-    # Sortino Ratio (downside deviation)
-    downside_returns = returns.filter(pl.col("returns") < risk_free_rate)
-    downside_std = downside_returns.std() if len(downside_returns) > 0 else 0.0
+    # Sortino Ratio: downside deviation is the RMS shortfall below the target
+    # over *all* periods, not the standard deviation of the losing periods.
+    shortfalls = excess_returns.filter(excess_returns < 0)
+    downside_std = (
+        float((shortfalls ** 2).sum() / len(excess_returns)) ** 0.5
+        if len(excess_returns) > 0
+        else 0.0
+    )
     sortino = (excess_returns.mean() / downside_std) * (252 ** 0.5) if downside_std > 0 else 0.0
 
     # Calmar Ratio (return / max drawdown)
@@ -156,7 +161,7 @@ def _calculate_drawdown_stats(df: pl.DataFrame) -> Dict[str, float]:
 
     # Calculate running maximum
     df_dd = df.with_columns(
-        pl.col("equity").cummax().alias("running_max")
+        pl.col("equity").cum_max().alias("running_max")
     )
 
     # Calculate drawdown
@@ -197,7 +202,7 @@ def _calculate_max_drawdown(df: pl.DataFrame) -> float:
     if df.is_empty() or "equity" not in df.columns:
         return 0.0
 
-    running_max = df["equity"].cummax()
+    running_max = df["equity"].cum_max()
     drawdown = (df["equity"] - running_max) / running_max
 
     return drawdown.min()
@@ -261,8 +266,8 @@ def calculate_performance_stats(
     sharpe = (excess_return / std_return) * (periods_per_year ** 0.5) if std_return > 0 else 0.0
 
     # Downside metrics
-    downside_returns = returns.filter(pl.col("returns") < 0)
-    downside_vol = downside_returns.std() * (periods_per_year ** 0.5) if len(downside_returns) > 0 else 0.0
+    downside_returns = returns.filter(returns < 0)
+    downside_vol = downside_returns.std() * (periods_per_year ** 0.5) if len(downside_returns) > 1 else 0.0
 
     return {
         "mean_return": mean_return,
@@ -299,13 +304,13 @@ def generate_trade_log(
     # Calculate cumulative P&L
     if "pnl" in trades.columns:
         trades = trades.with_columns(
-            pl.col("pnl").cumsum().alias("cumulative_pnl")
+            pl.col("pnl").cum_sum().alias("cumulative_pnl")
         )
 
         # Calculate running metrics
         trades = trades.with_columns([
-            (pl.col("pnl") > 0).cast(pl.Int32).cumsum().alias("total_wins"),
-            (pl.col("pnl") <= 0).cast(pl.Int32).cumsum().alias("total_losses"),
+            (pl.col("pnl") > 0).cast(pl.Int32).cum_sum().alias("total_wins"),
+            (pl.col("pnl") <= 0).cast(pl.Int32).cum_sum().alias("total_losses"),
         ])
 
         trades = trades.with_columns(
