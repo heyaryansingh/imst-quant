@@ -1000,6 +1000,38 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- drawdown subcommand ---
+    drawdown_parser = subparsers.add_parser(
+        "drawdown",
+        help="Analyze drawdown depth, duration and drawdown-at-risk for a return series",
+    )
+    drawdown_parser.add_argument(
+        "--returns", help="Path to returns parquet file (default: gold/returns.parquet)"
+    )
+    drawdown_parser.add_argument(
+        "--return-col", default="returns", help="Column name for returns (default: returns)"
+    )
+    drawdown_parser.add_argument(
+        "--date-col",
+        default="date",
+        help="Column name for dates, used to label the worst drawdowns (default: date)",
+    )
+    drawdown_parser.add_argument(
+        "--worst",
+        type=int,
+        default=5,
+        help="Number of worst drawdown periods to list (default: 5)",
+    )
+    drawdown_parser.add_argument(
+        "--alpha",
+        type=float,
+        default=0.95,
+        help="Confidence level for drawdown-at-risk and CDaR (default: 0.95)",
+    )
+    drawdown_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -4359,6 +4391,146 @@ def cmd_signal_performance(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_drawdown(args: argparse.Namespace) -> int:
+    """Analyze drawdown depth, duration and drawdown-at-risk for a return series.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success)
+    """
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.conditional_drawdown import analyze_drawdown_risk
+    from imst_quant.utils.drawdown_analysis import (
+        analyze_underwater,
+        drawdown_duration_analysis,
+        drawdown_statistics,
+        worst_drawdowns,
+    )
+    import polars as pl
+    import json as json_module
+
+    settings = Settings()
+
+    if args.returns:
+        returns_path = Path(args.returns)
+    else:
+        returns_path = Path(settings.data.gold_dir) / "returns.parquet"
+
+    if not returns_path.exists():
+        print(f"Error: Returns file not found: {returns_path}")
+        print("Expected columns: [date, returns] or specify with --return-col")
+        return 1
+
+    try:
+        df = pl.read_parquet(returns_path)
+    except Exception as e:
+        print(f"Error reading returns file: {e}")
+        return 1
+
+    if args.return_col not in df.columns:
+        print(f"Error: Column '{args.return_col}' not found in returns file")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    if not 0.0 < args.alpha < 1.0:
+        print(f"Error: --alpha must be strictly between 0 and 1, got {args.alpha}")
+        return 1
+
+    if args.worst < 0:
+        print(f"Error: --worst must not be negative, got {args.worst}")
+        return 1
+
+    returns = df[args.return_col].drop_nulls()
+    if returns.is_empty():
+        print(f"Error: Column '{args.return_col}' has no non-null values")
+        return 1
+
+    date_col = args.date_col if args.date_col in df.columns else None
+
+    try:
+        stats = drawdown_statistics(returns)
+        durations = drawdown_duration_analysis(returns)
+        underwater = analyze_underwater(returns)
+        risk = analyze_drawdown_risk(returns.to_numpy(), alphas=(args.alpha,))
+        worst = worst_drawdowns(df, return_col=args.return_col, n=args.worst, date_col=date_col)
+
+        periods = [
+            {
+                "rank": rank,
+                "max_drawdown": p.max_drawdown,
+                "start_idx": p.start_idx,
+                "trough_idx": p.trough_idx,
+                "start_date": str(p.start_date) if p.start_date is not None else None,
+                "trough_date": str(p.trough_date) if p.trough_date is not None else None,
+                "duration_to_trough": p.duration_to_trough,
+                "recovery_duration": p.recovery_duration,
+                "is_recovered": p.is_recovered,
+            }
+            for rank, p in enumerate(worst, start=1)
+        ]
+
+        if args.json:
+            print(
+                json_module.dumps(
+                    {
+                        "statistics": stats,
+                        "durations": durations,
+                        "underwater": underwater,
+                        "drawdown_at_risk": risk,
+                        "worst_drawdowns": periods,
+                    },
+                    indent=2,
+                    default=float,
+                )
+            )
+        else:
+            print("\n=== Drawdown Analysis ===\n")
+            print(f"Observations:        {risk['n_observations']:>10,}")
+            print(f"Max Drawdown:        {stats['max_drawdown']:>10.2%}")
+            print(f"Current Drawdown:    {risk['current_drawdown']:>10.2%}")
+            print(f"Average Drawdown:    {stats['avg_drawdown']:>10.2%}")
+            print(f"Ulcer Index:         {stats['ulcer_index']:>10.4f}")
+            print(f"Pain Index:          {stats['pain_index']:>10.4f}")
+            print(f"Calmar Ratio:        {stats['calmar_ratio']:>10.3f}")
+            print(f"Recovery Factor:     {stats['recovery_factor']:>10.3f}")
+            print()
+            print(f"Time Underwater:     {underwater['underwater_ratio']:>10.2%}")
+            print(f"Longest Underwater:  {underwater['longest_underwater']:>10,} periods")
+            print(f"Avg DD Duration:     {durations['avg_drawdown_duration']:>10.1f} periods")
+            print(f"Max DD Duration:     {durations['max_drawdown_duration']:>10,} periods")
+            print(f"Avg Recovery Time:   {durations['avg_recovery_time']:>10.1f} periods")
+            print(f"Drawdowns Recovered: {durations['pct_recovered']:>10.1%}")
+            print()
+            level = risk["levels"][0]
+            print(f"DaR  ({level['alpha']:.0%}):          {level['dar']:>10.2%}")
+            print(f"CDaR ({level['alpha']:.0%}):          {level['cdar']:>10.2%}")
+            print(f"CDaR Ratio:          {risk['cdar_ratio']:>10.3f}")
+
+            if periods:
+                print(f"\nWorst {len(periods)} drawdowns:")
+                for p in periods:
+                    label = p["trough_date"] or f"idx {p['trough_idx']}"
+                    state = "recovered" if p["is_recovered"] else "ongoing"
+                    recovery = (
+                        f"{p['recovery_duration']:>4} to recover"
+                        if p["recovery_duration"] is not None
+                        else "  -- to recover"
+                    )
+                    print(
+                        f"  {p['rank']}. {p['max_drawdown']:>7.2%} at {label}  "
+                        f"{p['duration_to_trough']:>4} to trough  {recovery}  ({state})"
+                    )
+            print()
+
+    except Exception as e:
+        print(f"Error analyzing drawdowns: {e}")
+        return 1
+
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -4417,6 +4589,7 @@ def main() -> int:
         "hurst": cmd_hurst,
         "turbulence": cmd_turbulence,
         "changepoint": cmd_changepoint,
+        "drawdown": cmd_drawdown,
     }
 
     handler = commands.get(args.command)

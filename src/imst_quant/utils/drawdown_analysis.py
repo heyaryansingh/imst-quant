@@ -421,14 +421,19 @@ def drawdown_duration_analysis(
             "pct_recovered": 0.0,
         }
 
-    # Durations to trough
-    durations_to_trough = [p.duration_to_trough for p in periods]
+    n_obs = len(returns[return_col] if isinstance(returns, pl.DataFrame) else returns)
 
     # Recovery times (only for recovered drawdowns)
     recovery_times = [p.recovery_duration for p in periods if p.recovery_duration is not None]
 
-    # Total durations
-    total_durations = [p.total_duration for p in periods if p.total_duration is not None]
+    # Total durations. An unrecovered drawdown has no end index, but it is still
+    # a drawdown that has run from its start to the end of the sample, and it is
+    # usually the longest one; dropping it reported a duration of 0 for a series
+    # that never came back above its peak.
+    total_durations = [
+        p.total_duration if p.total_duration is not None else n_obs - 1 - p.start_idx
+        for p in periods
+    ]
 
     recovered_count = sum(1 for p in periods if p.is_recovered)
 
