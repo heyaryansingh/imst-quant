@@ -19,10 +19,10 @@ Example:
     >>> # Win rate = 55%, avg win = $100, avg loss = $50
     >>> kelly_pct = fractional_kelly(win_rate=0.55, win_loss_ratio=2.0, fraction=0.25)
     >>> print(f"Optimal position size: {kelly_pct:.2%}")
-    Optimal position size: 2.50%
+    Optimal position size: 8.12%
 """
 
-from typing import Dict, List, Union
+from typing import Dict, List, Sequence, Tuple, Union
 
 import numpy as np
 import polars as pl
@@ -54,7 +54,7 @@ def kelly_formula(
         >>> # 60% chance to win $2 for every $1 risked
         >>> kelly = kelly_formula(probability=0.6, win_amount=2.0, loss_amount=1.0)
         >>> print(f"Kelly %: {kelly:.2%}")
-        Kelly %: 10.00%
+        Kelly %: 40.00%
     """
     if not (0 <= probability <= 1):
         raise ValueError("Probability must be between 0 and 1")
@@ -194,50 +194,77 @@ def optimal_f(
         initial_capital: Initial capital amount (default: 10000).
 
     Returns:
-        Optimal F as a decimal (0 to 1).
+        Optimal F as a decimal (0 to 1). Returns 0.0 when no f beats sitting
+        out, which is the case for any strategy with a negative edge.
 
     Example:
         >>> trades = [100, -50, 150, -30, 200, -80]
         >>> opt_f = optimal_f(trades)
         >>> print(f"Optimal F: {opt_f:.4f}")
     """
-    if isinstance(trades_pnl, pl.Series):
-        pnl = trades_pnl.to_numpy()
-    elif isinstance(trades_pnl, list):
-        pnl = np.array(trades_pnl)
-    else:
-        pnl = trades_pnl
+    pnl = np.asarray(
+        trades_pnl.to_numpy() if isinstance(trades_pnl, pl.Series) else trades_pnl,
+        dtype=float,
+    )
 
-    if len(pnl) == 0:
+    if pnl.size == 0:
         return 0.0
 
-    # Find the largest loss (use as divisor)
-    largest_loss = abs(np.min(pnl))
+    # The divisor is the worst *loss*; np.min() alone would pick the smallest
+    # profit on an all-winning record and scale every HPR by garbage.
+    largest_loss = -min(float(pnl.min()), 0.0)
 
     if largest_loss == 0:
-        return 0.0
+        # Nothing ever lost, so TWR grows without bound in f. Cap at full risk.
+        return 1.0 if float(pnl.max()) > 0 else 0.0
 
-    # Test different f values and find the one that maximizes TWR
-    best_f = 0.0
-    best_twr = 0.0
+    # HPR = 1 + (f * trade / largest_loss), vectorised over the f grid.
+    f_grid = np.arange(0.01, 1.01, 0.01)
+    hpr = 1.0 + np.outer(f_grid, pnl) / largest_loss
 
-    for f in np.arange(0.01, 1.01, 0.01):
-        twr = 1.0
-        for trade in pnl:
-            # HPR = 1 + (f * trade / largest_loss)
-            hpr = 1 + (f * trade / largest_loss)
-            twr *= hpr
+    # Any non-positive HPR wipes the account out at that f.
+    wiped = (hpr <= 0).any(axis=1)
+    with np.errstate(over="ignore"):
+        twr = np.prod(np.where(wiped[:, None], 1.0, hpr), axis=1)
+    twr[wiped] = 0.0
 
-            # Stop if we'd blow up
-            if twr <= 0:
-                twr = 0.0
-                break
+    best = int(np.argmax(twr))
 
-        if twr > best_twr:
-            best_twr = twr
-            best_f = f
+    # f = 0 has TWR 1.0, so only bet when some f actually beats not betting.
+    return float(f_grid[best]) if twr[best] > 1.0 else 0.0
 
-    return float(best_f)
+
+def _trade_win_stats(pnl: pl.Series) -> Tuple[float, float]:
+    """Extract win rate and average-win / average-loss ratio from trade PnL.
+
+    Degenerate records are reported rather than papered over, because the
+    Kelly formulas reject a non-positive ratio:
+        - no trades, or no winners -> (win_rate, 0.0)
+        - winners but no losers     -> (win_rate, inf)
+
+    Args:
+        pnl: Series of per-trade profit/loss values.
+
+    Returns:
+        Tuple of (win_rate, win_loss_ratio).
+    """
+    pnl = pnl.drop_nulls()
+    if pnl.is_empty():
+        return 0.0, 0.0
+
+    wins = pnl.filter(pnl > 0)
+    losses = pnl.filter(pnl < 0)
+    win_rate = len(wins) / len(pnl)
+
+    if wins.is_empty():
+        return win_rate, 0.0
+    if losses.is_empty():
+        return win_rate, float("inf")
+
+    avg_win = float(wins.mean())
+    avg_loss = abs(float(losses.mean()))
+
+    return win_rate, avg_win / avg_loss
 
 
 def kelly_from_trades(
@@ -264,23 +291,16 @@ def kelly_from_trades(
         >>> kelly = kelly_from_trades(trades, fraction=0.25)
         >>> print(f"Position size: {kelly:.2%}")
     """
-    pnl = trades[pnl_col]
+    win_rate, win_loss_ratio = _trade_win_stats(trades[pnl_col])
 
-    winning_trades = pnl.filter(pnl > 0)
-    losing_trades = pnl.filter(pnl < 0)
-
-    if len(pnl) == 0:
+    if win_loss_ratio <= 0:
+        # No winners (or no trades): the edge is negative, so size at zero.
         return 0.0
 
-    win_rate = len(winning_trades) / len(pnl)
-
-    avg_win = float(winning_trades.mean()) if len(winning_trades) > 0 else 0.0
-    avg_loss = abs(float(losing_trades.mean())) if len(losing_trades) > 0 else 1.0
-
-    if avg_loss == 0:
-        return 0.0
-
-    win_loss_ratio = avg_win / avg_loss
+    if not np.isfinite(win_loss_ratio):
+        # Nothing ever lost, so full Kelly is 1.0 and fractional Kelly is the
+        # fraction itself.
+        return float(fraction)
 
     return fractional_kelly(win_rate, win_loss_ratio, fraction)
 
@@ -332,7 +352,7 @@ def kelly_portfolio(
 def calculate_kelly_metrics(
     trades: pl.DataFrame,
     pnl_col: str = "pnl",
-    fractions: List[float] = [0.25, 0.50, 1.0],
+    fractions: Sequence[float] = (0.25, 0.50, 1.0),
 ) -> Dict[str, float]:
     """Calculate comprehensive Kelly-based position sizing metrics.
 
@@ -355,28 +375,22 @@ def calculate_kelly_metrics(
         >>> for key, value in metrics.items():
         ...     print(f"{key}: {value:.4f}")
     """
-    pnl = trades[pnl_col]
+    pnl = trades[pnl_col].drop_nulls()
+    win_rate, win_loss_ratio = _trade_win_stats(pnl)
 
-    winning_trades = pnl.filter(pnl > 0)
-    losing_trades = pnl.filter(pnl < 0)
-
-    if len(pnl) == 0:
-        base_metrics = {
-            "win_rate": 0.0,
+    if win_loss_ratio <= 0:
+        # No trades or no winners: every sizing recommendation is zero.
+        metrics = {
+            "win_rate": win_rate,
             "win_loss_ratio": 0.0,
             "full_kelly": 0.0,
-            "optimal_f": 0.0,
+            "optimal_f": optimal_f(pnl),
         }
-        for frac in fractions:
-            base_metrics[f"kelly_{frac}"] = 0.0
-        return base_metrics
+        metrics.update({f"kelly_{frac}": 0.0 for frac in fractions})
+        return metrics
 
-    win_rate = len(winning_trades) / len(pnl)
-    avg_win = float(winning_trades.mean()) if len(winning_trades) > 0 else 0.0
-    avg_loss = abs(float(losing_trades.mean())) if len(losing_trades) > 0 else 1.0
-
-    win_loss_ratio = avg_win / avg_loss if avg_loss > 0 else 0.0
-    full_kelly = kelly_win_rate(win_rate, win_loss_ratio)
+    # Nothing ever lost: full Kelly saturates at 1.0 instead of dividing by zero.
+    full_kelly = 1.0 if not np.isfinite(win_loss_ratio) else kelly_win_rate(win_rate, win_loss_ratio)
 
     metrics = {
         "win_rate": win_rate,
@@ -386,7 +400,7 @@ def calculate_kelly_metrics(
 
     # Add fractional Kelly values
     for frac in fractions:
-        metrics[f"kelly_{frac}"] = fractional_kelly(win_rate, win_loss_ratio, frac)
+        metrics[f"kelly_{frac}"] = float(max(0.0, full_kelly) * frac)
 
     # Add Optimal F
     metrics["optimal_f"] = optimal_f(pnl)
