@@ -15,8 +15,8 @@ Example:
 from dataclasses import dataclass
 from typing import List, Optional
 
+import numpy as np
 import polars as pl
-from statsmodels.tsa.stattools import coint
 
 from imst_quant.utils.cointegration import (
     calculate_hedge_ratio,
@@ -88,7 +88,7 @@ def find_trading_pairs(
     prices_wide = prices.pivot(
         values=price_col,
         index=date_col,
-        columns=asset_col,
+        on=asset_col,
     ).sort(date_col)
 
     assets = [c for c in prices_wide.columns if c != date_col]
@@ -333,7 +333,3 @@ def generate_pairs_report(
             f.write(report)
 
     return report
-
-
-# Import numpy for calculations
-import numpy as np
