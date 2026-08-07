@@ -10,6 +10,8 @@ from typing import Dict, List, Optional, Tuple
 import polars as pl
 import numpy as np
 
+from imst_quant.utils.risk_metrics import downside_deviation
+
 
 def prepare_equity_data(
     df: pl.DataFrame,
@@ -307,8 +309,7 @@ def generate_summary_stats(
     sharpe = float(excess_return / volatility) if volatility > 0 else 0.0
 
     # Sortino ratio
-    downside_returns = returns.filter(pl.col(returns_col) < 0)
-    downside_std = float(downside_returns.std() * np.sqrt(periods_per_year)) if len(downside_returns) > 0 else 0.0
+    downside_std = downside_deviation(returns) * np.sqrt(periods_per_year)
     sortino = float(excess_return / downside_std) if downside_std > 0 else 0.0
 
     # Max drawdown

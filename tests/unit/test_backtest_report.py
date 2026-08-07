@@ -92,11 +92,30 @@ def test_performance_stats_reports_downside_volatility(equity_curve):
     assert stats["downside_volatility"] > 0.0
 
 
-def test_performance_stats_single_loss_has_no_dispersion():
-    """One losing period cannot have a sample standard deviation."""
+def test_performance_stats_counts_a_single_loss_as_downside():
+    """One losing period still carries downside risk.
+
+    The RMS shortfall is defined for a single loss, unlike the sample
+    standard deviation of the losing periods, which needs at least two.
+    """
     stats = calculate_performance_stats(pl.Series("returns", [0.01, 0.02, -0.01]))
 
+    assert stats["downside_volatility"] == pytest.approx(
+        (0.01 ** 2 / 3) ** 0.5 * (252 ** 0.5)
+    )
+
+
+def test_performance_stats_has_no_downside_without_losses():
+    stats = calculate_performance_stats(pl.Series("returns", [0.01, 0.02, 0.03]))
+
     assert stats["downside_volatility"] == 0.0
+
+
+def test_performance_stats_steady_loss_is_not_risk_free():
+    """A constant loss has zero dispersion but plenty of downside risk."""
+    stats = calculate_performance_stats(pl.Series("returns", [-0.02] * 10))
+
+    assert stats["downside_volatility"] == pytest.approx(0.02 * (252 ** 0.5))
 
 
 def test_trade_log_accumulates(trades):

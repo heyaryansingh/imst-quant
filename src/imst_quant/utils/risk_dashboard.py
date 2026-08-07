@@ -10,6 +10,8 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 
+from imst_quant.utils.risk_metrics import downside_deviation
+
 
 @dataclass
 class RiskMetrics:
@@ -108,8 +110,7 @@ class RiskDashboard:
 
         sharpe = (excess_returns.mean() * 252) / volatility if volatility > 0 else 0
 
-        downside_returns = self.returns[self.returns < 0]
-        downside_dev = downside_returns.std() * np.sqrt(252)
+        downside_dev = downside_deviation(self.returns) * np.sqrt(252)
         sortino = (excess_returns.mean() * 252) / downside_dev if downside_dev > 0 else 0
 
         return {

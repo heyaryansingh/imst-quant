@@ -14,6 +14,8 @@ from typing import Dict, List, Optional, Tuple
 import polars as pl
 from datetime import datetime
 
+from imst_quant.utils.risk_metrics import downside_deviation
+
 
 def generate_backtest_report(
     equity_curve: pl.DataFrame,
@@ -132,12 +134,7 @@ def _calculate_risk_metrics(
 
     # Sortino Ratio: downside deviation is the RMS shortfall below the target
     # over *all* periods, not the standard deviation of the losing periods.
-    shortfalls = excess_returns.filter(excess_returns < 0)
-    downside_std = (
-        float((shortfalls ** 2).sum() / len(excess_returns)) ** 0.5
-        if len(excess_returns) > 0
-        else 0.0
-    )
+    downside_std = downside_deviation(excess_returns)
     sortino = (excess_returns.mean() / downside_std) * (252 ** 0.5) if downside_std > 0 else 0.0
 
     # Calmar Ratio (return / max drawdown)
@@ -266,8 +263,7 @@ def calculate_performance_stats(
     sharpe = (excess_return / std_return) * (periods_per_year ** 0.5) if std_return > 0 else 0.0
 
     # Downside metrics
-    downside_returns = returns.filter(returns < 0)
-    downside_vol = downside_returns.std() * (periods_per_year ** 0.5) if len(downside_returns) > 1 else 0.0
+    downside_vol = downside_deviation(returns) * (periods_per_year ** 0.5)
 
     return {
         "mean_return": mean_return,

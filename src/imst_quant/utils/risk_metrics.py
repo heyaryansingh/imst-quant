@@ -5,6 +5,7 @@ Sharpe ratio, Sortino ratio, maximum drawdown, Value at Risk (VaR),
 and Calmar ratio. All metrics work with Polars DataFrames for performance.
 
 Functions:
+    downside_deviation: Root-mean-square shortfall below a target
     sharpe_ratio: Risk-adjusted return metric (excess return / volatility)
     sortino_ratio: Downside-risk-adjusted return metric
     max_drawdown: Maximum peak-to-trough decline
@@ -24,6 +25,38 @@ from typing import Dict, Union
 
 import numpy as np
 import polars as pl
+
+
+def downside_deviation(returns, target: float = 0.0) -> float:
+    """Calculate downside deviation: RMS shortfall below ``target``.
+
+    The shortfall is averaged over *every* period, not just the losing ones.
+    Using the standard deviation of the losing periods instead measures how
+    much the losses differ from each other, so a strategy that loses an
+    identical amount every single period scores as having no downside risk
+    at all.
+
+    Args:
+        returns: Any sequence of period returns (polars Series, pandas
+            Series, numpy array, or list). Non-finite values are ignored.
+        target: Minimum acceptable return. Defaults to 0.0.
+
+    Returns:
+        Downside deviation in the same units as the input, per period.
+        Returns 0.0 when no period falls below the target.
+
+    Example:
+        >>> downside_deviation([0.02, -0.01, 0.03, -0.01])
+        0.007071067811865475
+    """
+    values = np.asarray(returns, dtype=float).ravel()
+    values = values[np.isfinite(values)]
+
+    if values.size == 0:
+        return 0.0
+
+    shortfalls = np.minimum(values - target, 0.0)
+    return float(np.sqrt(np.mean(shortfalls ** 2)))
 
 
 def sharpe_ratio(
@@ -100,19 +133,16 @@ def sortino_ratio(
     excess_returns = ret_series - risk_free_rate
     mean_excess = excess_returns.mean()
 
-    # Calculate downside deviation (std of negative returns only)
-    downside_returns = excess_returns.filter(excess_returns < 0)
-
-    if downside_returns.len() == 0:
-        # No negative returns = infinite Sortino (cap at large value)
-        return 100.0 if mean_excess > 0 else 0.0
-
-    downside_std = downside_returns.std()
-
-    if downside_std is None or downside_std == 0:
+    if mean_excess is None:
         return 0.0
 
-    return float((mean_excess / downside_std) * np.sqrt(periods_per_year))
+    downside_dev = downside_deviation(excess_returns)
+
+    if downside_dev == 0:
+        # No period fell below zero: unbounded ratio, capped for reporting.
+        return 100.0 if mean_excess > 0 else 0.0
+
+    return float((mean_excess / downside_dev) * np.sqrt(periods_per_year))
 
 
 def max_drawdown(
