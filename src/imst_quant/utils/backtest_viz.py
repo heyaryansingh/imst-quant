@@ -297,12 +297,20 @@ def generate_summary_stats(
     equity_df = prepare_equity_data(df, returns_col=returns_col)
 
     # Basic metrics
-    total_return = float((1 + returns).prod() - 1)
+    total_return = float((1 + returns).product() - 1)
     n_periods = len(returns)
-    annualized_return = float((1 + total_return) ** (periods_per_year / n_periods) - 1)
+    if total_return <= -1.0:
+        # The account was wiped out: compounding a non-positive equity to a
+        # fractional power is undefined, so report a total loss instead.
+        annualized_return = -1.0
+    else:
+        annualized_return = float(
+            (1 + total_return) ** (periods_per_year / n_periods) - 1
+        )
 
-    # Volatility
-    volatility = float(returns.std() * np.sqrt(periods_per_year))
+    # Volatility (a single period has no sample standard deviation)
+    std = returns.std()
+    volatility = float(std * np.sqrt(periods_per_year)) if std is not None else 0.0
 
     # Sharpe ratio
     excess_return = annualized_return - (risk_free_rate * periods_per_year)
