@@ -11,6 +11,13 @@ import pandas as pd
 from dataclasses import dataclass
 from scipy import stats
 
+from imst_quant.utils.deflated_sharpe import probabilistic_sharpe_ratio
+
+# Volatilities at or below this are treated as zero. Floating point noise puts
+# the std of a constant series around 1e-19; any real return series is orders
+# of magnitude above this floor.
+_VOL_FLOOR = 1e-12
+
 
 @dataclass
 class AlphaDecomposition:
@@ -110,9 +117,13 @@ class AlphaMetrics:
             M2 alpha in percentage
         """
         # Calculate strategy Sharpe
+        strategy_vol = self.strategy_returns.std() * np.sqrt(252)
+        if not np.isfinite(strategy_vol) or strategy_vol <= _VOL_FLOOR:
+            return 0.0
+
         strategy_sharpe = (
             (self.strategy_returns.mean() * 252 - self.risk_free_rate) /
-            (self.strategy_returns.std() * np.sqrt(252))
+            strategy_vol
         )
 
         # Calculate benchmark volatility
@@ -208,28 +219,42 @@ class AlphaMetrics:
 
     def calculate_skill_vs_luck(
         self,
-        n_simulations: int = 10000
+        n_simulations: int = 10000,
+        seed: Optional[int] = None,
     ) -> Dict[str, float]:
         """Assess whether returns are driven by skill vs luck.
 
         Args:
             n_simulations: Number of Monte Carlo simulations
+            seed: Optional seed for the simulation, for reproducible results
 
         Returns:
             Dictionary with skill assessment metrics
         """
+        vol = self.strategy_returns.std()
+        # A constant return series gives a std of ~1e-19 rather than exactly
+        # zero, so compare against a floor well below any real daily vol.
+        if not np.isfinite(vol) or vol <= _VOL_FLOOR:
+            return {
+                'observed_sharpe': 0.0,
+                'p_value': 1.0,
+                'probabilistic_sharpe_ratio': 0.0,
+                'skill_probability': 0.0,
+                'median_random_sharpe': 0.0,
+            }
+
         # Calculate observed Sharpe ratio
         observed_sharpe = (
             (self.strategy_returns.mean() * 252 - self.risk_free_rate) /
-            (self.strategy_returns.std() * np.sqrt(252))
+            (vol * np.sqrt(252))
         )
 
         # Simulate random strategies with same volatility
-        vol = self.strategy_returns.std()
+        rng = np.random.default_rng(seed)
         simulated_sharpes = []
 
         for _ in range(n_simulations):
-            random_returns = np.random.normal(0, vol, len(self.strategy_returns))
+            random_returns = rng.normal(0, vol, len(self.strategy_returns))
             random_sharpe = (
                 (random_returns.mean() * 252 - self.risk_free_rate) /
                 (random_returns.std() * np.sqrt(252))
@@ -241,10 +266,19 @@ class AlphaMetrics:
         # Calculate p-value
         p_value = (simulated_sharpes >= observed_sharpe).mean()
 
-        # Calculate probabilistic Sharpe ratio (PSR)
-        psr = stats.norm.cdf(
-            (observed_sharpe - 0) /
-            (self.strategy_returns.std() / np.sqrt(len(self.strategy_returns)))
+        # Probabilistic Sharpe ratio: the probability that the true Sharpe
+        # ratio exceeds zero. This has to be computed from the *per-period*
+        # Sharpe ratio and the standard error of that estimate; dividing an
+        # annualized Sharpe ratio by the standard error of the mean return
+        # mixes units and saturates the normal CDF at 0 or 1.
+        per_period_excess = self.strategy_returns - self.risk_free_rate / 252
+        per_period_sharpe = float(per_period_excess.mean() / vol)
+        psr = probabilistic_sharpe_ratio(
+            sharpe_ratio=per_period_sharpe,
+            benchmark_sharpe=0.0,
+            n_observations=len(self.strategy_returns),
+            skewness=float(stats.skew(self.strategy_returns)),
+            kurtosis=float(stats.kurtosis(self.strategy_returns, fisher=False)),
         )
 
         return {
@@ -339,8 +373,12 @@ class AlphaMetrics:
 
     def _calculate_beta(self) -> float:
         """Calculate beta relative to benchmark."""
-        cov = np.cov(self.strategy_returns, self.benchmark_returns)[0, 1]
-        var = np.var(self.benchmark_returns)
+        # Take both the covariance and the benchmark variance off the same
+        # covariance matrix. np.cov normalizes by n-1 while np.var defaults to
+        # n, and mixing the two inflates beta by a factor of n / (n - 1).
+        cov_matrix = np.cov(self.strategy_returns, self.benchmark_returns)
+        cov = cov_matrix[0, 1]
+        var = cov_matrix[1, 1]
         return cov / var if var > 0 else 0.0
 
     def _calculate_unsystematic_risk(self) -> float:
