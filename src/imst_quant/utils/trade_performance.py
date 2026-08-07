@@ -29,6 +29,24 @@ from typing import Dict, Union
 import polars as pl
 
 
+def _pnl_series(pnl: Union[pl.Series, pl.DataFrame], pnl_col: str = "pnl") -> pl.Series:
+    """Normalise a PnL argument to a null-free Series.
+
+    Every metric below accepts either a Series or a DataFrame plus a column
+    name, and none of them should count a null trade in a denominator or
+    compare one against zero.
+
+    Args:
+        pnl: Series or DataFrame containing profit/loss data.
+        pnl_col: Column name if pnl is a DataFrame.
+
+    Returns:
+        Series of non-null PnL values.
+    """
+    series = pnl[pnl_col] if isinstance(pnl, pl.DataFrame) else pnl
+    return series.drop_nulls()
+
+
 def calculate_win_rate(
     pnl: Union[pl.Series, pl.DataFrame], pnl_col: str = "pnl"
 ) -> float:
@@ -47,10 +65,7 @@ def calculate_win_rate(
         >>> print(f"Win Rate: {win_rate:.2%}")
         Win Rate: 60.00%
     """
-    if isinstance(pnl, pl.DataFrame):
-        pnl_series = pnl[pnl_col]
-    else:
-        pnl_series = pnl
+    pnl_series = _pnl_series(pnl, pnl_col)
 
     if len(pnl_series) == 0:
         return 0.0
@@ -72,7 +87,8 @@ def calculate_profit_factor(
         pnl_col: Column name if pnl is a DataFrame.
 
     Returns:
-        Profit factor. Returns 0.0 if no losses (infinite profit factor).
+        Profit factor, or inf when there are profits and no losses at all.
+        Returns 0.0 when there is nothing to measure.
 
     Example:
         >>> pnl = pl.Series("pnl", [100, -50, 150, -30, 200])
@@ -80,10 +96,7 @@ def calculate_profit_factor(
         >>> print(f"Profit Factor: {pf:.2f}")
         Profit Factor: 5.62
     """
-    if isinstance(pnl, pl.DataFrame):
-        pnl_series = pnl[pnl_col]
-    else:
-        pnl_series = pnl
+    pnl_series = _pnl_series(pnl, pnl_col)
 
     if len(pnl_series) == 0:
         return 0.0
@@ -118,10 +131,7 @@ def calculate_expectancy(
         >>> print(f"Expectancy: ${expectancy:.2f}")
         Expectancy: $74.00
     """
-    if isinstance(pnl, pl.DataFrame):
-        pnl_series = pnl[pnl_col]
-    else:
-        pnl_series = pnl
+    pnl_series = _pnl_series(pnl, pnl_col)
 
     if len(pnl_series) == 0:
         return 0.0
@@ -186,10 +196,7 @@ def calculate_average_win_loss(
         >>> print(f"Avg Win: ${metrics['avg_win']:.2f}")
         >>> print(f"Win/Loss Ratio: {metrics['win_loss_ratio']:.2f}")
     """
-    if isinstance(pnl, pl.DataFrame):
-        pnl_series = pnl[pnl_col]
-    else:
-        pnl_series = pnl
+    pnl_series = _pnl_series(pnl, pnl_col)
 
     winning_trades = pnl_series.filter(pnl_series > 0)
     losing_trades = pnl_series.filter(pnl_series < 0)
@@ -226,10 +233,7 @@ def calculate_consecutive_streaks(
         >>> print(f"Max Win Streak: {streaks['max_win_streak']}")
         Max Win Streak: 2
     """
-    if isinstance(pnl, pl.DataFrame):
-        pnl_series = pnl[pnl_col]
-    else:
-        pnl_series = pnl
+    pnl_series = _pnl_series(pnl, pnl_col)
 
     if len(pnl_series) == 0:
         return {"max_win_streak": 0, "max_loss_streak": 0}
@@ -297,7 +301,9 @@ def calculate_trade_metrics(
         >>> for key, value in metrics.items():
         ...     print(f"{key}: {value}")
     """
-    if len(trades) == 0:
+    pnl = _pnl_series(trades, pnl_col)
+
+    if len(pnl) == 0:
         return {
             "total_trades": 0,
             "winning_trades": 0,
@@ -315,8 +321,6 @@ def calculate_trade_metrics(
             "max_loss_streak": 0,
         }
 
-    pnl = trades[pnl_col]
-
     winning_trades = pnl.filter(pnl > 0)
     losing_trades = pnl.filter(pnl < 0)
 
@@ -324,25 +328,29 @@ def calculate_trade_metrics(
     streaks = calculate_consecutive_streaks(pnl)
 
     metrics = {
-        "total_trades": len(trades),
+        "total_trades": len(pnl),
         "winning_trades": len(winning_trades),
         "losing_trades": len(losing_trades),
         "win_rate": calculate_win_rate(pnl),
         "profit_factor": calculate_profit_factor(pnl),
         "expectancy": calculate_expectancy(pnl),
         "total_pnl": float(pnl.sum()),
+        # Taken from the winners and losers themselves: pnl.max() on an
+        # all-losing record is the *smallest loss*, not a winning trade.
+        "max_win": float(winning_trades.max()) if len(winning_trades) > 0 else 0.0,
+        "max_loss": abs(float(losing_trades.min())) if len(losing_trades) > 0 else 0.0,
         "avg_win": avg_metrics["avg_win"],
         "avg_loss": avg_metrics["avg_loss"],
         "win_loss_ratio": avg_metrics["win_loss_ratio"],
-        "max_win": float(pnl.max()),
-        "max_loss": abs(float(pnl.min())),
         "max_win_streak": streaks["max_win_streak"],
         "max_loss_streak": streaks["max_loss_streak"],
     }
 
-    # Add R-multiple if risk column exists
+    # Add R-multiple if risk column exists. Pair the columns before dropping
+    # nulls so the two series stay aligned trade for trade.
     if risk_col in trades.columns:
-        r_multiples = calculate_r_multiples(pnl, trades[risk_col])
+        paired = trades.select(pnl_col, risk_col).drop_nulls()
+        r_multiples = calculate_r_multiples(paired[pnl_col], paired[risk_col])
         avg_r = r_multiples.mean()
         metrics["avg_r_multiple"] = float(avg_r) if avg_r is not None else 0.0
 
