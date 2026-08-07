@@ -1032,6 +1032,32 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- kelly subcommand ---
+    kelly_parser = subparsers.add_parser(
+        "kelly",
+        help="Size positions with the Kelly Criterion from a per-period PnL series",
+    )
+    kelly_parser.add_argument(
+        "--returns", help="Path to returns parquet file (default: gold/returns.parquet)"
+    )
+    kelly_parser.add_argument(
+        "--return-col", default="returns", help="Column name for per-period PnL (default: returns)"
+    )
+    kelly_parser.add_argument(
+        "--fraction",
+        type=float,
+        default=0.25,
+        help="Kelly fraction to recommend, 1.0 being full Kelly (default: 0.25)",
+    )
+    kelly_parser.add_argument(
+        "--capital",
+        type=float,
+        help="Account capital, to translate the recommended fraction into a dollar size",
+    )
+    kelly_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -4531,6 +4557,101 @@ def cmd_drawdown(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_kelly(args: argparse.Namespace) -> int:
+    """Recommend a Kelly position size from a per-period PnL series.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success)
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.kelly_criterion import calculate_kelly_metrics
+
+    settings = Settings()
+
+    if args.returns:
+        returns_path = Path(args.returns)
+    else:
+        returns_path = Path(settings.data.gold_dir) / "returns.parquet"
+
+    if not returns_path.exists():
+        print(f"Error: Returns file not found: {returns_path}")
+        print("Expected columns: [date, returns] or specify with --return-col")
+        return 1
+
+    if not 0.0 < args.fraction <= 1.0:
+        print(f"Error: --fraction must be in (0, 1], got {args.fraction}")
+        return 1
+
+    if args.capital is not None and args.capital <= 0:
+        print(f"Error: --capital must be positive, got {args.capital}")
+        return 1
+
+    try:
+        df = pl.read_parquet(returns_path)
+    except Exception as e:
+        print(f"Error reading returns file: {e}")
+        return 1
+
+    if args.return_col not in df.columns:
+        print(f"Error: Column '{args.return_col}' not found in returns file")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    if df[args.return_col].drop_nulls().is_empty():
+        print(f"Error: Column '{args.return_col}' has no non-null values")
+        return 1
+
+    try:
+        fractions = sorted({0.25, 0.50, 1.0, round(args.fraction, 4)})
+        metrics = calculate_kelly_metrics(
+            df, pnl_col=args.return_col, fractions=fractions
+        )
+        recommended = metrics[f"kelly_{round(args.fraction, 4)}"]
+
+        payload = {
+            "n_periods": df[args.return_col].drop_nulls().len(),
+            "fraction": args.fraction,
+            "recommended_size": recommended,
+            **metrics,
+        }
+        if args.capital is not None:
+            payload["recommended_notional"] = recommended * args.capital
+
+        if args.json:
+            print(json_module.dumps(payload, indent=2, default=float))
+        else:
+            print("\n=== Kelly Position Sizing ===\n")
+            print(f"Periods:             {payload['n_periods']:>10,}")
+            print(f"Win Rate:            {metrics['win_rate']:>10.2%}")
+            print(f"Win/Loss Ratio:      {metrics['win_loss_ratio']:>10.3f}")
+            print(f"Full Kelly:          {metrics['full_kelly']:>10.2%}")
+            print(f"Optimal F:           {metrics['optimal_f']:>10.2%}")
+            print()
+            for frac in fractions:
+                marker = " <- recommended" if frac == round(args.fraction, 4) else ""
+                print(f"Kelly x {frac:<5.2f}       {metrics[f'kelly_{frac}']:>10.2%}{marker}")
+            if args.capital is not None:
+                print()
+                print(f"Capital:             {args.capital:>10,.2f}")
+                print(f"Position Size:       {payload['recommended_notional']:>10,.2f}")
+            if metrics["full_kelly"] == 0.0:
+                print("\nNo positive edge in this series: Kelly recommends no position.")
+            print()
+
+    except Exception as e:
+        print(f"Error calculating Kelly metrics: {e}")
+        return 1
+
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -4590,6 +4711,7 @@ def main() -> int:
         "turbulence": cmd_turbulence,
         "changepoint": cmd_changepoint,
         "drawdown": cmd_drawdown,
+        "kelly": cmd_kelly,
     }
 
     handler = commands.get(args.command)
