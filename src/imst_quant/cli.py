@@ -1058,6 +1058,39 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- stress subcommand ---
+    stress_parser = subparsers.add_parser(
+        "stress",
+        help="Stress test portfolio weights against historical crisis scenarios",
+    )
+    stress_parser.add_argument(
+        "--portfolio", help="Path to portfolio parquet file with [symbol, weight]"
+    )
+    stress_parser.add_argument(
+        "--weight-col", default="weight", help="Column name for weights (default: weight)"
+    )
+    stress_parser.add_argument(
+        "--symbol-col", default="symbol", help="Column name for symbols (default: symbol)"
+    )
+    stress_parser.add_argument(
+        "--scenario",
+        action="append",
+        help="Scenario to run, repeatable (default: all historical scenarios)",
+    )
+    stress_parser.add_argument(
+        "--list-scenarios",
+        action="store_true",
+        help="List available historical scenarios and exit",
+    )
+    stress_parser.add_argument(
+        "--capital",
+        type=float,
+        help="Account capital, to translate scenario impacts into dollar losses",
+    )
+    stress_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -4652,6 +4685,165 @@ def cmd_kelly(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_stress(args: argparse.Namespace) -> int:
+    """Stress test portfolio weights against historical crisis scenarios.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success)
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.scenario_analysis import (
+        historical_scenario_lookup,
+        list_historical_scenarios,
+        run_scenario_analysis,
+    )
+
+    available = list_historical_scenarios()
+
+    if args.list_scenarios:
+        print("\n=== Available Historical Scenarios ===\n")
+        for name in available:
+            scenario = historical_scenario_lookup(name)
+            covered = ", ".join(sorted(scenario.shocks))
+            print(f"  {name}")
+            print(f"    shocks: {covered}")
+        print()
+        return 0
+
+    settings = Settings()
+
+    if args.portfolio:
+        portfolio_path = Path(args.portfolio)
+    else:
+        portfolio_path = Path(settings.data.gold_dir) / "portfolio.parquet"
+
+    if not portfolio_path.exists():
+        print(f"Error: Portfolio file not found: {portfolio_path}")
+        print("Expected columns: [symbol, weight]")
+        return 1
+
+    if args.capital is not None and args.capital <= 0:
+        print(f"Error: --capital must be positive, got {args.capital}")
+        return 1
+
+    requested = args.scenario or available
+    unknown = [name for name in requested if name not in available]
+    if unknown:
+        print(f"Error: Unknown scenario(s): {', '.join(unknown)}")
+        print(f"Available: {', '.join(available)}")
+        return 1
+
+    try:
+        portfolio_df = pl.read_parquet(portfolio_path)
+    except Exception as e:
+        print(f"Error reading portfolio file: {e}")
+        return 1
+
+    for column in (args.symbol_col, args.weight_col):
+        if column not in portfolio_df.columns:
+            print(f"Error: Column '{column}' not found in portfolio file")
+            print(f"Available columns: {portfolio_df.columns}")
+            return 1
+
+    weights = {
+        str(row[args.symbol_col]): float(row[args.weight_col])
+        for row in portfolio_df.iter_rows(named=True)
+        if row[args.symbol_col] is not None and row[args.weight_col] is not None
+    }
+
+    if not weights:
+        print("Error: Portfolio has no rows with both a symbol and a weight")
+        return 1
+
+    try:
+        scenarios = [historical_scenario_lookup(name) for name in requested]
+        report = run_scenario_analysis(weights, scenarios)
+
+        # Assets absent from a scenario are shocked by 0, so a portfolio the
+        # scenario says nothing about looks deceptively unharmed. Report how
+        # much of the book each scenario actually covers.
+        total_weight = sum(abs(w) for w in weights.values())
+        coverage = {
+            scenario.name: (
+                sum(abs(weights[a]) for a in weights if a in scenario.shocks) / total_weight
+                if total_weight > 0
+                else 0.0
+            )
+            for scenario in scenarios
+        }
+
+        payload = {
+            "n_positions": len(weights),
+            "total_weight": total_weight,
+            "expected_loss": report.expected_loss,
+            "worst_case": report.worst_case.scenario_name,
+            "scenarios": [
+                {
+                    "name": result.scenario_name,
+                    "portfolio_impact": result.portfolio_impact,
+                    "weight_covered": coverage[result.scenario_name],
+                    "worst_asset": result.worst_asset,
+                    "best_asset": result.best_asset,
+                    "max_loss": result.max_loss,
+                    "asset_contributions": result.asset_contributions,
+                }
+                for result in report.results
+            ],
+        }
+        if args.capital is not None:
+            payload["capital"] = args.capital
+            for entry in payload["scenarios"]:
+                entry["pnl"] = entry["portfolio_impact"] * args.capital
+
+        if args.json:
+            print(json_module.dumps(payload, indent=2, default=float))
+        else:
+            print("\n=== Portfolio Stress Test ===\n")
+            print(f"Positions:           {payload['n_positions']:>10,}")
+            print(f"Total Weight:        {total_weight:>10.2%}")
+            print()
+            header = f"{'Scenario':<24}{'Impact':>10}{'Covered':>10}{'Worst':>10}"
+            if args.capital is not None:
+                header += f"{'PnL':>14}"
+            print(header)
+            print("-" * len(header))
+            for entry in sorted(payload["scenarios"], key=lambda e: e["portfolio_impact"]):
+                line = (
+                    f"{entry['name']:<24}"
+                    f"{entry['portfolio_impact']:>10.2%}"
+                    f"{entry['weight_covered']:>10.0%}"
+                    f"{entry['worst_asset']:>10}"
+                )
+                if args.capital is not None:
+                    line += f"{entry['pnl']:>14,.2f}"
+                print(line)
+            print()
+            print(f"Worst Case:          {report.worst_case.scenario_name}")
+            print(f"Average Impact:      {report.expected_loss:>10.2%}")
+
+            uncovered = [name for name, pct in coverage.items() if pct < 0.5]
+            if uncovered:
+                print()
+                print("Note: under half of the book is shocked by these scenarios,")
+                print("so their impact is understated:")
+                for name in uncovered:
+                    print(f"  - {name} ({coverage[name]:.0%} covered)")
+            print()
+
+    except Exception as e:
+        print(f"Error running stress test: {e}")
+        return 1
+
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -4712,6 +4904,7 @@ def main() -> int:
         "changepoint": cmd_changepoint,
         "drawdown": cmd_drawdown,
         "kelly": cmd_kelly,
+        "stress": cmd_stress,
     }
 
     handler = commands.get(args.command)
