@@ -25,6 +25,33 @@ import numpy as np
 import polars as pl
 
 
+def _safe_ratio(
+    numerator: pl.Expr,
+    denominator: pl.Expr,
+    fallback: float,
+) -> pl.Expr:
+    """Divide two expressions, substituting ``fallback`` on a zero denominator.
+
+    Flat bars (identical high/low/close, or zero rolling standard deviation)
+    make several indicator denominators exactly zero, which otherwise yields
+    ``inf`` or ``NaN`` and silently poisons every downstream feature. Nulls in
+    the denominator (rolling-window warmup) propagate as nulls, unchanged.
+
+    Args:
+        numerator: Expression for the dividend.
+        denominator: Expression for the divisor.
+        fallback: Value to use where the denominator is exactly zero.
+
+    Returns:
+        Expression evaluating to the ratio, or ``fallback`` where undefined.
+    """
+    return (
+        pl.when(denominator == 0)
+        .then(pl.lit(fallback, dtype=pl.Float64))
+        .otherwise(numerator / denominator)
+    )
+
+
 def macd(
     df: pl.DataFrame,
     price_col: str = "close",
@@ -131,13 +158,21 @@ def bollinger_bands(
 
     # Calculate band width as percentage
     df = df.with_columns(
-        ((pl.col("bb_upper") - pl.col("bb_lower")) / pl.col("bb_middle")).alias("bb_width")
+        _safe_ratio(
+            pl.col("bb_upper") - pl.col("bb_lower"),
+            pl.col("bb_middle"),
+            0.0,
+        ).alias("bb_width")
     )
 
     # Calculate %B (where price is relative to bands)
+    # Zero-width bands (flat prices) put price exactly at the midpoint.
     df = df.with_columns(
-        ((pl.col(price_col) - pl.col("bb_lower")) /
-         (pl.col("bb_upper") - pl.col("bb_lower"))).alias("bb_percent")
+        _safe_ratio(
+            pl.col(price_col) - pl.col("bb_lower"),
+            pl.col("bb_upper") - pl.col("bb_lower"),
+            0.5,
+        ).alias("bb_percent")
     )
 
     return df.drop(["_bb_std"])
@@ -258,15 +293,19 @@ def adx(
     ])
 
     # Calculate +DI and -DI
+    # A zero ATR means no range at all, so there is no directional movement.
     df = df.with_columns([
-        (100 * pl.col("_plus_dm_smooth") / pl.col("atr")).alias("plus_di"),
-        (100 * pl.col("_minus_dm_smooth") / pl.col("atr")).alias("minus_di"),
+        _safe_ratio(100 * pl.col("_plus_dm_smooth"), pl.col("atr"), 0.0).alias("plus_di"),
+        _safe_ratio(100 * pl.col("_minus_dm_smooth"), pl.col("atr"), 0.0).alias("minus_di"),
     ])
 
     # Calculate DX
     df = df.with_columns(
-        (100 * (pl.col("plus_di") - pl.col("minus_di")).abs() /
-         (pl.col("plus_di") + pl.col("minus_di"))).alias("_dx")
+        _safe_ratio(
+            100 * (pl.col("plus_di") - pl.col("minus_di")).abs(),
+            pl.col("plus_di") + pl.col("minus_di"),
+            0.0,
+        ).alias("_dx")
     )
 
     # ADX is smoothed DX
@@ -321,9 +360,13 @@ def stochastic_oscillator(
     ])
 
     # Calculate %K
+    # A zero-width range (flat bars) is neither overbought nor oversold.
     df = df.with_columns(
-        (100 * (pl.col(close_col) - pl.col("_lowest")) /
-         (pl.col("_highest") - pl.col("_lowest"))).alias("stoch_k")
+        _safe_ratio(
+            100 * (pl.col(close_col) - pl.col("_lowest")),
+            pl.col("_highest") - pl.col("_lowest"),
+            50.0,
+        ).alias("stoch_k")
     )
 
     # %D is smoothed %K
@@ -467,9 +510,13 @@ def williams_r(
     ])
 
     # Williams %R = (highest - close) / (highest - lowest) * -100
+    # A zero-width range maps to the midpoint of the -100..0 scale.
     df = df.with_columns(
-        ((pl.col("_hh") - pl.col(close_col)) /
-         (pl.col("_hh") - pl.col("_ll")) * -100).alias("williams_r")
+        _safe_ratio(
+            -100 * (pl.col("_hh") - pl.col(close_col)),
+            pl.col("_hh") - pl.col("_ll"),
+            -50.0,
+        ).alias("williams_r")
     )
 
     return df.drop(["_hh", "_ll"])
@@ -523,9 +570,14 @@ def cci(
     )
 
     # CCI = (TP - SMA) / (0.015 * MAD)
-    # Using 0.015 as Lambert's constant
+    # Using 0.015 as Lambert's constant. Zero deviation means price sits on
+    # its own average, i.e. no deviation from the mean at all.
     df = df.with_columns(
-        ((pl.col("_tp") - pl.col("_tp_sma")) / (0.015 * pl.col("_mad"))).alias("cci")
+        _safe_ratio(
+            pl.col("_tp") - pl.col("_tp_sma"),
+            0.015 * pl.col("_mad"),
+            0.0,
+        ).alias("cci")
     )
 
     return df.drop(["_tp", "_tp_sma", "_mad"])
@@ -579,16 +631,19 @@ def rsi(
         pl.col("_loss").ewm_mean(alpha=alpha, adjust=False).alias("_avg_loss")
     ])
 
-    # Calculate RS and RSI
+    # RSI = 100 - 100 / (1 + avg_gain / avg_loss), rewritten as
+    # 100 * avg_gain / (avg_gain + avg_loss) so a zero average loss gives 100
+    # instead of dividing by zero. Flat prices (no gains and no losses) are
+    # neutral at 50.
     df = df.with_columns(
-        (pl.col("_avg_gain") / pl.col("_avg_loss")).alias("_rs")
+        _safe_ratio(
+            100 * pl.col("_avg_gain"),
+            pl.col("_avg_gain") + pl.col("_avg_loss"),
+            50.0,
+        ).alias("rsi")
     )
 
-    df = df.with_columns(
-        (100 - (100 / (1 + pl.col("_rs")))).alias("rsi")
-    )
-
-    return df.drop(["_price_change", "_gain", "_loss", "_avg_gain", "_avg_loss", "_rs"])
+    return df.drop(["_price_change", "_gain", "_loss", "_avg_gain", "_avg_loss"])
 
 
 def detect_rsi_divergence(
