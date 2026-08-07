@@ -826,6 +826,45 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- alpha subcommand ---
+    alpha_parser = subparsers.add_parser(
+        "alpha",
+        help="Benchmark-relative alpha metrics: Jensen's alpha, information ratio, capture",
+    )
+    alpha_parser.add_argument(
+        "--returns", help="Path to returns parquet file (default: gold/returns.parquet)"
+    )
+    alpha_parser.add_argument(
+        "--return-col", default="returns", help="Column name for strategy returns (default: returns)"
+    )
+    alpha_parser.add_argument(
+        "--benchmark-col",
+        default="benchmark_returns",
+        help="Column name for benchmark returns (default: benchmark_returns)",
+    )
+    alpha_parser.add_argument(
+        "--benchmark",
+        help="Optional separate parquet file holding the benchmark column",
+    )
+    alpha_parser.add_argument(
+        "--risk-free-rate",
+        type=float,
+        default=0.02,
+        help="Annual risk-free rate as a decimal (default: 0.02)",
+    )
+    alpha_parser.add_argument(
+        "--simulations",
+        type=int,
+        default=2000,
+        help="Monte Carlo draws for the skill-vs-luck test (default: 2000)",
+    )
+    alpha_parser.add_argument(
+        "--seed", type=int, help="Seed for the skill-vs-luck simulation, for reproducible output"
+    )
+    alpha_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     # --- quality-check subcommand ---
     quality_parser = subparsers.add_parser(
         "quality-check", help="Validate data quality and completeness"
@@ -3897,6 +3936,128 @@ def cmd_deflated_sharpe(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_alpha(args: argparse.Namespace) -> int:
+    """Report benchmark-relative alpha metrics for a strategy.
+
+    Reads a strategy return series and a benchmark return series and prints
+    Jensen's alpha, information ratio, Treynor ratio, appraisal ratio, M2,
+    upside/downside capture and a skill-vs-luck assessment.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success)
+    """
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.alpha_metrics import AlphaMetrics
+    import polars as pl
+    import json as json_module
+
+    settings = Settings()
+
+    if args.returns:
+        returns_path = Path(args.returns)
+    else:
+        returns_path = Path(settings.data.gold_dir) / "returns.parquet"
+
+    if not returns_path.exists():
+        print(f"Error: Returns file not found: {returns_path}")
+        print("Expected columns: [date, returns, benchmark_returns]")
+        return 1
+
+    try:
+        df = pl.read_parquet(returns_path)
+    except Exception as e:
+        print(f"Error reading returns file: {e}")
+        return 1
+
+    if args.return_col not in df.columns:
+        print(f"Error: Column '{args.return_col}' not found in returns file")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    if args.benchmark:
+        benchmark_path = Path(args.benchmark)
+        if not benchmark_path.exists():
+            print(f"Error: Benchmark file not found: {benchmark_path}")
+            return 1
+        try:
+            benchmark_df = pl.read_parquet(benchmark_path)
+        except Exception as e:
+            print(f"Error reading benchmark file: {e}")
+            return 1
+    else:
+        benchmark_df = df
+
+    if args.benchmark_col not in benchmark_df.columns:
+        print(f"Error: Column '{args.benchmark_col}' not found in benchmark data")
+        print(f"Available columns: {benchmark_df.columns}")
+        return 1
+
+    strategy = df[args.return_col].to_pandas()
+    benchmark = benchmark_df[args.benchmark_col].to_pandas()
+
+    if len(strategy) != len(benchmark):
+        print(
+            f"Error: Strategy has {len(strategy)} observations but benchmark has "
+            f"{len(benchmark)}; the two series must be aligned"
+        )
+        return 1
+
+    if len(strategy) < 2:
+        print("Error: Need at least 2 observations to compute alpha metrics")
+        return 1
+
+    metrics = AlphaMetrics(strategy, benchmark, risk_free_rate=args.risk_free_rate)
+
+    try:
+        capture = metrics.calculate_capture_ratios()
+        skill = metrics.calculate_skill_vs_luck(
+            n_simulations=args.simulations, seed=args.seed
+        )
+        result = {
+            "observations": len(strategy),
+            "jensens_alpha": metrics.calculate_jensens_alpha(),
+            "beta": metrics._calculate_beta(),
+            "information_ratio": metrics.calculate_information_ratio(),
+            "treynor_ratio": metrics.calculate_treynor_ratio(),
+            "appraisal_ratio": metrics.calculate_appraisal_ratio(),
+            "m2_alpha_pct": metrics.calculate_m2_alpha(),
+            "upside_capture": capture["upside_capture"],
+            "downside_capture": capture["downside_capture"],
+            "capture_ratio": capture["capture_ratio"],
+            "observed_sharpe": skill["observed_sharpe"],
+            "probabilistic_sharpe_ratio": skill["probabilistic_sharpe_ratio"],
+            "skill_probability": skill["skill_probability"],
+        }
+    except Exception as e:
+        print(f"Error computing alpha metrics: {e}")
+        return 1
+
+    if args.json:
+        print(json_module.dumps(result, indent=2, default=float))
+    else:
+        print("\n=== Alpha Metrics ===\n")
+        print(f"Observations:          {result['observations']:>10}")
+        print(f"Jensen's Alpha (ann):  {result['jensens_alpha']:>10.4f}")
+        print(f"Beta:                  {result['beta']:>10.4f}")
+        print(f"Information Ratio:     {result['information_ratio']:>10.4f}")
+        print(f"Treynor Ratio:         {result['treynor_ratio']:>10.4f}")
+        print(f"Appraisal Ratio:       {result['appraisal_ratio']:>10.4f}")
+        print(f"M2 Alpha (%):          {result['m2_alpha_pct']:>10.4f}")
+        print()
+        print(f"Upside Capture (%):    {result['upside_capture']:>10.2f}")
+        print(f"Downside Capture (%):  {result['downside_capture']:>10.2f}")
+        print(f"Capture Ratio:         {result['capture_ratio']:>10.4f}")
+        print()
+        print(f"Observed Sharpe (ann): {result['observed_sharpe']:>10.4f}")
+        print(f"Prob. Sharpe Ratio:    {result['probabilistic_sharpe_ratio']:>10.4f}")
+        print(f"Skill Probability:     {result['skill_probability']:>10.4f}")
+
+    return 0
+
+
 def cmd_hurst(args: argparse.Namespace) -> int:
     """Estimate the Hurst exponent and variance ratios for a return series.
 
@@ -4906,6 +5067,7 @@ COMMANDS = {
         "risk-metrics": cmd_risk_metrics,
         "var-backtest": cmd_var_backtest,
         "deflated-sharpe": cmd_deflated_sharpe,
+        "alpha": cmd_alpha,
         "quality-check": cmd_quality_check,
         "clean": cmd_clean,
         "signal-performance": cmd_signal_performance,
