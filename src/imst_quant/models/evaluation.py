@@ -81,7 +81,7 @@ def evaluate_regression_model(
         y_pred: Predicted values.
 
     Returns:
-        Dictionary with MSE, RMSE, MAE, and R² metrics.
+        Dictionary with MSE, RMSE, MAE, and RÂ² metrics.
     """
     y_true_np = y_true.to_numpy()
     y_pred_np = y_pred.to_numpy()
