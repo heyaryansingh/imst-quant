@@ -27,6 +27,29 @@ import numpy as np
 import polars as pl
 
 
+def _require_positive(name: str, value: float) -> float:
+    """Reject a non-positive or missing divisor with a message that names it.
+
+    Order sizes and daily volumes arrive from market data, where a halted or
+    newly listed symbol reports zero volume. Dividing by that raises a bare
+    ZeroDivisionError several frames from the offending input.
+
+    Args:
+        name: Parameter name, used in the error message.
+        value: Value to check.
+
+    Returns:
+        The value, as a float.
+
+    Raises:
+        ValueError: If the value is missing, non-finite, or not positive.
+    """
+    if value is None or not np.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a positive number, got {value!r}")
+
+    return float(value)
+
+
 def estimate_commission(
     trade_value: float,
     commission_rate: float = 0.0005,
@@ -77,10 +100,16 @@ def estimate_slippage(
     Returns:
         Estimated slippage cost in basis points.
 
+    Raises:
+        ValueError: If order_size or avg_daily_volume is not positive.
+
     Example:
         >>> slippage_bps = estimate_slippage(10000, 1000000, spread_bps=5.0)
         >>> print(f"Slippage: {slippage_bps:.2f} bps")
     """
+    order_size = _require_positive("order_size", order_size)
+    avg_daily_volume = _require_positive("avg_daily_volume", avg_daily_volume)
+
     # Spread crossing cost (pay half spread on average)
     spread_cost = spread_bps / 2.0
 
@@ -116,10 +145,16 @@ def estimate_market_impact(
     Returns:
         Permanent market impact in basis points.
 
+    Raises:
+        ValueError: If order_size or avg_daily_volume is not positive.
+
     Example:
         >>> impact = estimate_market_impact(50000, 2000000, volatility=0.015)
         >>> print(f"Market impact: {impact:.2f} bps")
     """
+    order_size = _require_positive("order_size", order_size)
+    avg_daily_volume = _require_positive("avg_daily_volume", avg_daily_volume)
+
     participation_rate = order_size / avg_daily_volume
     impact_decimal = lambda_param * participation_rate * volatility
     impact_bps = impact_decimal * 10000.0
@@ -151,10 +186,15 @@ def estimate_total_cost(
     Returns:
         Total transaction cost in basis points.
 
+    Raises:
+        ValueError: If order_size or avg_daily_volume is not positive.
+
     Example:
         >>> cost = estimate_total_cost(25000, 1500000)
         >>> print(f"Total cost: {cost:.2f} bps")
     """
+    order_size = _require_positive("order_size", order_size)
+
     # Commission cost in bps
     commission_usd = estimate_commission(order_size, commission_rate, min_commission)
     commission_bps = (commission_usd / order_size) * 10000.0
@@ -194,11 +234,17 @@ def analyze_turnover_costs(
             - daily_avg_cost_usd: Average daily transaction cost
             - breakeven_alpha: Alpha needed to break even after costs
 
+    Raises:
+        ValueError: If portfolio_value or periods_per_year is not positive.
+
     Example:
         >>> turnover = analyze_turnover_costs(1000000, 2.0, avg_cost_bps=15.0)
         >>> print(f"Annual cost: ${turnover['annual_cost_usd']:,.2f}")
         >>> print(f"Breakeven alpha: {turnover['breakeven_alpha']:.2%}")
     """
+    portfolio_value = _require_positive("portfolio_value", portfolio_value)
+    periods_per_year = _require_positive("periods_per_year", periods_per_year)
+
     # Convert bps to decimal
     avg_cost_decimal = avg_cost_bps / 10000.0
 
@@ -244,11 +290,19 @@ def optimal_execution_schedule(
         List of dictionaries with day, order_size, participation_rate,
         cumulative_filled.
 
+    Raises:
+        ValueError: If any of the sizing arguments is not positive.
+
     Example:
         >>> schedule = optimal_execution_schedule(500000, 2000000, max_participation_rate=0.05)
         >>> for day in schedule:
         ...     print(f"Day {day['day']}: ${day['order_size']:,.0f} ({day['participation_rate']:.2%})")
     """
+    total_order_size = _require_positive("total_order_size", total_order_size)
+    avg_daily_volume = _require_positive("avg_daily_volume", avg_daily_volume)
+    max_participation_rate = _require_positive("max_participation_rate", max_participation_rate)
+    time_horizon_days = int(_require_positive("time_horizon_days", time_horizon_days))
+
     max_daily_size = avg_daily_volume * max_participation_rate
 
     if total_order_size <= max_daily_size:
@@ -317,13 +371,23 @@ def batch_cost_analysis(
         ... })
         >>> result = batch_cost_analysis(trades)
     """
+    cost_cols = ["commission_bps", "slippage_bps", "impact_bps", "total_cost_bps"]
+
+    if trades_df.is_empty():
+        # pl.DataFrame([]) has no columns at all, so the horizontal concat
+        # below would silently drop the cost columns from the result.
+        return trades_df.with_columns(
+            [pl.lit(None, dtype=pl.Float64).alias(col) for col in cost_cols]
+        )
+
     results = []
 
     for row in trades_df.iter_rows(named=True):
-        order_size = row[size_col]
+        order_size = _require_positive(size_col, row[size_col])
         avg_volume = row[volume_col]
         spread = row[spread_col]
-        volatility = row.get("volatility", 0.02)
+        volatility = row.get("volatility")
+        volatility = 0.02 if volatility is None else volatility
 
         commission_bps = (estimate_commission(order_size) / order_size) * 10000.0
         slippage_bps = estimate_slippage(order_size, avg_volume, spread, volatility)
