@@ -4865,7 +4865,17 @@ def main() -> int:
         parser.print_help()
         return 0
 
-    commands = {
+    handler = COMMANDS.get(args.command)
+    if handler:
+        return handler(args)
+    else:
+        parser.print_help()
+        return 1
+
+
+# Maps the subcommand name registered in create_parser to its handler. Keep in
+# sync with create_parser; tests/unit/test_cli_dispatch.py enforces that.
+COMMANDS = {
         "ingest": cmd_ingest,
         "process": cmd_process,
         "analyze": cmd_analyze,
@@ -4905,14 +4915,7 @@ def main() -> int:
         "drawdown": cmd_drawdown,
         "kelly": cmd_kelly,
         "stress": cmd_stress,
-    }
-
-    handler = commands.get(args.command)
-    if handler:
-        return handler(args)
-    else:
-        parser.print_help()
-        return 1
+}
 
 
 if __name__ == "__main__":
