@@ -157,16 +157,17 @@ def gini_coefficient(
     # Convert to numpy for calculation
     sorted_weights = np.sort(w.to_numpy())
     n = len(sorted_weights)
+    total = sorted_weights.sum()
 
-    if n == 0 or sorted_weights.sum() == 0:
+    if n == 0 or total == 0:
         return 0.0
 
-    # Normalized cumulative sum
-    cumsum = np.cumsum(sorted_weights)
-    cumsum_norm = cumsum / cumsum[-1]
-
-    # Calculate Gini using trapezoid rule
-    gini = 1 - 2 * np.trapz(cumsum_norm, dx=1/n)
+    # The Lorenz curve has to start at the origin. Integrating it from the first
+    # position instead of from zero drops 1/n of the area, which reported a Gini
+    # of 1/n^2 for an equal-weight book that should score exactly 0. This is the
+    # closed form of the same area with the origin included.
+    index = np.arange(1, n + 1)
+    gini = 2 * np.sum(index * sorted_weights) / (n * total) - (n + 1) / n
 
     return float(gini)
 
