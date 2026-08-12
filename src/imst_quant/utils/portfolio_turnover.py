@@ -27,6 +27,10 @@ from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 import polars as pl
 
+# Round-trip cost assumed by turnover_summary's rough annual cost estimate.
+# estimate_turnover_cost models commission, spread, and impact properly.
+COST_PER_UNIT_TURNOVER_BPS = 5.0
+
 
 @dataclass
 class TurnoverDecomposition:
@@ -383,8 +387,10 @@ def turnover_summary(
     sorted_assets = sorted(asset_turnovers.items(), key=lambda x: -x[1])
     high_turnover = sorted_assets[:5]
 
-    # Estimated annual cost (rough estimate at 5 bps per unit turnover)
-    est_cost_bps = annualized * 5 * 100  # turnover * cost_per_unit_turnover
+    # Estimated annual cost (rough estimate at 5 bps per unit turnover).
+    # `annualized` is already a turnover multiple, not a percentage, so the
+    # result is in bps directly: 200% annual turnover costs 2.0 * 5 = 10 bps.
+    est_cost_bps = annualized * COST_PER_UNIT_TURNOVER_BPS
 
     # Budget check
     budget_remaining = None
