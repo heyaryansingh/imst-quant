@@ -1220,6 +1220,40 @@ Examples:
         "--json", action="store_true", help="Output the latest bar's values as JSON"
     )
 
+    # --- turnover subcommand ---
+    turnover_parser = subparsers.add_parser(
+        "turnover",
+        help="Analyze portfolio turnover and its cost drag from a weight history",
+    )
+    turnover_parser.add_argument(
+        "--history",
+        help="Path to weight history parquet with [date, symbol, weight] "
+             "(default: gold/weight_history.parquet)",
+    )
+    turnover_parser.add_argument(
+        "--date-col", default="date", help="Column name for snapshot dates (default: date)"
+    )
+    turnover_parser.add_argument(
+        "--symbol-col", default="symbol", help="Column name for symbols (default: symbol)"
+    )
+    turnover_parser.add_argument(
+        "--weight-col", default="weight", help="Column name for weights (default: weight)"
+    )
+    turnover_parser.add_argument(
+        "--budget",
+        type=float,
+        help="Annual turnover budget in percent (e.g. 200 for 200%%)",
+    )
+    turnover_parser.add_argument(
+        "--months-elapsed",
+        type=int,
+        default=0,
+        help="Months elapsed in the budget period (default: 0)",
+    )
+    turnover_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -5464,6 +5498,131 @@ def cmd_indicators(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_turnover(args: argparse.Namespace) -> int:
+    """Analyze portfolio turnover from a history of weight snapshots.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success)
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.portfolio_turnover import turnover_summary
+
+    settings = Settings()
+
+    if args.history:
+        history_path = Path(args.history)
+    else:
+        history_path = Path(settings.data.gold_dir) / "weight_history.parquet"
+
+    if not history_path.exists():
+        print(f"Error: Weight history file not found: {history_path}")
+        print("Expected columns: [date, symbol, weight]")
+        return 1
+
+    if args.budget is not None and args.budget <= 0:
+        print(f"Error: --budget must be positive, got {args.budget}")
+        return 1
+
+    if not 0 <= args.months_elapsed <= 12:
+        print(f"Error: --months-elapsed must be in [0, 12], got {args.months_elapsed}")
+        return 1
+
+    try:
+        df = pl.read_parquet(history_path)
+    except Exception as e:
+        print(f"Error reading weight history file: {e}")
+        return 1
+
+    for column in (args.date_col, args.symbol_col, args.weight_col):
+        if column not in df.columns:
+            print(f"Error: Column '{column}' not found in weight history file")
+            print(f"Available columns: {df.columns}")
+            return 1
+
+    df = df.drop_nulls([args.date_col, args.symbol_col, args.weight_col])
+    if df.is_empty():
+        print("Error: Weight history has no rows with a date, symbol, and weight")
+        return 1
+
+    # turnover_summary reads the list positionally, so the snapshots have to be
+    # in date order or the first difference measures a move backwards in time.
+    snapshots = []
+    dates = []
+    for (snapshot_date,), group in df.sort(args.date_col).group_by(
+        args.date_col, maintain_order=True
+    ):
+        dates.append(snapshot_date)
+        snapshots.append(
+            {
+                str(row[args.symbol_col]): float(row[args.weight_col])
+                for row in group.iter_rows(named=True)
+            }
+        )
+
+    if len(snapshots) < 2:
+        print(f"Error: Need at least 2 dated snapshots, got {len(snapshots)}")
+        return 1
+
+    try:
+        summary = turnover_summary(
+            snapshots,
+            annual_budget_pct=args.budget,
+            months_elapsed=args.months_elapsed,
+        )
+
+        payload = {
+            "snapshots": len(snapshots),
+            "first_date": str(dates[0]),
+            "last_date": str(dates[-1]),
+            "avg_period_turnover": summary.avg_monthly_turnover,
+            "annualized_turnover": summary.annualized_turnover,
+            "estimated_annual_cost_bps": summary.estimated_annual_cost_bps,
+            "trend": summary.turnover_trend,
+            "high_turnover_assets": [
+                {"symbol": symbol, "turnover": value}
+                for symbol, value in summary.high_turnover_assets
+            ],
+            "budget_remaining_pct": summary.budget_remaining,
+            "recommendation": summary.recommendation,
+        }
+
+        if args.json:
+            print(json_module.dumps(payload, indent=2, default=float))
+        else:
+            print("\n=== Portfolio Turnover ===\n")
+            print(f"Snapshots:           {payload['snapshots']:>10,}")
+            print(f"Period:              {payload['first_date']} to {payload['last_date']}")
+            print(f"Avg Turnover:        {summary.avg_monthly_turnover:>10.2%}")
+            print(f"Annualized:          {summary.annualized_turnover:>10.2%}")
+            print(f"Est. Cost Drag:      {summary.estimated_annual_cost_bps:>10.1f} bps")
+            print(f"Trend:               {summary.turnover_trend:>10}")
+            if summary.budget_remaining is not None:
+                print(f"Budget Remaining:    {summary.budget_remaining:>10.1f} %")
+            print()
+            print("Highest turnover assets:")
+            for entry in payload["high_turnover_assets"]:
+                print(f"  {entry['symbol']:<12} {entry['turnover']:>9.2%}")
+            print()
+            print(summary.recommendation)
+            print()
+            print("Annualization assumes monthly snapshots; read it as a rate per")
+            print("12 snapshots if this history is sampled at another frequency.")
+            print()
+
+    except Exception as e:
+        print(f"Error analyzing turnover: {e}")
+        return 1
+
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -5539,6 +5698,7 @@ COMMANDS = {
         "tail-risk": cmd_tail_risk,
         "concentration": cmd_concentration,
         "indicators": cmd_indicators,
+        "turnover": cmd_turnover,
 }
 
 
