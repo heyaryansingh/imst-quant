@@ -1158,6 +1158,35 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- concentration subcommand ---
+    concentration_parser = subparsers.add_parser(
+        "concentration",
+        help="Measure portfolio concentration (HHI, effective N, Gini, entropy)",
+    )
+    concentration_parser.add_argument(
+        "--portfolio", help="Path to portfolio parquet file with [symbol, weight]"
+    )
+    concentration_parser.add_argument(
+        "--weight-col", default="weight", help="Column name for weights (default: weight)"
+    )
+    concentration_parser.add_argument(
+        "--symbol-col", default="symbol", help="Column name for symbols (default: symbol)"
+    )
+    concentration_parser.add_argument(
+        "--top-n",
+        type=int,
+        default=5,
+        help="Number of largest positions for the concentration ratio (default: 5)",
+    )
+    concentration_parser.add_argument(
+        "--max-hhi",
+        type=float,
+        help="Fail with exit code 2 if HHI exceeds this limit, for use as a CI gate",
+    )
+    concentration_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -5129,6 +5158,127 @@ def cmd_tail_risk(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_concentration(args: argparse.Namespace) -> int:
+    """Measure how concentrated a portfolio's exposure is.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success, 2 if --max-hhi is breached)
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.concentration_metrics import calculate_all_concentration
+
+    settings = Settings()
+
+    if args.portfolio:
+        portfolio_path = Path(args.portfolio)
+    else:
+        portfolio_path = Path(settings.data.gold_dir) / "portfolio.parquet"
+
+    if not portfolio_path.exists():
+        print(f"Error: Portfolio file not found: {portfolio_path}")
+        print("Expected columns: [symbol, weight]")
+        return 1
+
+    if args.top_n < 1:
+        print(f"Error: --top-n must be at least 1, got {args.top_n}")
+        return 1
+
+    if args.max_hhi is not None and not 0.0 < args.max_hhi <= 1.0:
+        print(f"Error: --max-hhi must be in (0, 1], got {args.max_hhi}")
+        return 1
+
+    try:
+        portfolio_df = pl.read_parquet(portfolio_path)
+    except Exception as e:
+        print(f"Error reading portfolio file: {e}")
+        return 1
+
+    for column in (args.symbol_col, args.weight_col):
+        if column not in portfolio_df.columns:
+            print(f"Error: Column '{column}' not found in portfolio file")
+            print(f"Available columns: {portfolio_df.columns}")
+            return 1
+
+    rows = [
+        (str(row[args.symbol_col]), float(row[args.weight_col]))
+        for row in portfolio_df.iter_rows(named=True)
+        if row[args.symbol_col] is not None and row[args.weight_col] is not None
+    ]
+    rows = [(symbol, weight) for symbol, weight in rows if weight != 0.0]
+
+    if not rows:
+        print("Error: Portfolio has no rows with both a symbol and a non-zero weight")
+        return 1
+
+    # Concentration is a property of gross exposure, and the underlying metrics
+    # normalize by the signed sum: a book with shorts would otherwise report an
+    # HHI above 1 or a negative effective N. Measure absolute weights.
+    has_shorts = any(weight < 0 for _, weight in rows)
+    gross = pl.Series("weight", [abs(weight) for _, weight in rows])
+
+    try:
+        metrics = calculate_all_concentration(gross, top_n=args.top_n)
+
+        largest = sorted(rows, key=lambda row: abs(row[1]), reverse=True)[: args.top_n]
+        gross_total = float(gross.sum())
+
+        payload = {
+            "n_positions": len(rows),
+            "gross_exposure": gross_total,
+            "has_shorts": has_shorts,
+            "top_positions": [
+                {"symbol": symbol, "weight": weight, "share": abs(weight) / gross_total}
+                for symbol, weight in largest
+            ],
+            **metrics,
+        }
+        if args.max_hhi is not None:
+            payload["max_hhi"] = args.max_hhi
+            payload["breached"] = metrics["hhi"] > args.max_hhi
+
+        if args.json:
+            print(json_module.dumps(payload, indent=2, default=float))
+        else:
+            top_key = f"top_{args.top_n}_concentration"
+            print("\n=== Portfolio Concentration ===\n")
+            print(f"Positions:           {payload['n_positions']:>10,}")
+            print(f"Gross Exposure:      {gross_total:>10.2%}")
+            print(f"HHI:                 {metrics['hhi']:>10.4f}")
+            print(f"Effective N:         {metrics['effective_n']:>10.2f}")
+            print(f"Top {args.top_n} Share:         {metrics[top_key]:>10.2%}")
+            print(f"Gini:                {metrics['gini']:>10.4f}")
+            print(f"Normalized Entropy:  {metrics['normalized_entropy']:>10.4f}")
+            print()
+            print(f"Largest {len(largest)} positions:")
+            for entry in payload["top_positions"]:
+                print(f"  {entry['symbol']:<12} {entry['weight']:>9.2%} "
+                      f"({entry['share']:.1%} of gross)")
+            if has_shorts:
+                print()
+                print("Book contains shorts: metrics are computed on absolute weights,")
+                print("so they measure gross exposure concentration, not net.")
+            if args.max_hhi is not None and payload["breached"]:
+                print()
+                print(f"HHI {metrics['hhi']:.4f} exceeds the --max-hhi limit of {args.max_hhi:.4f}")
+            print()
+
+        if args.max_hhi is not None and payload["breached"]:
+            return 2
+
+    except Exception as e:
+        print(f"Error calculating concentration metrics: {e}")
+        return 1
+
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -5202,6 +5352,7 @@ COMMANDS = {
         "kelly": cmd_kelly,
         "stress": cmd_stress,
         "tail-risk": cmd_tail_risk,
+        "concentration": cmd_concentration,
 }
 
 
