@@ -134,7 +134,13 @@ class PerformanceAttributor:
                 (pl.col(self.weight_col) * pl.col(self.return_col)).sum().alias("weighted_return"),
             ])
             .with_columns(
-                (pl.col("weighted_return") / pl.col("portfolio_weight")).alias("portfolio_return")
+                # A sector whose weights net to zero (a long/short pair) has no
+                # observable return; dividing by it produced inf and poisoned
+                # the whole attribution with NaN.
+                pl.when(pl.col("portfolio_weight") != 0)
+                .then(pl.col("weighted_return") / pl.col("portfolio_weight"))
+                .otherwise(None)
+                .alias("portfolio_return")
             )
         )
 
@@ -146,7 +152,10 @@ class PerformanceAttributor:
                 (pl.col(self.weight_col) * pl.col(self.return_col)).sum().alias("weighted_return"),
             ])
             .with_columns(
-                (pl.col("weighted_return") / pl.col("benchmark_weight")).alias("benchmark_return")
+                pl.when(pl.col("benchmark_weight") != 0)
+                .then(pl.col("weighted_return") / pl.col("benchmark_weight"))
+                .otherwise(None)
+                .alias("benchmark_return")
             )
         )
 
@@ -157,7 +166,10 @@ class PerformanceAttributor:
             how="full",
             coalesce=True,
             suffix="_b",
-        ).fill_null(0)
+        ).with_columns([
+            pl.col("portfolio_weight").fill_null(0.0),
+            pl.col("benchmark_weight").fill_null(0.0),
+        ])
 
         # Calculate effects for each sector
         allocation_effect = 0.0
@@ -169,8 +181,21 @@ class PerformanceAttributor:
             sector = row[sector_col]
             wp = row["portfolio_weight"]
             wb = row["benchmark_weight"]
-            rp = row.get("portfolio_return", 0) or 0
-            rb = row.get("benchmark_return", 0) or 0
+            rp = row.get("portfolio_return")
+            rb = row.get("benchmark_return")
+
+            # One side may not hold the sector at all, so its return is
+            # unobservable rather than zero. Mirroring the other side keeps
+            # selection and interaction at zero and leaves the whole effect in
+            # allocation, which is where the decision was actually made.
+            # Filling with 0 instead charged a benchmark-only sector to stock
+            # selection the portfolio never made.
+            if rp is None and rb is None:
+                rp = rb = 0.0
+            elif rp is None:
+                rp = rb
+            elif rb is None:
+                rb = rp
 
             # Brinson effects
             alloc = (wp - wb) * rb
