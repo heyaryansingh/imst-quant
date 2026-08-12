@@ -185,3 +185,18 @@ def test_text_output_flags_weights_that_do_not_sum_to_one(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "current weights sum to 50.00%" in out
     assert "HOLD" in out
+
+
+def test_a_position_at_target_shows_no_trade_rather_than_negative_zero(tmp_path, capsys):
+    payload = _run(
+        tmp_path,
+        capsys,
+        (["AAPL", "MSFT"], [0.5, 0.5]),
+        (["AAPL", "MSFT"], [0.5, 0.5]),
+        extra=["--value", "100000"],
+    )
+
+    for position in payload["positions"]:
+        assert position["action"] == "HOLD"
+        # -0.0 renders as "-0.00" and reads like a trade that is not there.
+        assert str(position["trade_value"]) == "0.0"

@@ -5204,7 +5204,10 @@ def cmd_rebalance(args: argparse.Namespace) -> int:
             ),
         }
         if args.value is not None:
-            entry["trade_value"] = -row["absolute_drift"] * args.value
+            # Negating a zero drift yields -0.0, which prints as "-0.00" and
+            # reads like a tiny sell on a position that needs no trade at all.
+            trade_value = -row["absolute_drift"] * args.value
+            entry["trade_value"] = trade_value if trade_value else 0.0
         positions.append(entry)
 
     payload = {
