@@ -24,6 +24,10 @@ from typing import Dict, Union
 import numpy as np
 import polars as pl
 
+# numpy 2.0 renamed trapz to trapezoid and removed the old name. pyproject
+# allows numpy>=1.24, so support both rather than pinning below 2.0.
+_trapezoid = getattr(np, "trapezoid", None) or np.trapz
+
 
 def herfindahl_index(
     weights: Union[pl.Series, pl.DataFrame],
@@ -161,12 +165,14 @@ def gini_coefficient(
     if n == 0 or sorted_weights.sum() == 0:
         return 0.0
 
-    # Normalized cumulative sum
+    # Normalized cumulative sum. The Lorenz curve starts at the origin: without
+    # the leading 0 the trapezoid rule misses the first slice and inflates Gini
+    # by 1/(2n), which reports 0.0625 instead of 0 for four equal weights.
     cumsum = np.cumsum(sorted_weights)
-    cumsum_norm = cumsum / cumsum[-1]
+    lorenz = np.concatenate(([0.0], cumsum / cumsum[-1]))
 
     # Calculate Gini using trapezoid rule
-    gini = 1 - 2 * np.trapz(cumsum_norm, dx=1/n)
+    gini = 1 - 2 * _trapezoid(lorenz, dx=1/n)
 
     return float(gini)
 
