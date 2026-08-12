@@ -1130,6 +1130,34 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- tail-risk subcommand ---
+    tail_risk_parser = subparsers.add_parser(
+        "tail-risk",
+        help="Report tail risk metrics (CVaR, tail ratio, Omega, EVT VaR) for a return series",
+    )
+    tail_risk_parser.add_argument(
+        "--returns", help="Path to returns parquet file (default: gold/returns.parquet)"
+    )
+    tail_risk_parser.add_argument(
+        "--return-col",
+        default="returns",
+        help="Column name for per-period returns (default: returns)",
+    )
+    tail_risk_parser.add_argument(
+        "--confidence",
+        type=float,
+        default=0.95,
+        help="Confidence level for CVaR and EVT VaR (default: 0.95)",
+    )
+    tail_risk_parser.add_argument(
+        "--capital",
+        type=float,
+        help="Account capital, to translate CVaR and EVT VaR into dollar losses",
+    )
+    tail_risk_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -5005,6 +5033,102 @@ def cmd_stress(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tail_risk(args: argparse.Namespace) -> int:
+    """Report tail risk metrics for a per-period return series.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success)
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.tail_risk import calculate_all_tail_metrics
+
+    settings = Settings()
+
+    if args.returns:
+        returns_path = Path(args.returns)
+    else:
+        returns_path = Path(settings.data.gold_dir) / "returns.parquet"
+
+    if not returns_path.exists():
+        print(f"Error: Returns file not found: {returns_path}")
+        print("Expected columns: [date, returns] or specify with --return-col")
+        return 1
+
+    if not 0.5 <= args.confidence < 1.0:
+        print(f"Error: --confidence must be in [0.5, 1.0), got {args.confidence}")
+        return 1
+
+    if args.capital is not None and args.capital <= 0:
+        print(f"Error: --capital must be positive, got {args.capital}")
+        return 1
+
+    try:
+        df = pl.read_parquet(returns_path)
+    except Exception as e:
+        print(f"Error reading returns file: {e}")
+        return 1
+
+    if args.return_col not in df.columns:
+        print(f"Error: Column '{args.return_col}' not found in returns file")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    returns = df[args.return_col].drop_nulls()
+    if returns.is_empty():
+        print(f"Error: Column '{args.return_col}' has no non-null values")
+        return 1
+
+    try:
+        metrics = calculate_all_tail_metrics(
+            returns, confidence_level=args.confidence
+        )
+
+        payload = {
+            "n_periods": returns.len(),
+            "confidence": args.confidence,
+            **metrics,
+        }
+        if args.capital is not None:
+            payload["cvar_notional"] = metrics["cvar"] * args.capital
+            payload["evt_var_notional"] = metrics["evt_var"] * args.capital
+
+        if args.json:
+            print(json_module.dumps(payload, indent=2, default=float))
+        else:
+            pct = f"{args.confidence:.0%}"
+            print("\n=== Tail Risk ===\n")
+            print(f"Periods:             {payload['n_periods']:>10,}")
+            print(f"{pct} CVaR:           {metrics['cvar']:>10.2%}")
+            print(f"{pct} EVT VaR:        {metrics['evt_var']:>10.2%}")
+            print(f"Tail Ratio:          {metrics['tail_ratio']:>10.3f}")
+            print(f"Omega Ratio:         {metrics['omega_ratio']:>10.3f}")
+            if args.capital is not None:
+                print()
+                print(f"Capital:             {args.capital:>10,.2f}")
+                print(f"CVaR Loss:           {payload['cvar_notional']:>10,.2f}")
+                print(f"EVT VaR Loss:        {payload['evt_var_notional']:>10,.2f}")
+            print()
+            if metrics["tail_ratio"] and metrics["tail_ratio"] < 1.0:
+                print("Left tail is fatter than the right: losses cluster harder than gains.")
+            if returns.len() < 10 * 21:
+                print("Fewer than 10 blocks of 21 periods: EVT VaR falls back to the")
+                print("empirical quantile and understates rare losses.")
+            print()
+
+    except Exception as e:
+        print(f"Error calculating tail risk metrics: {e}")
+        return 1
+
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -5077,6 +5201,7 @@ COMMANDS = {
         "drawdown": cmd_drawdown,
         "kelly": cmd_kelly,
         "stress": cmd_stress,
+        "tail-risk": cmd_tail_risk,
 }
 
 
