@@ -1187,6 +1187,39 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- indicators subcommand ---
+    indicators_parser = subparsers.add_parser(
+        "indicators",
+        help="Compute technical indicators (RSI, MACD, Bollinger, ATR, ADX, ...) from an OHLCV file",
+    )
+    indicators_parser.add_argument(
+        "--prices", help="Path to prices parquet file (default: silver/prices.parquet)"
+    )
+    indicators_parser.add_argument(
+        "--symbol", help="Symbol to filter to, if the file holds more than one"
+    )
+    indicators_parser.add_argument(
+        "--symbol-col", default="symbol", help="Column name for symbols (default: symbol)"
+    )
+    indicators_parser.add_argument(
+        "--close-col", default="close", help="Column name for close prices (default: close)"
+    )
+    indicators_parser.add_argument(
+        "--rsi-period", type=int, default=14, help="RSI lookback period (default: 14)"
+    )
+    indicators_parser.add_argument(
+        "--atr-period", type=int, default=14, help="ATR and ADX window (default: 14)"
+    )
+    indicators_parser.add_argument(
+        "--bb-window", type=int, default=20, help="Bollinger Band window (default: 20)"
+    )
+    indicators_parser.add_argument(
+        "--output", help="Write the full indicator frame to this parquet path"
+    )
+    indicators_parser.add_argument(
+        "--json", action="store_true", help="Output the latest bar's values as JSON"
+    )
+
     return parser
 
 
@@ -5279,6 +5312,158 @@ def cmd_concentration(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_indicators(args: argparse.Namespace) -> int:
+    """Compute technical indicators from an OHLCV price file.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success)
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils import technical_indicators as ti
+
+    settings = Settings()
+
+    if args.prices:
+        prices_path = Path(args.prices)
+    else:
+        prices_path = Path(settings.data.silver_dir) / "prices.parquet"
+
+    if not prices_path.exists():
+        print(f"Error: Prices file not found: {prices_path}")
+        print("Expected columns: [date, close] plus optional [high, low, volume]")
+        return 1
+
+    for name, value in (
+        ("--rsi-period", args.rsi_period),
+        ("--atr-period", args.atr_period),
+        ("--bb-window", args.bb_window),
+    ):
+        if value < 2:
+            print(f"Error: {name} must be at least 2, got {value}")
+            return 1
+
+    try:
+        df = pl.read_parquet(prices_path)
+    except Exception as e:
+        print(f"Error reading prices file: {e}")
+        return 1
+
+    if args.close_col not in df.columns:
+        print(f"Error: Column '{args.close_col}' not found in prices file")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    if args.symbol is not None:
+        if args.symbol_col not in df.columns:
+            print(f"Error: Column '{args.symbol_col}' not found in prices file")
+            print(f"Available columns: {df.columns}")
+            return 1
+        df = df.filter(pl.col(args.symbol_col) == args.symbol)
+        if df.is_empty():
+            print(f"Error: No rows for symbol '{args.symbol}'")
+            return 1
+    elif args.symbol_col in df.columns and df[args.symbol_col].n_unique() > 1:
+        # Rolling indicators would silently span the boundary between symbols
+        # and produce values for bars that never followed one another.
+        print(f"Error: File holds {df[args.symbol_col].n_unique()} symbols; pass --symbol to pick one")
+        return 1
+
+    # Indicators need a chronological series, and rolling windows need enough
+    # history to leave the warm-up period.
+    longest_window = max(args.rsi_period, args.atr_period, args.bb_window, 26)
+    if df.height <= longest_window:
+        print(f"Error: Need more than {longest_window} bars, got {df.height}")
+        return 1
+
+    has_ohlc = "high" in df.columns and "low" in df.columns
+    has_volume = "volume" in df.columns
+
+    try:
+        result = ti.rsi(df, price_col=args.close_col, period=args.rsi_period)
+        result = ti.macd(result, price_col=args.close_col)
+        result = ti.bollinger_bands(
+            result, price_col=args.close_col, window=args.bb_window
+        )
+        computed = ["rsi", "macd", "bollinger_bands"]
+
+        if has_ohlc:
+            result = ti.atr(result, close_col=args.close_col, window=args.atr_period)
+            result = ti.adx(result, close_col=args.close_col, window=args.atr_period)
+            result = ti.stochastic_oscillator(result, close_col=args.close_col)
+            computed += ["atr", "adx", "stochastic_oscillator"]
+        if has_volume:
+            result = ti.obv(result, close_col=args.close_col)
+            computed.append("obv")
+        if has_ohlc and has_volume:
+            result = ti.vwap(result, close_col=args.close_col)
+            computed.append("vwap")
+
+        skipped = []
+        if not has_ohlc:
+            skipped.append("ATR/ADX/Stochastic/VWAP (need high and low columns)")
+        if not has_volume:
+            skipped.append("OBV/VWAP (need a volume column)")
+
+        if args.output:
+            output_path = Path(args.output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            result.write_parquet(output_path)
+
+        latest = result.tail(1).to_dicts()[0]
+        indicator_cols = [c for c in result.columns if c not in df.columns]
+        payload = {
+            "bars": result.height,
+            "indicators": computed,
+            "skipped": skipped,
+            "latest": {c: latest[c] for c in indicator_cols},
+        }
+        if args.symbol:
+            payload["symbol"] = args.symbol
+        if args.output:
+            payload["output"] = str(output_path)
+
+        if args.json:
+            print(json_module.dumps(payload, indent=2, default=float))
+        else:
+            title = f" ({args.symbol})" if args.symbol else ""
+            print(f"\n=== Technical Indicators{title} ===\n")
+            print(f"Bars:                {payload['bars']:>10,}")
+            print(f"Last Close:          {latest[args.close_col]:>10,.4f}")
+            print()
+            for column in indicator_cols:
+                value = latest[column]
+                if value is None:
+                    print(f"{column:<20} {'n/a':>10}")
+                else:
+                    print(f"{column:<20} {value:>10,.4f}")
+            rsi_value = latest.get("rsi")
+            if rsi_value is not None:
+                if rsi_value >= 70:
+                    print("\nRSI is in overbought territory.")
+                elif rsi_value <= 30:
+                    print("\nRSI is in oversold territory.")
+            if skipped:
+                print("\nSkipped:")
+                for note in skipped:
+                    print(f"  - {note}")
+            if args.output:
+                print(f"\nWrote indicator frame to {output_path}")
+            print()
+
+    except Exception as e:
+        print(f"Error computing indicators: {e}")
+        return 1
+
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -5353,6 +5538,7 @@ COMMANDS = {
         "stress": cmd_stress,
         "tail-risk": cmd_tail_risk,
         "concentration": cmd_concentration,
+        "indicators": cmd_indicators,
 }
 
 
