@@ -1254,6 +1254,37 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- attribution subcommand ---
+    attribution_parser = subparsers.add_parser(
+        "attribution",
+        help="Brinson sector attribution of active return vs a benchmark",
+    )
+    attribution_parser.add_argument(
+        "--portfolio",
+        required=True,
+        help="Path to portfolio holdings parquet with [sector, weight, return]",
+    )
+    attribution_parser.add_argument(
+        "--benchmark",
+        required=True,
+        help="Path to benchmark holdings parquet with [sector, weight, return]",
+    )
+    attribution_parser.add_argument(
+        "--sector-col", default="sector", help="Column name for sectors (default: sector)"
+    )
+    attribution_parser.add_argument(
+        "--weight-col", default="weight", help="Column name for weights (default: weight)"
+    )
+    attribution_parser.add_argument(
+        "--return-col", default="return", help="Column name for returns (default: return)"
+    )
+    attribution_parser.add_argument(
+        "--top", type=int, default=10, help="Number of sectors to show (default: 10)"
+    )
+    attribution_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -5623,6 +5654,105 @@ def cmd_turnover(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_attribution(args: argparse.Namespace) -> int:
+    """Decompose active return into allocation, selection, and interaction.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success)
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.utils.attribution import PerformanceAttributor
+
+    if args.top < 1:
+        print(f"Error: --top must be at least 1, got {args.top}")
+        return 1
+
+    frames = {}
+    for label, raw_path in (("portfolio", args.portfolio), ("benchmark", args.benchmark)):
+        path = Path(raw_path)
+        if not path.exists():
+            print(f"Error: {label} file not found: {path}")
+            print(f"Expected columns: [{args.sector_col}, {args.weight_col}, {args.return_col}]")
+            return 1
+        try:
+            frame = pl.read_parquet(path)
+        except Exception as e:
+            print(f"Error reading {label} file: {e}")
+            return 1
+
+        for column in (args.sector_col, args.weight_col, args.return_col):
+            if column not in frame.columns:
+                print(f"Error: Column '{column}' not found in {label} file")
+                print(f"Available columns: {frame.columns}")
+                return 1
+
+        frame = frame.drop_nulls([args.sector_col, args.weight_col, args.return_col])
+        if frame.is_empty():
+            print(f"Error: {label} file has no complete rows")
+            return 1
+        frames[label] = frame
+
+    try:
+        result = PerformanceAttributor(
+            frames["portfolio"],
+            frames["benchmark"],
+            return_col=args.return_col,
+            weight_col=args.weight_col,
+        ).brinson_attribution(sector_col=args.sector_col)
+    except Exception as e:
+        print(f"Error running attribution: {e}")
+        return 1
+
+    # Worst-first: the sectors that cost the most active return are the ones
+    # worth reading, and a long tail of near-zero sectors buries them.
+    ranked = sorted(
+        result.sector_details.items(), key=lambda item: item[1]["total"]
+    )[: args.top]
+
+    payload = {
+        "allocation_effect": result.allocation_effect,
+        "selection_effect": result.selection_effect,
+        "interaction_effect": result.interaction_effect,
+        "total_active_return": result.total_active_return,
+        "sectors": [{"sector": name, **effects} for name, effects in ranked],
+    }
+
+    if args.json:
+        print(json_module.dumps(payload, indent=2, default=float))
+        return 0
+
+    print("\n=== Brinson Attribution ===\n")
+    print(f"Allocation:          {result.allocation_effect:>10.2%}")
+    print(f"Selection:           {result.selection_effect:>10.2%}")
+    print(f"Interaction:         {result.interaction_effect:>10.2%}")
+    print(f"Total Active Return: {result.total_active_return:>10.2%}")
+    print()
+    print(f"Worst {len(ranked)} sector(s) by total effect:")
+    print(f"  {'Sector':<16}{'Wgt P':>8}{'Wgt B':>8}{'Alloc':>9}{'Select':>9}{'Inter':>9}{'Total':>9}")
+    for name, effects in ranked:
+        print(
+            f"  {str(name):<16}"
+            f"{effects['portfolio_weight']:>8.1%}"
+            f"{effects['benchmark_weight']:>8.1%}"
+            f"{effects['allocation']:>9.2%}"
+            f"{effects['selection']:>9.2%}"
+            f"{effects['interaction']:>9.2%}"
+            f"{effects['total']:>9.2%}"
+        )
+    print()
+    print("Sectors held by only one side carry no selection or interaction;")
+    print("their whole effect is reported as allocation.")
+    print()
+
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -5699,6 +5829,7 @@ COMMANDS = {
         "concentration": cmd_concentration,
         "indicators": cmd_indicators,
         "turnover": cmd_turnover,
+        "attribution": cmd_attribution,
 }
 
 
