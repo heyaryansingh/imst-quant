@@ -161,7 +161,9 @@ class PortfolioHealthMonitor:
                 )
             )
 
-        if top3_weight > 0.70 and len(sorted_weights) > 3:
+        # `> 3` skipped the alert for a 3-position book holding 100% of the
+        # portfolio, which is the most concentrated case the check exists for.
+        if top3_weight > 0.70 and len(sorted_weights) >= 3:
             alerts.append(
                 HealthAlert(
                     severity="warning",

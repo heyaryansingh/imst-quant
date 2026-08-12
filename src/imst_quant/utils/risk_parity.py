@@ -189,7 +189,10 @@ class RiskParityOptimizer:
                 recursive_order(left)
                 recursive_order(right)
 
-        recursive_order(len(linkage_matrix) + len(self.assets))
+        # The root of an n-leaf linkage is node 2n-2, not 2n-1; the extra 1
+        # indexed past the end of the linkage matrix and raised IndexError on
+        # every hierarchical optimization.
+        recursive_order(len(linkage_matrix) + len(self.assets) - 1)
         return order
 
     def calculate_risk_contributions(self, weights: pd.Series) -> pd.Series:

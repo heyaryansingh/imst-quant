@@ -123,6 +123,13 @@ class VolatilityTargeter:
         mean_vol = rolling_vol.mean()
         std_vol = rolling_vol.std()
 
+        # Callers hand us exactly lookback_days of returns, so the rolling
+        # window yields a single value and its ddof=1 std is NaN. NaN bounds
+        # make np.clip return NaN, which propagated into every position size
+        # and silently disabled rebalancing (NaN > threshold is False).
+        if not np.isfinite(mean_vol) or not np.isfinite(std_vol):
+            return vol
+
         # Clip to mean ± N standard deviations
         lower_bound = max(mean_vol - self.config.outlier_std * std_vol, self.config.vol_floor)
         upper_bound = mean_vol + self.config.outlier_std * std_vol

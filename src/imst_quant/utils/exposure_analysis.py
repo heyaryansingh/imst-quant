@@ -149,6 +149,11 @@ class ExposureAnalyzer:
         # Convert HHI to score: 1/N → 100, 1.0 → 0
         n_holdings = len(self.portfolio)
         ideal_hhi = 1.0 / n_holdings
+        # A single holding makes ideal_hhi 1.0 and the denominator 0; it is
+        # maximally concentrated by definition, so score it 0 instead of
+        # raising ZeroDivisionError.
+        if n_holdings < 2:
+            return 0.0
         score = 100 * (1.0 - (hhi - ideal_hhi) / (1.0 - ideal_hhi))
 
         return max(0.0, min(100.0, score))
