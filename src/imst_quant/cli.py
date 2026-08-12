@@ -1130,6 +1130,58 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- rebalance subcommand ---
+    rebalance_parser = subparsers.add_parser(
+        "rebalance",
+        help="Compare current holdings to target weights and list the trades that close the gap",
+    )
+    rebalance_parser.add_argument(
+        "--portfolio", help="Path to current portfolio parquet file with [symbol, weight]"
+    )
+    rebalance_parser.add_argument(
+        "--target",
+        required=True,
+        help="Path to target portfolio parquet file with [symbol, weight]",
+    )
+    rebalance_parser.add_argument(
+        "--symbol-col", default="symbol", help="Column name for symbols (default: symbol)"
+    )
+    rebalance_parser.add_argument(
+        "--weight-col", default="weight", help="Column name for weights (default: weight)"
+    )
+    rebalance_parser.add_argument(
+        "--value",
+        type=float,
+        help="Portfolio value in USD; required to size trades and estimate costs",
+    )
+    rebalance_parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.05,
+        help="Drift threshold that triggers a rebalance (default: 0.05)",
+    )
+    rebalance_parser.add_argument(
+        "--method",
+        choices=["absolute", "relative"],
+        default="absolute",
+        help="Compare drift in absolute weight or relative to target (default: absolute)",
+    )
+    rebalance_parser.add_argument(
+        "--min-trade",
+        type=float,
+        default=100.0,
+        help="Skip trades smaller than this USD notional (default: 100)",
+    )
+    rebalance_parser.add_argument(
+        "--cost-bps",
+        type=float,
+        default=0.0,
+        help="Per-side transaction cost in basis points, applied to traded notional",
+    )
+    rebalance_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -5005,6 +5057,200 @@ def cmd_stress(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rebalance(args: argparse.Namespace) -> int:
+    """Compare current holdings to a target allocation and list the trades.
+
+    Reports per-symbol drift, whether the drift breaches the rebalance
+    threshold, and (when --value is given) the notional trades and estimated
+    transaction cost of closing the gap.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for error).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.rebalancing import (
+        calculate_drift,
+        generate_rebalancing_trades,
+        needs_rebalancing,
+    )
+
+    settings = Settings()
+
+    if args.portfolio:
+        current_path = Path(args.portfolio)
+    else:
+        current_path = Path(settings.data.gold_dir) / "portfolio.parquet"
+    target_path = Path(args.target)
+
+    for label, path in (("Current portfolio", current_path), ("Target portfolio", target_path)):
+        if not path.exists():
+            print(f"Error: {label} file not found: {path}")
+            print(f"Expected columns: [{args.symbol_col}, {args.weight_col}]")
+            return 1
+
+    if args.value is not None and args.value <= 0:
+        print(f"Error: --value must be positive, got {args.value}")
+        return 1
+    if args.threshold < 0:
+        print(f"Error: --threshold must be non-negative, got {args.threshold}")
+        return 1
+    if args.min_trade < 0:
+        print(f"Error: --min-trade must be non-negative, got {args.min_trade}")
+        return 1
+    if args.cost_bps < 0:
+        print(f"Error: --cost-bps must be non-negative, got {args.cost_bps}")
+        return 1
+
+    frames = {}
+    for label, path in (("current", current_path), ("target", target_path)):
+        try:
+            frame = pl.read_parquet(path)
+        except Exception as e:
+            print(f"Error reading {label} portfolio file: {e}")
+            return 1
+        for column in (args.symbol_col, args.weight_col):
+            if column not in frame.columns:
+                print(f"Error: Column '{column}' not found in {label} portfolio file")
+                print(f"Available columns: {frame.columns}")
+                return 1
+        frame = frame.select([
+            pl.col(args.symbol_col).cast(pl.Utf8),
+            pl.col(args.weight_col).cast(pl.Float64),
+        ]).drop_nulls()
+        if frame.is_empty():
+            print(f"Error: {label} portfolio has no rows with both a symbol and a weight")
+            return 1
+        frames[label] = frame
+
+    try:
+        drift_df = calculate_drift(
+            frames["current"],
+            frames["target"],
+            symbol_col=args.symbol_col,
+            weight_col=args.weight_col,
+        )
+        breached = needs_rebalancing(
+            frames["current"],
+            frames["target"],
+            threshold=args.threshold,
+            method=args.method,
+        )
+    except Exception as e:
+        print(f"Error computing portfolio drift: {e}")
+        return 1
+
+    # One-way turnover: buys and sells net to zero across a fully invested book,
+    # so halving the summed absolute drift gives the fraction actually traded.
+    gross_drift = float(drift_df["absolute_drift"].abs().sum())
+    turnover = gross_drift / 2
+
+    positions = []
+    for row in drift_df.sort(pl.col("absolute_drift").abs(), descending=True).iter_rows(
+        named=True
+    ):
+        entry = {
+            "symbol": row[args.symbol_col],
+            "current_weight": row["current_weight"],
+            "target_weight": row["target_weight"],
+            "absolute_drift": row["absolute_drift"],
+            "relative_drift": row["relative_drift"],
+            "action": (
+                "SELL"
+                if row["absolute_drift"] > 0
+                else "BUY"
+                if row["absolute_drift"] < 0
+                else "HOLD"
+            ),
+        }
+        if args.value is not None:
+            entry["trade_value"] = -row["absolute_drift"] * args.value
+        positions.append(entry)
+
+    payload = {
+        "n_positions": len(positions),
+        "current_weight_sum": float(frames["current"][args.weight_col].sum()),
+        "target_weight_sum": float(frames["target"][args.weight_col].sum()),
+        "method": args.method,
+        "threshold": args.threshold,
+        "needs_rebalancing": breached,
+        "max_absolute_drift": float(drift_df["absolute_drift"].abs().max() or 0.0),
+        "turnover": turnover,
+        "positions": positions,
+    }
+
+    if args.value is not None:
+        trades_df = generate_rebalancing_trades(
+            frames["current"],
+            frames["target"],
+            portfolio_value=args.value,
+            min_trade_size=args.min_trade,
+            symbol_col=args.symbol_col,
+        )
+        traded_notional = float(trades_df["trade_value"].abs().sum()) if not trades_df.is_empty() else 0.0
+        payload["portfolio_value"] = args.value
+        payload["n_trades"] = trades_df.height
+        payload["traded_notional"] = traded_notional
+        payload["estimated_cost"] = traded_notional * args.cost_bps / 10_000
+        payload["skipped_trades"] = len(positions) - trades_df.height
+
+    if args.json:
+        print(json_module.dumps(payload, indent=2, default=float))
+        return 0
+
+    print("\n=== Portfolio Rebalance ===\n")
+    print(f"Positions:           {payload['n_positions']:>12,}")
+    print(f"Current Weight Sum:  {payload['current_weight_sum']:>12.2%}")
+    print(f"Target Weight Sum:   {payload['target_weight_sum']:>12.2%}")
+    print(f"Max Drift:           {payload['max_absolute_drift']:>12.2%}")
+    print(f"One-Way Turnover:    {payload['turnover']:>12.2%}")
+    print(
+        f"Threshold ({args.method[:3]}):    {args.threshold:>12.2%}"
+        f"  -> {'REBALANCE' if breached else 'HOLD'}"
+    )
+    print()
+
+    header = f"{'Symbol':<12}{'Current':>10}{'Target':>10}{'Drift':>10}{'Action':>8}"
+    if args.value is not None:
+        header += f"{'Trade':>16}"
+    print(header)
+    print("-" * len(header))
+    for entry in positions:
+        line = (
+            f"{entry['symbol']:<12}"
+            f"{entry['current_weight']:>10.2%}"
+            f"{entry['target_weight']:>10.2%}"
+            f"{entry['absolute_drift']:>10.2%}"
+            f"{entry['action']:>8}"
+        )
+        if args.value is not None:
+            line += f"{entry['trade_value']:>16,.2f}"
+        print(line)
+    print()
+
+    if args.value is not None:
+        print(f"Trades Above Minimum: {payload['n_trades']:>11,}")
+        print(f"Traded Notional:      {payload['traded_notional']:>11,.2f}")
+        if args.cost_bps:
+            print(f"Estimated Cost:       {payload['estimated_cost']:>11,.2f}")
+        print()
+
+    # Weights that do not sum to one make every drift number relative to a book
+    # that is not fully described, so say so rather than silently normalizing.
+    for label in ("current", "target"):
+        total = payload[f"{label}_weight_sum"]
+        if abs(total - 1.0) > 0.01:
+            print(f"Note: {label} weights sum to {total:.2%}, not 100%.")
+
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -5077,6 +5323,7 @@ COMMANDS = {
         "drawdown": cmd_drawdown,
         "kelly": cmd_kelly,
         "stress": cmd_stress,
+        "rebalance": cmd_rebalance,
 }
 
 
