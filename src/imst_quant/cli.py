@@ -1182,6 +1182,40 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- concentration subcommand ---
+    concentration_parser = subparsers.add_parser(
+        "concentration",
+        help="Measure how concentrated a portfolio is (HHI, effective N, top-N, Gini, entropy)",
+    )
+    concentration_parser.add_argument(
+        "--portfolio", help="Path to portfolio parquet file with [symbol, weight]"
+    )
+    concentration_parser.add_argument(
+        "--symbol-col", default="symbol", help="Column name for symbols (default: symbol)"
+    )
+    concentration_parser.add_argument(
+        "--weight-col", default="weight", help="Column name for weights (default: weight)"
+    )
+    concentration_parser.add_argument(
+        "--top-n",
+        type=int,
+        default=5,
+        help="Number of largest positions for the concentration ratio (default: 5)",
+    )
+    concentration_parser.add_argument(
+        "--max-weight",
+        type=float,
+        help="Flag any single position above this weight (e.g. 0.10 for 10%%)",
+    )
+    concentration_parser.add_argument(
+        "--min-effective-n",
+        type=float,
+        help="Fail with exit code 2 if the effective number of positions falls below this",
+    )
+    concentration_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -5251,6 +5285,169 @@ def cmd_rebalance(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_concentration(args: argparse.Namespace) -> int:
+    """Report how concentrated a portfolio's weights are.
+
+    Computes HHI, effective number of positions, top-N concentration, Gini,
+    and normalized entropy, plus the positions that breach a maximum weight
+    limit. Returns exit code 2 when --min-effective-n is breached so the
+    command can gate a monitoring job.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for error, 2 for a breached limit).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.concentration_metrics import calculate_all_concentration
+
+    if args.top_n < 1:
+        print(f"Error: --top-n must be at least 1, got {args.top_n}")
+        return 1
+    if args.max_weight is not None and not 0 < args.max_weight <= 1:
+        print(f"Error: --max-weight must be in (0, 1], got {args.max_weight}")
+        return 1
+    if args.min_effective_n is not None and args.min_effective_n <= 0:
+        print(f"Error: --min-effective-n must be positive, got {args.min_effective_n}")
+        return 1
+
+    settings = Settings()
+    if args.portfolio:
+        portfolio_path = Path(args.portfolio)
+    else:
+        portfolio_path = Path(settings.data.gold_dir) / "portfolio.parquet"
+
+    if not portfolio_path.exists():
+        print(f"Error: Portfolio file not found: {portfolio_path}")
+        print(f"Expected columns: [{args.symbol_col}, {args.weight_col}]")
+        return 1
+
+    try:
+        portfolio_df = pl.read_parquet(portfolio_path)
+    except Exception as e:
+        print(f"Error reading portfolio file: {e}")
+        return 1
+
+    for column in (args.symbol_col, args.weight_col):
+        if column not in portfolio_df.columns:
+            print(f"Error: Column '{column}' not found in portfolio file")
+            print(f"Available columns: {portfolio_df.columns}")
+            return 1
+
+    portfolio_df = portfolio_df.select([
+        pl.col(args.symbol_col).cast(pl.Utf8),
+        pl.col(args.weight_col).cast(pl.Float64),
+    ]).drop_nulls()
+
+    if portfolio_df.is_empty():
+        print("Error: Portfolio has no rows with both a symbol and a weight")
+        return 1
+
+    # Concentration is about position size, not direction, and every metric here
+    # assumes weights that sum to one. A short book or a partly-invested book
+    # would otherwise score as artificially diversified.
+    raw_sum = float(portfolio_df[args.weight_col].sum())
+    gross = float(portfolio_df[args.weight_col].abs().sum())
+    if gross <= 0:
+        print("Error: Portfolio weights are all zero")
+        return 1
+
+    normalized = portfolio_df.with_columns(
+        (pl.col(args.weight_col).abs() / gross).alias("gross_weight")
+    ).sort("gross_weight", descending=True)
+
+    try:
+        metrics = calculate_all_concentration(
+            normalized, weight_col="gross_weight", top_n=args.top_n
+        )
+    except Exception as e:
+        print(f"Error computing concentration metrics: {e}")
+        return 1
+
+    n_positions = normalized.height
+    top_key = f"top_{args.top_n}_concentration"
+
+    breaches = []
+    if args.max_weight is not None:
+        breaches = [
+            {"symbol": row[args.symbol_col], "gross_weight": row["gross_weight"]}
+            for row in normalized.iter_rows(named=True)
+            if row["gross_weight"] > args.max_weight
+        ]
+
+    limit_breached = (
+        args.min_effective_n is not None and metrics["effective_n"] < args.min_effective_n
+    )
+
+    payload = {
+        "n_positions": n_positions,
+        "weight_sum": raw_sum,
+        "gross_exposure": gross,
+        "hhi": metrics["hhi"],
+        "effective_n": metrics["effective_n"],
+        "top_n": args.top_n,
+        top_key: metrics[top_key],
+        "gini": metrics["gini"],
+        "shannon_entropy": metrics["shannon_entropy"],
+        "normalized_entropy": metrics["normalized_entropy"],
+        # 1.0 means equal-weighted; lower means the book leans on fewer names.
+        "diversification_ratio": (
+            metrics["effective_n"] / n_positions if n_positions else 0.0
+        ),
+        "largest_weight": float(normalized["gross_weight"][0]),
+        "largest_symbol": normalized[args.symbol_col][0],
+        "max_weight_breaches": breaches,
+        "min_effective_n_breached": limit_breached,
+    }
+
+    if args.json:
+        print(json_module.dumps(payload, indent=2, default=float))
+        return 2 if limit_breached else 0
+
+    print("\n=== Portfolio Concentration ===\n")
+    print(f"Positions:           {n_positions:>12,}")
+    print(f"Gross Exposure:      {gross:>12.2%}")
+    print(f"HHI:                 {payload['hhi']:>12.4f}")
+    print(f"Effective N:         {payload['effective_n']:>12.2f}")
+    print(f"Diversification:     {payload['diversification_ratio']:>12.2%} of equal weight")
+    print(f"Top {args.top_n} Weight:        {payload[top_key]:>12.2%}")
+    print(f"Gini:                {payload['gini']:>12.4f}")
+    print(f"Normalized Entropy:  {payload['normalized_entropy']:>12.4f}")
+    print()
+
+    header = f"{'Symbol':<12}{'Gross Weight':>14}{'Cumulative':>14}"
+    print(header)
+    print("-" * len(header))
+    cumulative = 0.0
+    for row in normalized.head(args.top_n).iter_rows(named=True):
+        cumulative += row["gross_weight"]
+        print(f"{row[args.symbol_col]:<12}{row['gross_weight']:>14.2%}{cumulative:>14.2%}")
+    print()
+
+    if breaches:
+        print(f"Positions above the {args.max_weight:.2%} limit:")
+        for breach in breaches:
+            print(f"  - {breach['symbol']} at {breach['gross_weight']:.2%}")
+        print()
+
+    if abs(raw_sum - 1.0) > 0.01:
+        print(f"Note: weights sum to {raw_sum:.2%}; metrics use gross weights normalized to 100%.")
+
+    if limit_breached:
+        print(
+            f"Limit breached: effective N {payload['effective_n']:.2f} "
+            f"is below the {args.min_effective_n:.2f} minimum."
+        )
+        return 2
+
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -5324,6 +5521,7 @@ COMMANDS = {
         "kelly": cmd_kelly,
         "stress": cmd_stress,
         "rebalance": cmd_rebalance,
+        "concentration": cmd_concentration,
 }
 
 
