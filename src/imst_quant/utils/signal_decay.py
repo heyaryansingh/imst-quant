@@ -54,10 +54,42 @@ class StalenessResult:
 
 
 def _to_numpy(series: Union[pl.Series, np.ndarray]) -> np.ndarray:
-    """Convert to numpy array."""
+    """Convert to a float array, leaving nulls in place as NaN.
+
+    Nulls are kept so that callers pairing two series can drop the same rows
+    from both. Use `_align_pair` whenever a signal is compared to its returns.
+    """
     if isinstance(series, pl.Series):
-        return series.drop_nulls().to_numpy().astype(np.float64)
+        return series.cast(pl.Float64).to_numpy().astype(np.float64)
     return np.asarray(series, dtype=np.float64)
+
+
+def _align_pair(
+    signals: Union[pl.Series, np.ndarray],
+    returns: Union[pl.Series, np.ndarray],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Pair a signal series with its returns, keeping only rows valid in both.
+
+    Dropping nulls from each series independently shifts one relative to the
+    other: a single missing signal pairs every later signal with the previous
+    period's return, which quietly corrupts every IC computed downstream.
+
+    Args:
+        signals: Trading signal values.
+        returns: Period returns, positionally aligned with signals.
+
+    Returns:
+        Tuple of equal-length arrays with null/NaN rows removed from both.
+    """
+    sig = _to_numpy(signals)
+    ret = _to_numpy(returns)
+
+    n = min(len(sig), len(ret))
+    sig = sig[:n]
+    ret = ret[:n]
+
+    valid = ~(np.isnan(sig) | np.isnan(ret))
+    return sig[valid], ret[valid]
 
 
 def measure_signal_decay(
@@ -86,12 +118,8 @@ def measure_signal_decay(
         >>> returns = pl.Series(np.random.randn(100) * 0.02)
         >>> curve = measure_signal_decay(signals, returns)
     """
-    sig = _to_numpy(signals)
-    ret = _to_numpy(returns)
-
-    n = min(len(sig), len(ret))
-    sig = sig[:n]
-    ret = ret[:n]
+    sig, ret = _align_pair(signals, returns)
+    n = len(sig)
 
     if horizons is None:
         horizons = [1, 2, 5, 10, 20]
@@ -216,11 +244,8 @@ def rolling_signal_ic(
         >>> rets = pl.Series(np.random.randn(200) * 0.02)
         >>> ic_df = rolling_signal_ic(sigs, rets, window=60)
     """
-    sig = _to_numpy(signals)
-    ret = _to_numpy(returns)
-    n = min(len(sig), len(ret))
-    sig = sig[:n]
-    ret = ret[:n]
+    sig, ret = _align_pair(signals, returns)
+    n = len(sig)
 
     # Forward returns
     fwd_ret = np.full(n, np.nan)
@@ -298,11 +323,8 @@ def detect_signal_staleness(
         >>> result = detect_signal_staleness(sigs, rets)
         >>> print(f"Stale: {result.is_stale}, IC z-score: {result.ic_zscore:.2f}")
     """
-    sig = _to_numpy(signals)
-    ret = _to_numpy(returns)
-    n = min(len(sig), len(ret))
-    sig = sig[:n]
-    ret = ret[:n]
+    sig, ret = _align_pair(signals, returns)
+    n = len(sig)
 
     if n < recent_window + 10:
         return StalenessResult(
