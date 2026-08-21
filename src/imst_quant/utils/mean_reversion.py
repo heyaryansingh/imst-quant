@@ -12,6 +12,7 @@ Key concepts:
 
 Example:
     >>> import polars as pl
+
     >>> import numpy as np
     >>> from imst_quant.utils.mean_reversion import (
     ...     test_mean_reversion,
@@ -41,6 +42,8 @@ from typing import Dict, List, Union
 
 import numpy as np
 import polars as pl
+
+from imst_quant.utils.hurst_exponent import rescaled_range_hurst
 
 
 # Type alias for flexible series input
@@ -109,92 +112,48 @@ def hurst_exponent(
     series: SeriesLike,
     max_lag: int = 100,
 ) -> float:
-    """Calculate Hurst exponent using rescaled range (R/S) analysis.
+    """Calculate Hurst exponent of a price series using rescaled range analysis.
 
     The Hurst exponent characterizes the long-term memory of a time series:
     - H < 0.5: Anti-persistent (mean-reverting)
     - H = 0.5: Random walk (Brownian motion)
     - H > 0.5: Persistent (trending)
 
+    R/S analysis is defined on the *increments* of a series, so the price
+    levels are differenced before the regression. Running R/S on the levels
+    themselves measures the integrated process and shifts H up by one, which
+    reported H = 1.0 for a plain random walk.
+
     Args:
-        series: Price or return series to analyze.
-        max_lag: Maximum lag to consider in R/S analysis.
+        series: Price (level) series to analyze. Returns are differenced
+            internally, so pass levels rather than returns.
+        max_lag: Maximum window size to consider in R/S analysis.
 
     Returns:
-        Hurst exponent value between 0 and 1.
+        Hurst exponent value between 0 and 1. Falls back to 0.5 (random walk)
+        when there is not enough data to fit the regression.
 
     Example:
         >>> import numpy as np
-        >>> # Mean-reverting series (Ornstein-Uhlenbeck process)
-        >>> ou = np.cumsum(np.random.randn(1000) - 0.1 * np.arange(1000) * 0.001)
-        >>> h = hurst_exponent(ou)
+        >>> rng = np.random.default_rng(0)
+        >>> prices = 100 + np.cumsum(rng.normal(0, 1, 1000))
+        >>> h = hurst_exponent(prices)
         >>> print(f"Hurst: {h:.3f}")
     """
     data = _to_numpy(series)
-    n = len(data)
 
-    if n < 20:
+    if len(data) < 20:
         return 0.5  # Not enough data, assume random walk
 
-    # Use a range of lags for R/S analysis
-    max_lag = min(max_lag, n // 2)
-    lags = []
-    rs_values = []
+    increments = np.diff(data)
 
-    for lag in range(10, max_lag + 1, max(1, (max_lag - 10) // 20)):
-        # Number of sub-series
-        n_subseries = n // lag
-        if n_subseries < 1:
-            continue
-
-        rs_sum = 0.0
-        valid_count = 0
-
-        for i in range(n_subseries):
-            start = i * lag
-            end = start + lag
-            subseries = data[start:end]
-
-            # Mean-adjusted cumulative sum
-            mean_val = np.mean(subseries)
-            cumulative = np.cumsum(subseries - mean_val)
-
-            # Range
-            r = np.max(cumulative) - np.min(cumulative)
-
-            # Standard deviation
-            s = np.std(subseries, ddof=1)
-
-            if s > 0:
-                rs_sum += r / s
-                valid_count += 1
-
-        if valid_count > 0:
-            lags.append(lag)
-            rs_values.append(rs_sum / valid_count)
-
-    if len(lags) < 3:
+    try:
+        result = rescaled_range_hurst(increments, max_window=max_lag)
+    except ValueError:
         return 0.5
-
-    # Linear regression: log(R/S) = H * log(n) + c
-    log_lags = np.log(np.array(lags))
-    log_rs = np.log(np.array(rs_values))
-
-    # OLS for slope (Hurst exponent)
-    n_points = len(log_lags)
-    sum_x = np.sum(log_lags)
-    sum_y = np.sum(log_rs)
-    sum_xy = np.sum(log_lags * log_rs)
-    sum_xx = np.sum(log_lags * log_lags)
-
-    denominator = n_points * sum_xx - sum_x * sum_x
-    if abs(denominator) < 1e-10:
-        return 0.5
-
-    hurst = (n_points * sum_xy - sum_x * sum_y) / denominator
 
     # Clamp to valid range
-    return float(max(0.0, min(1.0, hurst)))
+    return float(max(0.0, min(1.0, result["hurst"])))
 
 
 def variance_ratio_test(
