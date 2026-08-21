@@ -34,6 +34,7 @@ Example:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from itertools import combinations
 from typing import Dict, List, Union
@@ -281,6 +282,12 @@ def variance_ratio_test(
         delta_j = delta_j / ((var_1 ** 2) * n_returns)
         theta += ((2 * (lag - j)) / lag) ** 2 * delta_j
 
+    # Lo-MacKinlay's theta is the asymptotic variance of sqrt(n) * (VR - 1), so
+    # it has to be divided by n to become the variance of VR itself. Without
+    # this the standard error came out sqrt(n) too large and the test never
+    # rejected the random walk null, however strongly the series mean-reverted.
+    theta = theta / n_returns
+
     # Avoid division by zero
     if theta < 1e-10:
         theta = 2 * (2 * lag - 1) * (lag - 1) / (3 * lag * n_returns)
@@ -289,7 +296,7 @@ def variance_ratio_test(
     z_stat = (vr - 1) / se if se > 0 else 0.0
 
     # Two-sided p-value using normal approximation
-    p_value = 2 * (1 - _normal_cdf(abs(z_stat)))
+    p_value = math.erfc(abs(z_stat) / math.sqrt(2))
 
     return {
         "vr": float(vr),
@@ -300,7 +307,7 @@ def variance_ratio_test(
 
 
 def _normal_cdf(x: float) -> float:
-    """Approximate standard normal CDF using error function approximation.
+    """Standard normal CDF.
 
     Args:
         x: Z-score value.
@@ -308,21 +315,7 @@ def _normal_cdf(x: float) -> float:
     Returns:
         Cumulative probability.
     """
-    # Abramowitz and Stegun approximation
-    a1 = 0.254829592
-    a2 = -0.284496736
-    a3 = 1.421413741
-    a4 = -1.453152027
-    a5 = 1.061405429
-    p = 0.3275911
-
-    sign = 1 if x >= 0 else -1
-    x = abs(x) / np.sqrt(2)
-
-    t = 1.0 / (1.0 + p * x)
-    y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * np.exp(-x * x)
-
-    return 0.5 * (1.0 + sign * y)
+    return 0.5 * math.erfc(-x / math.sqrt(2))
 
 
 def estimate_half_life(series: SeriesLike) -> float:
