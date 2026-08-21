@@ -527,12 +527,15 @@ def test_mean_reversion(
     # Criteria:
     # 1. ADF p-value < 0.10 (reject unit root at 10%)
     # 2. Hurst < 0.5 (anti-persistent)
-    # 3. Variance ratio < 1 (mean-reverting)
+    # 3. Variance ratio significantly < 1 (mean-reverting)
     # 4. Half-life is finite and reasonable
 
     adf_suggests_mr = adf_result["p_value"] < 0.10
     hurst_suggests_mr = hurst < 0.5
-    vr_suggests_mr = vr_result["vr"] < 1.0
+    # A random walk's variance ratio scatters around 1, so "vr < 1" alone was
+    # true about half the time by chance and carried no information. Require
+    # the deviation to be statistically significant as well.
+    vr_suggests_mr = vr_result["vr"] < 1.0 and not vr_result["is_random_walk"]
     half_life_reasonable = 1.0 < half_life < 252  # Between 1 day and 1 year
 
     # Count evidence for mean reversion

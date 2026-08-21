@@ -983,6 +983,30 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- meanreversion subcommand ---
+    mean_reversion_parser = subparsers.add_parser(
+        "meanreversion",
+        help="Test a price or spread series for mean reversion (half-life, ADF, Hurst, variance ratio)",
+    )
+    mean_reversion_parser.add_argument(
+        "--prices",
+        required=True,
+        help="Path to parquet file containing the price or spread series",
+    )
+    mean_reversion_parser.add_argument(
+        "--price-col",
+        default="close",
+        help="Column name holding the price level (default: close)",
+    )
+    mean_reversion_parser.add_argument(
+        "--rolling-window",
+        type=int,
+        help="If set, also report the rolling Hurst exponent over this window",
+    )
+    mean_reversion_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     # --- turbulence subcommand ---
     turbulence_parser = subparsers.add_parser(
         "turbulence",
@@ -4609,6 +4633,113 @@ def cmd_hurst(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_meanreversion(args: argparse.Namespace) -> int:
+    """Test a price or spread series for mean-reverting behaviour.
+
+    Unlike `hurst`, which characterises a *return* series, this operates on
+    price levels: it is the check you run on a pair spread before trading it.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success)
+    """
+    from imst_quant.utils.mean_reversion import rolling_hurst, test_mean_reversion
+    import polars as pl
+    import json as json_module
+
+    prices_path = Path(args.prices)
+
+    if not prices_path.exists():
+        print(f"Error: Prices file not found: {prices_path}")
+        return 1
+
+    try:
+        df = pl.read_parquet(prices_path)
+    except Exception as e:
+        print(f"Error reading prices file: {e}")
+        return 1
+
+    if args.price_col not in df.columns:
+        print(f"Error: Column '{args.price_col}' not found in prices file")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    prices = df[args.price_col].drop_nulls()
+
+    if len(prices) < 30:
+        print(f"Error: Need at least 30 observations, got {len(prices)}")
+        return 1
+
+    if args.rolling_window is not None and args.rolling_window < 2:
+        print(f"Error: --rolling-window must be at least 2, got {args.rolling_window}")
+        return 1
+
+    try:
+        result = test_mean_reversion(prices)
+
+        payload = {
+            "observations": len(prices),
+            "half_life": result.half_life,
+            "hurst_exponent": result.hurst_exponent,
+            "adf_statistic": result.adf_statistic,
+            "adf_pvalue": result.adf_pvalue,
+            "variance_ratio": result.variance_ratio,
+            "is_mean_reverting": result.is_mean_reverting,
+            "confidence": result.confidence,
+        }
+
+        if args.rolling_window is not None:
+            if args.rolling_window > len(prices):
+                print(
+                    f"Error: --rolling-window {args.rolling_window} exceeds "
+                    f"the {len(prices)} available observations"
+                )
+                return 1
+            rolling = rolling_hurst(prices, window=args.rolling_window)
+            hurst_series = rolling["hurst"]
+            payload["rolling_hurst"] = {
+                "window": args.rolling_window,
+                "latest": float(hurst_series[-1]),
+                "mean": float(hurst_series.mean()),
+                "min": float(hurst_series.min()),
+                "max": float(hurst_series.max()),
+                "pct_mean_reverting": float((hurst_series < 0.5).mean()),
+            }
+
+        if args.json:
+            print(json_module.dumps(payload, indent=2, default=float))
+        else:
+            half_life = payload["half_life"]
+            half_life_text = "inf" if half_life == float("inf") else f"{half_life:.2f}"
+
+            print("\n=== Mean Reversion Analysis ===\n")
+            print(f"Observations:        {payload['observations']:>10}")
+            print(f"Half-life (periods): {half_life_text:>10}")
+            print(f"Hurst exponent:      {payload['hurst_exponent']:>10.4f}  (<0.5 mean-reverting)")
+            print(f"ADF statistic:       {payload['adf_statistic']:>10.4f}")
+            print(f"ADF p-value:         {payload['adf_pvalue']:>10.4f}  (<0.10 rejects unit root)")
+            print(f"Variance ratio:      {payload['variance_ratio']:>10.4f}  (<1 mean-reverting)")
+            print()
+            verdict = "YES" if payload["is_mean_reverting"] else "NO"
+            print(f"Mean reverting:      {verdict:>10}  (confidence: {payload['confidence']})")
+
+            if "rolling_hurst" in payload:
+                roll = payload["rolling_hurst"]
+                print(f"\nRolling Hurst (window {roll['window']}):")
+                print(f"  latest {roll['latest']:.4f}   mean {roll['mean']:.4f}   "
+                      f"range [{roll['min']:.4f}, {roll['max']:.4f}]")
+                print(f"  mean-reverting in {roll['pct_mean_reverting']:.1%} of windows")
+            print()
+
+    except Exception as e:
+        print(f"Error computing mean reversion analysis: {e}")
+        return 1
+
+    return 0
+
+
 def cmd_turbulence(args: argparse.Namespace) -> int:
     """Compute the turbulence index and absorption ratio for multi-asset returns.
 
@@ -6145,6 +6276,7 @@ COMMANDS = {
         "clean": cmd_clean,
         "signal-performance": cmd_signal_performance,
         "hurst": cmd_hurst,
+        "meanreversion": cmd_meanreversion,
         "turbulence": cmd_turbulence,
         "changepoint": cmd_changepoint,
         "drawdown": cmd_drawdown,
