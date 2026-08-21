@@ -63,6 +63,34 @@ def calculate_information_coefficient(
     return float(ic) if not np.isnan(ic) else 0.0
 
 
+def _forward_return_expr(
+    return_col: str,
+    periods: int,
+    group_by: Optional[str] = None,
+) -> pl.Expr:
+    """Build the forward return over the next ``periods`` bars.
+
+    Shifting a one-period return by ``-periods`` would skip everything in
+    between and correlate the signal with a single bar far in the future, so
+    the return is accumulated over the whole holding window instead. Row t
+    receives the sum of returns t+1 .. t+periods, which uses no information
+    available at t.
+
+    Args:
+        return_col: Column holding per-period returns.
+        periods: Length of the forward window, in periods.
+        group_by: Optional column to accumulate within (e.g. "asset_id"),
+            so windows never straddle two assets.
+
+    Returns:
+        Expression aliased to "forward_return".
+    """
+    expr = pl.col(return_col).rolling_sum(window_size=periods).shift(-periods)
+    if group_by:
+        expr = expr.over(group_by)
+    return expr.alias("forward_return")
+
+
 def calculate_signal_metrics(
     df: pl.DataFrame,
     signal_col: str = "signal",
@@ -76,18 +104,21 @@ def calculate_signal_metrics(
         df: DataFrame containing signals and returns.
         signal_col: Name of column containing signal values.
         return_col: Name of column containing returns.
-        forward_periods: Number of periods for forward return calculation.
+        forward_periods: Length of the forward return window, in periods.
+            Returns are accumulated over the whole window, not sampled from
+            its last bar.
         group_by: Optional column to group by (e.g., "asset_id").
 
     Returns:
         Dictionary containing:
         - ic: Information coefficient (Spearman correlation)
         - ic_std: Standard deviation of rolling IC
-        - ic_ir: Information ratio (IC mean / IC std)
+        - ic_ir: Information ratio (mean rolling IC / rolling IC std)
         - signal_mean: Mean signal value
         - signal_std: Signal standard deviation
         - signal_autocorr: Signal autocorrelation at lag 1
-        - hit_rate: Fraction of times signal direction matches return direction
+        - hit_rate: Fraction of directional calls that matched the return
+          direction; bars where the signal or the return is flat are excluded
         - sharpe: Sharpe ratio of signal-weighted returns
         - turnover: Average signal turnover (change magnitude)
 
@@ -98,17 +129,12 @@ def calculate_signal_metrics(
     if signal_col not in df.columns or return_col not in df.columns:
         raise ValueError(f"Required columns '{signal_col}' and '{return_col}' not found")
 
+    if forward_periods < 1:
+        raise ValueError(f"forward_periods must be at least 1, got {forward_periods}")
+
     # Calculate forward returns
     df = df.sort("date") if "date" in df.columns else df
-
-    if group_by:
-        df = df.with_columns(
-            pl.col(return_col).shift(-forward_periods).over(group_by).alias("forward_return")
-        )
-    else:
-        df = df.with_columns(
-            pl.col(return_col).shift(-forward_periods).alias("forward_return")
-        )
+    df = df.with_columns(_forward_return_expr(return_col, forward_periods, group_by))
 
     # Drop nulls
     df_clean = df.drop_nulls([signal_col, "forward_return"])
@@ -142,15 +168,22 @@ def calculate_signal_metrics(
                 forward_returns[i : i + window],
             )
             rolling_ics.append(window_ic)
-        ic_std = float(np.std(rolling_ics, ddof=1))
-        ic_ir = ic / ic_std if ic_std > 0 else 0.0
+        # A single window has no dispersion, and np.std(ddof=1) would return
+        # NaN for it rather than a usable number.
+        if len(rolling_ics) > 1:
+            ic_std = float(np.std(rolling_ics, ddof=1))
+            ic_ir = float(np.mean(rolling_ics)) / ic_std if ic_std > 0 else 0.0
+        else:
+            ic_std = 0.0
+            ic_ir = 0.0
     else:
         ic_std = 0.0
         ic_ir = 0.0
 
     # Signal statistics
     signal_mean = float(np.mean(signals))
-    signal_std = float(np.std(signals, ddof=1))
+    # ddof=1 is NaN for a single observation.
+    signal_std = float(np.std(signals, ddof=1)) if len(signals) > 1 else 0.0
 
     # Signal autocorrelation
     if len(signals) > 1:
@@ -160,16 +193,24 @@ def calculate_signal_metrics(
     else:
         signal_autocorr = 0.0
 
-    # Hit rate (directional accuracy)
+    # Hit rate (directional accuracy). A flat signal or a flat return makes no
+    # directional call, and counting those 0 == 0 matches as hits inflated the
+    # rate towards 1 for sparse signals.
     signal_direction = np.sign(signals)
     return_direction = np.sign(forward_returns)
-    hit_rate = float(np.mean(signal_direction == return_direction))
+    directional = (signal_direction != 0) & (return_direction != 0)
+    hit_rate = (
+        float(np.mean(signal_direction[directional] == return_direction[directional]))
+        if directional.any()
+        else 0.0
+    )
 
     # Signal-weighted returns Sharpe
     weighted_returns = signals * forward_returns
+    weighted_std = float(np.std(weighted_returns, ddof=1)) if len(weighted_returns) > 1 else 0.0
     sharpe = (
-        (np.mean(weighted_returns) / np.std(weighted_returns, ddof=1)) * np.sqrt(252)
-        if np.std(weighted_returns, ddof=1) > 0
+        (float(np.mean(weighted_returns)) / weighted_std) * np.sqrt(252)
+        if weighted_std > 0
         else 0.0
     )
 
@@ -203,11 +244,13 @@ def analyze_signal_decay(
         df: DataFrame containing signals and returns.
         signal_col: Name of column containing signal values.
         return_col: Name of column containing returns.
-        max_horizon: Maximum forward horizon to test (in periods).
+        max_horizon: Maximum forward horizon to test (in periods). Horizon h
+            uses the return accumulated over the next h periods.
         group_by: Optional column to group by (e.g., "asset_id").
 
     Returns:
-        Dictionary mapping forward periods to IC values, showing signal decay.
+        Dictionary mapping forward horizon to the IC against the cumulative
+        return over that horizon, showing signal decay.
 
     Example:
         >>> decay = analyze_signal_decay(df, max_horizon=10)
@@ -221,14 +264,9 @@ def analyze_signal_decay(
     df = df.sort("date") if "date" in df.columns else df
 
     for horizon in range(1, max_horizon + 1):
-        if group_by:
-            df_temp = df.with_columns(
-                pl.col(return_col).shift(-horizon).over(group_by).alias("forward_return")
-            )
-        else:
-            df_temp = df.with_columns(
-                pl.col(return_col).shift(-horizon).alias("forward_return")
-            )
+        df_temp = df.with_columns(
+            _forward_return_expr(return_col, horizon, group_by)
+        )
 
         df_clean = df_temp.drop_nulls([signal_col, "forward_return"])
 
