@@ -4,12 +4,28 @@ This module implements various risk parity approaches including Equal Risk Contr
 hierarchical risk parity, and adaptive risk parity with regime switching.
 """
 
+import warnings
 from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 from scipy.cluster import hierarchy
 from scipy.spatial.distance import squareform
+
+
+def _risk_share_error(weights: np.ndarray, cov: np.ndarray, n_assets: int) -> float:
+    """Squared error between each asset's risk share and an equal 1/n share.
+
+    Risk *shares* sum to 1 regardless of return scale, so the objective stays
+    O(1) and is comparable against a solver tolerance like 1e-6.
+    """
+    portfolio_var = float(weights @ cov @ weights)
+
+    if portfolio_var <= 0:
+        return 0.0
+
+    risk_shares = weights * (cov @ weights) / portfolio_var
+    return float(np.sum((risk_shares - 1.0 / n_assets) ** 2))
 
 
 class RiskParityOptimizer:
@@ -61,16 +77,14 @@ class RiskParityOptimizer:
             ERC weights
         """
         n_assets = len(self.assets)
+        cov = self.cov_matrix.to_numpy()
 
-        # Objective: minimize sum of squared differences in risk contribution
+        # Objective: minimize squared error of each asset's *share* of risk.
+        # Working in shares keeps the objective O(1); the absolute-contribution
+        # form scales with portfolio variance (~1e-14 for daily returns), which
+        # sits below SLSQP's ftol so the solver returned the initial guess.
         def objective(weights):
-            portfolio_vol = np.sqrt(weights @ self.cov_matrix @ weights)
-            marginal_contrib = self.cov_matrix @ weights
-            risk_contrib = weights * marginal_contrib / portfolio_vol
-
-            # Each asset should contribute 1/n of risk
-            target_contrib = portfolio_vol / n_assets
-            return np.sum((risk_contrib - target_contrib) ** 2)
+            return _risk_share_error(np.asarray(weights), cov, n_assets)
 
         # Constraints: weights sum to 1, all weights >= 0
         constraints = [
@@ -93,7 +107,11 @@ class RiskParityOptimizer:
         )
 
         if not result.success:
-            print(f"Warning: Optimization did not converge - {result.message}")
+            warnings.warn(
+                f"Risk parity optimization did not converge - {result.message}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
         return pd.Series(result.x, index=self.assets)
 
@@ -103,12 +121,19 @@ class RiskParityOptimizer:
     ) -> pd.Series:
         """Calculate Hierarchical Risk Parity (HRP) weights.
 
+        Uses Lopez de Prado's recursive bisection: at every split the two
+        sub-clusters share the parent weight in inverse proportion to their
+        inverse-variance-parity variance, so the riskier side gets less.
+
         Args:
             linkage_method: Linkage method for clustering
 
         Returns:
             HRP weights
         """
+        if len(self.assets) < 2:
+            return pd.Series(1.0, index=self.assets)
+
         # Calculate correlation and distance matrix
         corr_matrix = self.returns.corr()
         dist_matrix = np.sqrt((1 - corr_matrix) / 2)
@@ -122,31 +147,46 @@ class RiskParityOptimizer:
 
         # Recursive bisection
         weights = pd.Series(1.0, index=sort_ix)
-        clustered_alphas = [sort_ix]
+        clusters = [sort_ix]
 
-        while len(clustered_alphas) > 0:
-            clustered_alphas = [
+        while clusters:
+            clusters = [
                 cluster[start:end]
-                for cluster in clustered_alphas
+                for cluster in clusters
                 for start, end in ((0, len(cluster) // 2), (len(cluster) // 2, len(cluster)))
                 if len(cluster) > 1
             ]
 
-            for subcluster in clustered_alphas:
-                # Calculate cluster variance
-                subset_cov = self.cov_matrix.loc[subcluster, subcluster]
-                inv_diag = 1 / np.diag(subset_cov)
-                parity_w = inv_diag * (1 / np.sum(inv_diag))
+            # Bisections come out in left/right pairs; split the parent weight
+            # between each pair inversely to cluster variance.
+            for i in range(0, len(clusters), 2):
+                left, right = clusters[i], clusters[i + 1]
+                var_left = self._cluster_variance(left)
+                var_right = self._cluster_variance(right)
+                total_var = var_left + var_right
 
-                cluster_var = parity_w @ subset_cov @ parity_w
+                # Degenerate (zero-variance) split falls back to an even share.
+                alpha = 0.5 if total_var <= 0 else 1 - var_left / total_var
 
-                # Allocate weight
-                for i, asset in enumerate(subcluster):
-                    weights[asset] *= cluster_var
+                weights[left] *= alpha
+                weights[right] *= 1 - alpha
 
         # Normalize
         weights = weights / weights.sum()
         return weights.reindex(self.assets, fill_value=0)
+
+    def _cluster_variance(self, assets: List) -> float:
+        """Variance of a cluster held at inverse-variance parity weights."""
+        subset_cov = self.cov_matrix.loc[assets, assets]
+        diag = np.diag(subset_cov)
+
+        if np.any(diag <= 0):
+            parity_w = np.ones(len(assets)) / len(assets)
+        else:
+            inv_diag = 1 / diag
+            parity_w = inv_diag / inv_diag.sum()
+
+        return float(parity_w @ subset_cov @ parity_w)
 
     def _adaptive_risk_parity(
         self,
@@ -345,12 +385,10 @@ def calculate_risk_parity_with_constraints(
     n_assets = len(returns.columns)
     cov_matrix = returns.cov()
 
+    cov = cov_matrix.to_numpy()
+
     def objective(weights):
-        portfolio_vol = np.sqrt(weights @ cov_matrix @ weights)
-        marginal_contrib = cov_matrix @ weights
-        risk_contrib = weights * marginal_contrib / portfolio_vol
-        target_contrib = portfolio_vol / n_assets
-        return np.sum((risk_contrib - target_contrib) ** 2)
+        return _risk_share_error(np.asarray(weights), cov, n_assets)
 
     # Constraints
     constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1}]
