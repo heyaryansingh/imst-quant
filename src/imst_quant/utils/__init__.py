@@ -31,6 +31,7 @@ This package provides utility functions for:
 - Recovery speed analysis (recovery rate, velocity, pattern classification)
 - Covariance shrinkage (Ledoit-Wolf, OAS, identity, custom target estimators)
 - Drawdown circuit breaker (tiered alerts, position scaling, cooldown, simulation)
+- Tax lot accounting (FIFO/LIFO/HIFO matching, holding periods, loss harvesting)
 """
 
 from imst_quant.utils.attribution import (
@@ -83,6 +84,17 @@ from imst_quant.utils.risk_metrics import (
 from imst_quant.utils.monte_carlo import (
     MonteCarloSimulator,
     SimulationResult,
+)
+from imst_quant.utils.tax_lots import (
+    InsufficientLotsError,
+    LotSale,
+    RealizedSummary,
+    TaxLot,
+    TaxLotTracker,
+    compare_methods,
+    find_harvestable_lots,
+    sales_to_polars,
+    summarize_sales,
 )
 from imst_quant.utils.technical_indicators import (
     adx,
@@ -457,6 +469,16 @@ from imst_quant.utils.fractional_diff import (
 )
 
 __all__ = [
+    # Tax lots
+    "TaxLot",
+    "TaxLotTracker",
+    "LotSale",
+    "RealizedSummary",
+    "InsufficientLotsError",
+    "summarize_sales",
+    "sales_to_polars",
+    "compare_methods",
+    "find_harvestable_lots",
     # Checkpoint
     "CheckpointManager",
     # Monte Carlo
