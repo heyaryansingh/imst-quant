@@ -1379,7 +1379,115 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- shrinkage subcommand ---
+    shrinkage_parser = subparsers.add_parser(
+        "shrinkage",
+        help="Shrink the asset covariance matrix and show the effect on "
+             "minimum-variance weights",
+    )
+    shrinkage_parser.add_argument(
+        "--features", help="Path to features parquet (default: gold/features.parquet)"
+    )
+    shrinkage_parser.add_argument(
+        "--method",
+        default="compare",
+        choices=["ledoit-wolf", "oas", "identity", "compare"],
+        help="Shrinkage estimator, or 'compare' for all three (default: compare)",
+    )
+    shrinkage_parser.add_argument(
+        "--intensity",
+        type=float,
+        help="Fixed shrinkage intensity in [0, 1] for --method identity, "
+             "instead of the analytical optimum",
+    )
+    shrinkage_parser.add_argument(
+        "--return-col",
+        default="return_1d",
+        help="Column name for returns (default: return_1d)",
+    )
+    shrinkage_parser.add_argument(
+        "--asset-col",
+        help="Column name for assets (default: asset_id, falling back to ticker)",
+    )
+    shrinkage_parser.add_argument(
+        "--date-col", default="date", help="Column name for dates (default: date)"
+    )
+    shrinkage_parser.add_argument(
+        "--min-obs",
+        type=int,
+        default=20,
+        help="Drop assets with fewer than this many observations (default: 20)",
+    )
+    shrinkage_parser.add_argument(
+        "--long-only",
+        action="store_true",
+        help="Clip minimum-variance weights at zero and renormalize",
+    )
+    shrinkage_parser.add_argument(
+        "--top", type=int, default=10, help="Number of weights to list (default: 10)"
+    )
+    shrinkage_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
+
+
+def _minimum_variance_weights(cov, long_only: bool = False):
+    """Solve for the unconstrained minimum-variance portfolio weights.
+
+    Args:
+        cov: N x N covariance matrix.
+        long_only: If True, clip negative weights to zero and renormalize.
+
+    Returns:
+        Length-N array of weights summing to 1, or None if the covariance is
+        singular enough that no weight vector can be recovered.
+    """
+    import numpy as np
+
+    ones = np.ones(cov.shape[0])
+    try:
+        raw = np.linalg.solve(cov, ones)
+    except np.linalg.LinAlgError:
+        raw = np.linalg.pinv(cov) @ ones
+
+    total = raw.sum()
+    if not np.isfinite(total) or abs(total) < 1e-12:
+        return None
+    weights = raw / total
+
+    if long_only:
+        weights = np.clip(weights, 0.0, None)
+        positive = weights.sum()
+        if positive <= 0:
+            return None
+        weights = weights / positive
+
+    return weights
+
+
+def _weight_profile(weights, annualized_vol: float) -> dict:
+    """Summarize a weight vector's leverage and concentration."""
+    import numpy as np
+
+    if weights is None:
+        return {
+            "solvable": False,
+            "gross_leverage": None,
+            "max_weight": None,
+            "min_weight": None,
+            "short_count": None,
+            "portfolio_volatility": None,
+        }
+    return {
+        "solvable": True,
+        "gross_leverage": float(np.abs(weights).sum()),
+        "max_weight": float(weights.max()),
+        "min_weight": float(weights.min()),
+        "short_count": int((weights < 0).sum()),
+        "portfolio_volatility": annualized_vol,
+    }
 
 
 def _load_lot_trades(args: argparse.Namespace, df) -> list:
@@ -6209,6 +6317,230 @@ def cmd_attribution(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_shrinkage(args: argparse.Namespace) -> int:
+    """Shrink the asset covariance matrix and report the portfolio impact.
+
+    A sample covariance estimated from a short history is noisy and often
+    near-singular, which makes minimum-variance optimizers produce extreme,
+    heavily levered weights. This command reports the shrinkage intensity and
+    conditioning for each estimator, then contrasts the minimum-variance
+    weights implied by the sample and shrunk matrices so the practical effect
+    is visible.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for missing or unusable data).
+    """
+    import json as json_module
+
+    import numpy as np
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.covariance_shrinkage import (
+        identity_shrinkage,
+        ledoit_wolf_shrinkage,
+        oas_shrinkage,
+    )
+
+    if args.intensity is not None and not 0.0 <= args.intensity <= 1.0:
+        print(f"Error: --intensity must be in [0, 1], got {args.intensity}")
+        return 1
+    if args.intensity is not None and args.method != "identity":
+        print("Error: --intensity only applies to --method identity")
+        return 1
+    if args.min_obs < 2:
+        print(f"Error: --min-obs must be at least 2, got {args.min_obs}")
+        return 1
+
+    settings = Settings()
+    features_path = (
+        Path(args.features)
+        if args.features
+        else Path(settings.data.gold_dir) / "features.parquet"
+    )
+
+    if not features_path.exists():
+        print(f"Error: Features file not found at {features_path}")
+        return 1
+
+    try:
+        df = pl.read_parquet(features_path)
+    except Exception as e:
+        print(f"Error reading features file: {e}")
+        return 1
+
+    if args.asset_col:
+        asset_col = args.asset_col
+    elif "asset_id" in df.columns:
+        asset_col = "asset_id"
+    else:
+        asset_col = "ticker"
+
+    for column in (asset_col, args.return_col, args.date_col):
+        if column not in df.columns:
+            print(f"Error: Column '{column}' not found in features file")
+            print(f"Available columns: {df.columns}")
+            return 1
+
+    panel = df.select(
+        [args.date_col, asset_col, args.return_col]
+    ).drop_nulls()
+
+    # Assets with a short history would otherwise pull the whole panel down to
+    # their overlap once the wide matrix drops incomplete rows.
+    counts = panel.group_by(asset_col).len()
+    keep = counts.filter(pl.col("len") >= args.min_obs)[asset_col].to_list()
+    dropped = sorted(set(counts[asset_col].to_list()) - set(keep))
+    if len(keep) < 2:
+        print(
+            f"Error: Need at least 2 assets with >= {args.min_obs} observations, "
+            f"found {len(keep)}"
+        )
+        return 1
+
+    wide = (
+        panel.filter(pl.col(asset_col).is_in(keep))
+        .pivot(on=asset_col, index=args.date_col, values=args.return_col,
+               aggregate_function="mean")
+        .sort(args.date_col)
+        .drop_nulls()
+    )
+    symbols = [c for c in wide.columns if c != args.date_col]
+    matrix = wide.select(symbols).to_numpy().astype(np.float64)
+
+    if matrix.shape[0] < 2 or matrix.shape[1] < 2:
+        print(
+            "Error: Overlapping history is too short for a covariance estimate "
+            f"({matrix.shape[0]} dates x {matrix.shape[1]} assets)"
+        )
+        return 1
+
+    t_obs, n_assets = matrix.shape
+    trading_days = 252
+
+    def annualized_vol(weights, cov) -> Optional[float]:
+        if weights is None:
+            return None
+        variance = float(weights @ cov @ weights)
+        if variance < 0:
+            return None
+        return float(np.sqrt(variance * trading_days))
+
+    estimators = {
+        "ledoit_wolf": ledoit_wolf_shrinkage,
+        "oas": oas_shrinkage,
+        "identity": (
+            (lambda r: identity_shrinkage(r, shrinkage_intensity=args.intensity))
+            if args.intensity is not None
+            else identity_shrinkage
+        ),
+    }
+    if args.method != "compare":
+        key = args.method.replace("-", "_")
+        estimators = {key: estimators[key]}
+
+    try:
+        results = {name: fn(matrix) for name, fn in estimators.items()}
+    except ValueError as e:
+        print(f"Error estimating covariance: {e}")
+        return 1
+
+    sample_cov = next(iter(results.values())).sample_covariance
+    sample_weights = _minimum_variance_weights(sample_cov, long_only=args.long_only)
+
+    payload = {
+        "features_path": str(features_path),
+        "n_assets": n_assets,
+        "n_observations": t_obs,
+        "observations_per_parameter": t_obs / (n_assets * (n_assets + 1) / 2),
+        "dropped_assets": dropped,
+        "long_only": bool(args.long_only),
+        "sample": {
+            "condition_number": float(np.linalg.cond(sample_cov)),
+            **_weight_profile(sample_weights, annualized_vol(sample_weights, sample_cov)),
+        },
+        "methods": {},
+    }
+
+    for name, result in results.items():
+        weights = _minimum_variance_weights(result.covariance, long_only=args.long_only)
+        entry = {
+            "shrinkage_intensity": float(result.shrinkage_intensity),
+            "condition_number": result.condition_number_after,
+            "condition_number_reduction": (
+                result.condition_number_before / result.condition_number_after
+                if result.condition_number_after > 0
+                else None
+            ),
+            **_weight_profile(weights, annualized_vol(weights, result.covariance)),
+        }
+        if weights is not None:
+            ranked = sorted(
+                zip(symbols, (float(w) for w in weights)),
+                key=lambda pair: abs(pair[1]),
+                reverse=True,
+            )
+            entry["top_weights"] = [
+                {"symbol": symbol, "weight": weight}
+                for symbol, weight in ranked[: max(args.top, 0)]
+            ]
+        payload["methods"][name] = entry
+
+    if args.json:
+        print(json_module.dumps(payload, indent=2, default=float))
+        return 0
+
+    print("\n=== Covariance Shrinkage ===\n")
+    print(f"Assets:              {n_assets:>10}")
+    print(f"Overlapping dates:   {t_obs:>10}")
+    print(f"Obs per parameter:   {payload['observations_per_parameter']:>10.2f}")
+    if dropped:
+        print(f"Dropped (< {args.min_obs} obs):  {', '.join(str(a) for a in dropped[:8])}")
+    print()
+
+    print(f"  {'Estimator':<14}{'Intensity':>11}{'Cond':>12}{'Gross':>9}{'Max w':>9}{'Shorts':>8}{'Vol':>9}")
+    sample_row = payload["sample"]
+
+    def fmt_row(label: str, intensity: str, cond: float, row: dict) -> str:
+        if not row["solvable"]:
+            return f"  {label:<14}{intensity:>11}{cond:>12.1f}{'singular':>35}"
+        return (
+            f"  {label:<14}{intensity:>11}{cond:>12.1f}"
+            f"{row['gross_leverage']:>9.2f}"
+            f"{row['max_weight']:>9.1%}"
+            f"{row['short_count']:>8}"
+            f"{row['portfolio_volatility']:>9.1%}"
+        )
+
+    print(fmt_row("sample", "-", sample_row["condition_number"], sample_row))
+    for name, entry in payload["methods"].items():
+        print(fmt_row(name, f"{entry['shrinkage_intensity']:.4f}",
+                      entry["condition_number"], entry))
+    print()
+
+    for name, entry in payload["methods"].items():
+        if not entry.get("top_weights"):
+            continue
+        print(f"Minimum-variance weights ({name}):")
+        for item in entry["top_weights"]:
+            print(f"  {str(item['symbol']):<16}{item['weight']:>9.2%}")
+        print()
+
+    if t_obs < n_assets:
+        print("Fewer dates than assets: the sample covariance is singular, so its")
+        print("minimum-variance weights are meaningless. Use a shrunk estimate.")
+        print()
+    else:
+        print("A lower condition number and lower gross leverage mean the weights")
+        print("are less sensitive to estimation noise in the covariance matrix.")
+        print()
+
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -6288,6 +6620,7 @@ COMMANDS = {
         "turnover": cmd_turnover,
         "attribution": cmd_attribution,
         "lots": cmd_lots,
+        "shrinkage": cmd_shrinkage,
 }
 
 
