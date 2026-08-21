@@ -290,31 +290,57 @@ class PaperTradingSimulator:
         order_value = order.price * order.quantity
 
         if order.side == OrderSide.BUY:
-            # Update cash
             self.cash -= order_value + commission
-
-            # Update position with new average cost
-            new_quantity = position.quantity + order.quantity
-            if position.quantity > 0:
-                total_cost = position.avg_cost * position.quantity + order_value
-                position.avg_cost = total_cost / new_quantity
-            else:
-                position.avg_cost = order.price
-            position.quantity = new_quantity
-
+            signed_quantity = order.quantity
         else:  # SELL
-            # Calculate realized P&L
-            if position.quantity > 0:
-                pnl = (order.price - position.avg_cost) * min(
-                    order.quantity, position.quantity
-                )
-                position.realized_pnl += pnl
-
-            # Update position
-            position.quantity -= order.quantity
-
-            # Update cash
             self.cash += order_value - commission
+            signed_quantity = -order.quantity
+
+        self._apply_fill(position, signed_quantity, order.price)
+
+    @staticmethod
+    def _apply_fill(position: Position, signed_quantity: int, price: float) -> None:
+        """Apply a signed fill to a position, realizing P&L on any closed shares.
+
+        Handles the three cases uniformly for both long and short positions:
+
+        - **Opening / adding** in the same direction: roll the weighted average
+          cost basis forward.
+        - **Reducing** the position: realize P&L on the closed shares and leave
+          the average cost of the remaining shares untouched.
+        - **Flipping** through zero: realize P&L on the entire old position, then
+          reset the average cost to this fill's price for the residual shares.
+
+        Realized P&L is gross of commissions; commissions are already reflected
+        in the cash balance by the caller.
+
+        Args:
+            position: Position to mutate in place.
+            signed_quantity: Fill size, positive to buy and negative to sell.
+            price: Fill price per share.
+        """
+        old_quantity = position.quantity
+        new_quantity = old_quantity + signed_quantity
+
+        if old_quantity == 0 or (old_quantity > 0) == (signed_quantity > 0):
+            # Opening or adding in the same direction: roll the average cost.
+            total_cost = position.avg_cost * old_quantity + price * signed_quantity
+            position.avg_cost = total_cost / new_quantity if new_quantity else 0.0
+        else:
+            # Reducing, closing, or flipping: realize P&L on the closed shares.
+            closed_quantity = min(abs(signed_quantity), abs(old_quantity))
+            direction = 1 if old_quantity > 0 else -1
+            position.realized_pnl += (
+                (price - position.avg_cost) * closed_quantity * direction
+            )
+
+            if new_quantity == 0:
+                position.avg_cost = 0.0
+            elif (new_quantity > 0) != (old_quantity > 0):
+                # Flipped through zero; residual shares are opened at this price.
+                position.avg_cost = price
+
+        position.quantity = new_quantity
 
     def get_position(self, symbol: str) -> Dict:
         """Get current position for a symbol.
