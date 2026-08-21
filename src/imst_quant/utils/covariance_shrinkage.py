@@ -145,20 +145,23 @@ def ledoit_wolf_shrinkage(
             if i == j:
                 rho_hat += sample2[i, i] - sample_cov[i, i] ** 2
             else:
-                # Scaling factors for constant-correlation target
-                theta_ij = (
+                # theta_jj_ij = E[(r_j^2 - s_jj)(r_i r_j - s_ij)]
+                theta_jj_ij = (
                     np.sum(returns[:, i] * returns[:, j] * returns[:, j] ** 2) / t
                     - sample_cov[i, j] * sample_cov[j, j]
                 )
-                theta_ji = (
+                # theta_ii_ij = E[(r_i^2 - s_ii)(r_i r_j - s_ij)]
+                theta_ii_ij = (
                     np.sum(returns[:, j] * returns[:, i] * returns[:, i] ** 2) / t
                     - sample_cov[i, j] * sample_cov[i, i]
                 )
+                # Ledoit & Wolf (2004) eq. for the constant-correlation target:
+                # rBar/2 * (sqrt(s_jj/s_ii) * theta_ii_ij + sqrt(s_ii/s_jj) * theta_jj_ij)
                 rho_hat += (
                     target[i, j]
                     / (std_safe[i] * std_safe[j])
-                    * (theta_ij * std_safe[j] / std_safe[i]
-                       + theta_ji * std_safe[i] / std_safe[j])
+                    * (theta_ii_ij * std_safe[j] / std_safe[i]
+                       + theta_jj_ij * std_safe[i] / std_safe[j])
                     / 2.0
                 )
 
