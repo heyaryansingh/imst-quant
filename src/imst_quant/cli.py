@@ -17,6 +17,8 @@ from typing import Optional
 
 import structlog
 
+from imst_quant.utils.tax_lots import MATCHING_METHODS
+
 logger = structlog.get_logger()
 
 
@@ -1285,7 +1287,330 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- lots subcommand ---
+    lots_parser = subparsers.add_parser(
+        "lots",
+        help="Match trades to tax lots and report realized P&L by holding period",
+    )
+    lots_parser.add_argument(
+        "--trades",
+        help="Path to trade history parquet with [date, symbol, side, quantity, "
+             "price] (default: gold/trade_history.parquet)",
+    )
+    lots_parser.add_argument(
+        "--method",
+        default="fifo",
+        choices=list(MATCHING_METHODS),
+        help="Lot matching method (default: fifo)",
+    )
+    lots_parser.add_argument(
+        "--symbol", help="Restrict the report to a single symbol"
+    )
+    lots_parser.add_argument(
+        "--compare",
+        action="store_true",
+        help="Replay the trades under every matching method and compare",
+    )
+    lots_parser.add_argument(
+        "--harvest",
+        action="store_true",
+        help="List open lots sitting at an unrealized loss (needs --prices)",
+    )
+    lots_parser.add_argument(
+        "--prices",
+        help="Path to a parquet with [symbol, price] for marking open lots",
+    )
+    lots_parser.add_argument(
+        "--min-loss",
+        type=float,
+        default=0.0,
+        help="Minimum loss to report when harvesting (default: 0)",
+    )
+    lots_parser.add_argument(
+        "--date-col", default="date", help="Column name for trade dates (default: date)"
+    )
+    lots_parser.add_argument(
+        "--symbol-col", default="symbol", help="Column name for symbols (default: symbol)"
+    )
+    lots_parser.add_argument(
+        "--side-col", default="side", help="Column name for buy/sell (default: side)"
+    )
+    lots_parser.add_argument(
+        "--quantity-col",
+        default="quantity",
+        help="Column name for share counts (default: quantity)",
+    )
+    lots_parser.add_argument(
+        "--price-col", default="price", help="Column name for fill prices (default: price)"
+    )
+    lots_parser.add_argument(
+        "--commission-col",
+        default="commission",
+        help="Optional column name for commissions (default: commission)",
+    )
+    lots_parser.add_argument(
+        "--top", type=int, default=10, help="Number of lots to list (default: 10)"
+    )
+    lots_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
+
+
+def _load_lot_trades(args: argparse.Namespace, df) -> list:
+    """Convert a trade history frame into ordered trade dicts for the tracker.
+
+    Args:
+        args: Parsed CLI arguments carrying the column name overrides.
+        df: Trade history frame, already checked for the required columns.
+
+    Returns:
+        Trades sorted oldest first, each shaped for TaxLotTracker.
+    """
+    has_commission = args.commission_col in df.columns
+    trades = []
+    for row in df.sort(args.date_col).iter_rows(named=True):
+        commission = row.get(args.commission_col) if has_commission else None
+        trades.append(
+            {
+                "date": row[args.date_col],
+                "symbol": str(row[args.symbol_col]),
+                "side": str(row[args.side_col]).lower(),
+                "quantity": float(row[args.quantity_col]),
+                "price": float(row[args.price_col]),
+                "commission": float(commission) if commission is not None else 0.0,
+            }
+        )
+    return trades
+
+
+def cmd_lots(args: argparse.Namespace) -> int:
+    """Match a trade history to tax lots and report realized P&L.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code, 0 on success.
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.tax_lots import (
+        InsufficientLotsError,
+        TaxLotTracker,
+        compare_methods,
+        find_harvestable_lots,
+    )
+
+    settings = Settings()
+
+    if args.trades:
+        trades_path = Path(args.trades)
+    else:
+        trades_path = Path(settings.data.gold_dir) / "trade_history.parquet"
+
+    if not trades_path.exists():
+        print(f"Error: Trade history file not found: {trades_path}")
+        print("Expected columns: [date, symbol, side, quantity, price]")
+        return 1
+
+    if args.min_loss < 0:
+        print(f"Error: --min-loss must be non-negative, got {args.min_loss}")
+        return 1
+
+    if args.harvest and not args.prices:
+        print("Error: --harvest needs --prices to mark open lots to market")
+        return 1
+
+    try:
+        df = pl.read_parquet(trades_path)
+    except Exception as e:
+        print(f"Error reading trade history file: {e}")
+        return 1
+
+    required = (
+        args.date_col,
+        args.symbol_col,
+        args.side_col,
+        args.quantity_col,
+        args.price_col,
+    )
+    for column in required:
+        if column not in df.columns:
+            print(f"Error: Column '{column}' not found in trade history file")
+            print(f"Available columns: {df.columns}")
+            return 1
+
+    df = df.drop_nulls(list(required))
+    if args.symbol:
+        df = df.filter(pl.col(args.symbol_col) == args.symbol)
+        if df.is_empty():
+            print(f"Error: No trades found for symbol {args.symbol}")
+            return 1
+
+    if df.is_empty():
+        print("Error: Trade history has no complete rows")
+        return 1
+
+    trades = _load_lot_trades(args, df)
+
+    unknown = sorted({t["side"] for t in trades} - {"buy", "sell"})
+    if unknown:
+        print(f"Error: Unknown trade sides in history: {', '.join(unknown)}")
+        print("Expected 'buy' or 'sell'")
+        return 1
+
+    prices = {}
+    if args.prices:
+        prices_path = Path(args.prices)
+        if not prices_path.exists():
+            print(f"Error: Prices file not found: {prices_path}")
+            return 1
+        try:
+            prices_df = pl.read_parquet(prices_path)
+        except Exception as e:
+            print(f"Error reading prices file: {e}")
+            return 1
+        if args.symbol_col not in prices_df.columns or "price" not in prices_df.columns:
+            print(f"Error: Prices file needs columns [{args.symbol_col}, price]")
+            return 1
+        prices = {
+            str(row[args.symbol_col]): float(row["price"])
+            for row in prices_df.drop_nulls([args.symbol_col, "price"]).iter_rows(
+                named=True
+            )
+        }
+
+    try:
+        if args.compare:
+            comparison = compare_methods(trades)
+            payload = {
+                "trades": len(trades),
+                "method_comparison": {
+                    method: {
+                        "realized_pnl": summary.realized_pnl,
+                        "short_term_pnl": summary.short_term_pnl,
+                        "long_term_pnl": summary.long_term_pnl,
+                    }
+                    for method, summary in comparison.items()
+                },
+            }
+            if args.json:
+                print(json_module.dumps(payload, indent=2, default=float))
+            else:
+                print("\n=== Tax Lot Method Comparison ===\n")
+                print(f"Trades replayed: {len(trades):,}\n")
+                header = f"  {'Method':<10}{'Realized':>14}{'Short Term':>14}{'Long Term':>14}"
+                print(header)
+                print(f"  {'-' * 50}")
+                for method, values in payload["method_comparison"].items():
+                    print(
+                        f"  {method:<10}"
+                        f"{values['realized_pnl']:>14,.2f}"
+                        f"{values['short_term_pnl']:>14,.2f}"
+                        f"{values['long_term_pnl']:>14,.2f}"
+                    )
+                print()
+                print("Lower realized P&L defers tax, it does not avoid it; the")
+                print("deferred gain stays in the basis of the lots still open.")
+                print()
+            return 0
+
+        tracker = TaxLotTracker(method=args.method)
+        for trade in trades:
+            handler = tracker.buy if trade["side"] == "buy" else tracker.sell
+            handler(
+                trade["symbol"],
+                trade["quantity"],
+                trade["price"],
+                trade["date"],
+                trade["commission"],
+            )
+
+        summary = tracker.summarize()
+        payload = {
+            "method": tracker.method,
+            "trades": len(trades),
+            "sale_count": summary.sale_count,
+            "quantity_sold": summary.quantity_sold,
+            "total_proceeds": summary.total_proceeds,
+            "total_cost_basis": summary.total_cost_basis,
+            "realized_pnl": summary.realized_pnl,
+            "short_term_pnl": summary.short_term_pnl,
+            "long_term_pnl": summary.long_term_pnl,
+            "realized_gains": summary.realized_gains,
+            "realized_losses": summary.realized_losses,
+            "avg_holding_days": summary.avg_holding_days,
+            "open_lots": len(tracker.open_lots()),
+        }
+        if prices:
+            payload["unrealized_pnl"] = tracker.unrealized_pnl(prices)
+
+        harvestable = []
+        if args.harvest:
+            harvestable = find_harvestable_lots(tracker, prices, args.min_loss)
+            payload["harvestable_lots"] = [
+                {
+                    "symbol": lot.symbol,
+                    "quantity": lot.quantity,
+                    "cost_per_share": lot.cost_per_share,
+                    "acquired": str(lot.acquired),
+                    "unrealized_loss": (prices[lot.symbol] - lot.cost_per_share)
+                    * lot.quantity,
+                }
+                for lot in harvestable[: args.top]
+            ]
+
+        if args.json:
+            print(json_module.dumps(payload, indent=2, default=float))
+        else:
+            print(f"\n=== Tax Lots ({tracker.method.upper()}) ===\n")
+            print(f"Trades Processed:    {payload['trades']:>12,}")
+            print(f"Lot Disposals:       {payload['sale_count']:>12,}")
+            print(f"Shares Sold:         {payload['quantity_sold']:>12,.0f}")
+            print(f"Proceeds:            {payload['total_proceeds']:>12,.2f}")
+            print(f"Cost Basis:          {payload['total_cost_basis']:>12,.2f}")
+            print(f"Realized P&L:        {payload['realized_pnl']:>12,.2f}")
+            print(f"  Short Term:        {payload['short_term_pnl']:>12,.2f}")
+            print(f"  Long Term:         {payload['long_term_pnl']:>12,.2f}")
+            print(f"Gains:               {payload['realized_gains']:>12,.2f}")
+            print(f"Losses:              {payload['realized_losses']:>12,.2f}")
+            print(f"Avg Holding (days):  {payload['avg_holding_days']:>12,.1f}")
+            print(f"Open Lots:           {payload['open_lots']:>12,}")
+            if "unrealized_pnl" in payload:
+                print(f"Unrealized P&L:      {payload['unrealized_pnl']:>12,.2f}")
+
+            if args.harvest:
+                print()
+                if harvestable:
+                    print(f"Harvestable lots (largest loss first, top {args.top}):")
+                    for entry in payload["harvestable_lots"]:
+                        print(
+                            f"  {entry['symbol']:<10}"
+                            f"{entry['quantity']:>10,.0f} sh"
+                            f"  @ {entry['cost_per_share']:>10,.2f}"
+                            f"  acquired {entry['acquired']}"
+                            f"  loss {entry['unrealized_loss']:>12,.2f}"
+                        )
+                else:
+                    print("No open lots are sitting at a loss above the threshold.")
+            print()
+            print("Holding periods split at 365 days. Wash sale rules are not")
+            print("applied, so a repurchase inside 30 days is not disallowed here.")
+            print()
+
+    except InsufficientLotsError as e:
+        print(f"Error: {e}")
+        return 1
+    except Exception as e:
+        print(f"Error analyzing tax lots: {e}")
+        return 1
+
+    return 0
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
@@ -5830,6 +6155,7 @@ COMMANDS = {
         "indicators": cmd_indicators,
         "turnover": cmd_turnover,
         "attribution": cmd_attribution,
+        "lots": cmd_lots,
 }
 
 
