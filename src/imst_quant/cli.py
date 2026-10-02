@@ -1566,6 +1566,74 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- comoments subcommand ---
+    comoments_parser = subparsers.add_parser(
+        "comoments",
+        help="Downside/upside beta, coskewness and cokurtosis versus a benchmark",
+    )
+    comoments_parser.add_argument(
+        "--returns", help="Path to returns parquet file (default: gold/returns.parquet)"
+    )
+    comoments_parser.add_argument(
+        "--return-col", default="returns", help="Column name for strategy returns (default: returns)"
+    )
+    comoments_parser.add_argument(
+        "--benchmark-col",
+        default="benchmark_returns",
+        help="Column name for benchmark returns (default: benchmark_returns)",
+    )
+    comoments_parser.add_argument(
+        "--benchmark",
+        help="Optional separate parquet file holding the benchmark column",
+    )
+    comoments_parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.0,
+        help="Benchmark return separating down and up regimes (default: 0.0)",
+    )
+    comoments_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
+    # --- barriers subcommand ---
+    barriers_parser = subparsers.add_parser(
+        "barriers",
+        help="Triple-barrier labels (profit/stop/time) and class balance per asset",
+    )
+    barriers_parser.add_argument(
+        "--features", help="Path to features parquet (default: gold/features.parquet)"
+    )
+    barriers_parser.add_argument(
+        "--pt-mult", type=float, default=2.0,
+        help="Profit-taking barrier width in volatility units (default: 2.0)",
+    )
+    barriers_parser.add_argument(
+        "--sl-mult", type=float, default=2.0,
+        help="Stop-loss barrier width in volatility units (default: 2.0)",
+    )
+    barriers_parser.add_argument(
+        "--max-holding", type=int, default=10,
+        help="Vertical barrier in bars (default: 10)",
+    )
+    barriers_parser.add_argument(
+        "--vol-span", type=int, default=20,
+        help="EWM span for the volatility estimate (default: 20)",
+    )
+    barriers_parser.add_argument(
+        "--price-col", default="close", help="Column name for prices (default: close)"
+    )
+    barriers_parser.add_argument(
+        "--asset-col",
+        help="Column name for assets (default: asset_id, falling back to ticker)",
+    )
+    barriers_parser.add_argument(
+        "--date-col", default="date", help="Column name for dates (default: date)"
+    )
+    barriers_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -7129,6 +7197,228 @@ def main() -> int:
         return 1
 
 
+def cmd_comoments(args: argparse.Namespace) -> int:
+    """Report higher-moment systematic risk of a strategy versus a benchmark.
+
+    Prints unconditional, downside and upside beta, beta asymmetry,
+    coskewness, cokurtosis and a defensive/symmetric/crash_exposed assessment.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.higher_moments import analyze_higher_moments
+
+    settings = Settings()
+    returns_path = (
+        Path(args.returns)
+        if args.returns
+        else Path(settings.data.gold_dir) / "returns.parquet"
+    )
+    if not returns_path.exists():
+        print(f"Error: Returns file not found: {returns_path}")
+        print("Expected columns: [date, returns, benchmark_returns]")
+        return 1
+
+    try:
+        df = pl.read_parquet(returns_path)
+    except Exception as e:
+        print(f"Error reading returns file: {e}")
+        return 1
+
+    if args.return_col not in df.columns:
+        print(f"Error: Column '{args.return_col}' not found in returns file")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    if args.benchmark:
+        benchmark_path = Path(args.benchmark)
+        if not benchmark_path.exists():
+            print(f"Error: Benchmark file not found: {benchmark_path}")
+            return 1
+        try:
+            benchmark_df = pl.read_parquet(benchmark_path)
+        except Exception as e:
+            print(f"Error reading benchmark file: {e}")
+            return 1
+    else:
+        benchmark_df = df
+
+    if args.benchmark_col not in benchmark_df.columns:
+        print(f"Error: Column '{args.benchmark_col}' not found in benchmark data")
+        print(f"Available columns: {benchmark_df.columns}")
+        return 1
+
+    strategy = df[args.return_col].to_numpy()
+    benchmark = benchmark_df[args.benchmark_col].to_numpy()
+    if len(strategy) != len(benchmark):
+        print(
+            f"Error: Strategy has {len(strategy)} observations but benchmark has "
+            f"{len(benchmark)}; the two series must be aligned"
+        )
+        return 1
+
+    try:
+        result = analyze_higher_moments(strategy, benchmark, threshold=args.threshold)
+    except ValueError as e:
+        print(f"Error: {e}")
+        return 1
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    print("\nHigher-moment risk vs benchmark")
+    print("=" * 40)
+    print(f"Observations:    {result['n_observations']}")
+    print(f"Beta:            {result['beta']:.3f}")
+    print(
+        f"Downside beta:   {result['downside_beta']:.3f}  "
+        f"({result['n_down_periods']} periods)"
+    )
+    print(
+        f"Upside beta:     {result['upside_beta']:.3f}  "
+        f"({result['n_up_periods']} periods)"
+    )
+    print(f"Beta asymmetry:  {result['beta_asymmetry']:+.3f}")
+    print(f"Coskewness:      {result['coskewness']:.3f}")
+    print(f"Cokurtosis:      {result['cokurtosis']:.3f}")
+    print(f"Assessment:      {result['assessment']}")
+    return 0
+
+
+def cmd_barriers(args: argparse.Namespace) -> int:
+    """Label each asset's price history with the triple-barrier method.
+
+    Barrier widths scale with EWM volatility. Reports per-asset label counts,
+    class balance and mean realized return per label class.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.triple_barrier import label_distribution, triple_barrier_labels
+
+    if args.pt_mult <= 0 or args.sl_mult <= 0:
+        print("Error: --pt-mult and --sl-mult must be positive")
+        return 1
+    if args.max_holding < 1:
+        print(f"Error: --max-holding must be at least 1, got {args.max_holding}")
+        return 1
+    if args.vol_span < 2:
+        print(f"Error: --vol-span must be at least 2, got {args.vol_span}")
+        return 1
+
+    settings = Settings()
+    features_path = (
+        Path(args.features)
+        if args.features
+        else Path(settings.data.gold_dir) / "features.parquet"
+    )
+    if not features_path.exists():
+        print(f"Error: Features file not found at {features_path}")
+        return 1
+
+    try:
+        df = pl.read_parquet(features_path)
+    except Exception as e:
+        print(f"Error reading features file: {e}")
+        return 1
+
+    if args.asset_col:
+        asset_col = args.asset_col
+    elif "asset_id" in df.columns:
+        asset_col = "asset_id"
+    else:
+        asset_col = "ticker"
+
+    for column in (asset_col, args.price_col, args.date_col):
+        if column not in df.columns:
+            print(f"Error: Column '{column}' not found in features file")
+            print(f"Available columns: {df.columns}")
+            return 1
+
+    panel = df.select([args.date_col, asset_col, args.price_col]).drop_nulls()
+    if (panel[args.price_col] <= 0).any():
+        print(f"Error: Column '{args.price_col}' must contain positive prices")
+        return 1
+
+    assets = {}
+    skipped = []
+    for (asset,), group in panel.sort(args.date_col).group_by(
+        asset_col, maintain_order=True
+    ):
+        try:
+            res = triple_barrier_labels(
+                group[args.price_col].to_numpy(),
+                pt_mult=args.pt_mult,
+                sl_mult=args.sl_mult,
+                max_holding=args.max_holding,
+                vol_span=args.vol_span,
+            )
+        except ValueError:
+            skipped.append(str(asset))
+            continue
+        dist = label_distribution(res["labels"])
+        # inf (single class) is not valid JSON
+        if dist["imbalance_ratio"] == float("inf"):
+            dist["imbalance_ratio"] = None
+        dist["mean_return_by_label"] = {
+            name: float(res["returns"][res["labels"] == code].mean())
+            for name, code in (("upper", 1), ("lower", -1), ("vertical", 0))
+            if (res["labels"] == code).any()
+        }
+        assets[str(asset)] = dist
+
+    if not assets:
+        print("Error: No asset had enough price history to label")
+        return 1
+
+    output = {
+        "pt_mult": args.pt_mult,
+        "sl_mult": args.sl_mult,
+        "max_holding": args.max_holding,
+        "vol_span": args.vol_span,
+        "assets": assets,
+        "skipped_assets": sorted(skipped),
+    }
+
+    if args.json:
+        print(json_module.dumps(output, indent=2))
+        return 0
+
+    print(
+        f"\nTriple-barrier labels  pt={args.pt_mult}x  sl={args.sl_mult}x  "
+        f"horizon={args.max_holding} bars"
+    )
+    print("=" * 66)
+    print(f"{'Asset':<12}{'Labels':>8}{'Upper':>9}{'Lower':>9}{'Vertical':>10}{'Directional':>13}")
+    print("-" * 66)
+    for asset, d in assets.items():
+        p = d["proportions"]
+        print(
+            f"{asset:<12}{d['n_labels']:>8}{p['upper']:>9.1%}{p['lower']:>9.1%}"
+            f"{p['vertical']:>10.1%}{d['directional_share']:>13.1%}"
+        )
+    if skipped:
+        print(f"Skipped (too little history): {', '.join(sorted(skipped))}")
+    return 0
+
+
 # Maps the subcommand name registered in create_parser to its handler. Keep in
 # sync with create_parser; tests/unit/test_cli_dispatch.py enforces that.
 COMMANDS = {
@@ -7183,6 +7473,8 @@ COMMANDS = {
         "voltarget": cmd_voltarget,
         "riskparity": cmd_riskparity,
         "fracdiff": cmd_fracdiff,
+        "comoments": cmd_comoments,
+        "barriers": cmd_barriers,
 }
 
 
