@@ -78,6 +78,9 @@ class VolatilityTargeter:
         Returns:
             Realized volatility (standard deviation of returns)
         """
+        # Count real observations: NaN gaps inflate len() but std() skips them,
+        # so a window of mostly-NaN returns would otherwise yield a NaN vol.
+        returns = returns.dropna()
         if len(returns) < 2:
             logger.warning("insufficient_data_for_vol", n_returns=len(returns))
             return self.config.vol_floor
@@ -357,6 +360,11 @@ class VolatilityTargeter:
 
         # Forecast future volatility (simple extrapolation)
         last_vol = rolling_vol.iloc[-1]
+        # Shorter history than lookback_days (or a NaN on the last bar) leaves
+        # last_vol NaN, and max(nan, floor) returns nan, so every row of the
+        # schedule became NaN. Fall back to the floor like calculate_realized_vol.
+        if not np.isfinite(last_vol):
+            last_vol = self.config.vol_floor
         for day in range(forecast_days):
             forecast_vol = last_vol + vol_trend * day
             forecast_vol = max(forecast_vol, self.config.vol_floor)
@@ -387,3 +395,39 @@ class VolatilityTargeter:
                 current_exposure = target_exposure
 
         return pd.DataFrame(schedule)
+
+
+def vol_targeted_returns(
+    returns: pd.Series,
+    config: Optional[VolTargetConfig] = None,
+) -> pd.DataFrame:
+    """Backtest volatility targeting on a daily return series.
+
+    Exposure for day t is set from the realized volatility of the
+    ``lookback_days`` returns ending on day t-1, so the scaling never uses the
+    return it is applied to.
+
+    Args:
+        returns: Daily (linear) returns.
+        config: Targeting configuration. Uses defaults if None.
+
+    Returns:
+        DataFrame indexed like ``returns`` with columns ``realized_vol``
+        (annualized, as known before the bar), ``exposure`` and
+        ``scaled_return``. Rows before a full lookback window have NaN
+        exposure and scaled return.
+    """
+    config = config or VolTargetConfig()
+    realized_vol = (
+        returns.rolling(config.lookback_days).std() * np.sqrt(252)
+    ).shift(1)
+    exposure = (
+        config.target_vol / realized_vol.clip(lower=config.vol_floor)
+    ).clip(config.min_leverage, config.max_leverage)
+    return pd.DataFrame(
+        {
+            "realized_vol": realized_vol,
+            "exposure": exposure,
+            "scaled_return": exposure * returns,
+        }
+    )
