@@ -1430,6 +1430,62 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- voltarget subcommand ---
+    voltarget_parser = subparsers.add_parser(
+        "voltarget",
+        help="Size each asset to a target annualized volatility and backtest "
+             "the scaling",
+    )
+    voltarget_parser.add_argument(
+        "--features", help="Path to features parquet (default: gold/features.parquet)"
+    )
+    voltarget_parser.add_argument(
+        "--target-vol",
+        type=float,
+        default=0.15,
+        help="Target annualized volatility (default: 0.15)",
+    )
+    voltarget_parser.add_argument(
+        "--lookback",
+        type=int,
+        default=20,
+        help="Rolling window in days for realized volatility (default: 20)",
+    )
+    voltarget_parser.add_argument(
+        "--max-leverage",
+        type=float,
+        default=2.0,
+        help="Cap on exposure per asset (default: 2.0)",
+    )
+    voltarget_parser.add_argument(
+        "--current-exposure",
+        type=float,
+        default=1.0,
+        help="Exposure currently held in each asset, used for the rebalance "
+             "check (default: 1.0)",
+    )
+    voltarget_parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.10,
+        help="Relative exposure deviation that triggers a rebalance (default: 0.10)",
+    )
+    voltarget_parser.add_argument(
+        "--return-col",
+        default="return_1d",
+        help="Column name for returns (default: return_1d)",
+    )
+    voltarget_parser.add_argument(
+        "--asset-col",
+        help="Column name for assets (default: asset_id, falling back to ticker)",
+    )
+    voltarget_parser.add_argument(
+        "--date-col", default="date", help="Column name for dates (default: date)"
+    )
+    voltarget_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -6541,6 +6597,163 @@ def cmd_shrinkage(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_voltarget(args: argparse.Namespace) -> int:
+    """Report volatility-targeted exposure per asset and how well it worked.
+
+    For every asset, the exposure that would bring its trailing realized
+    volatility to ``--target-vol`` is compared with ``--current-exposure`` to
+    flag rebalances. A walk-forward backtest (exposure set from the window
+    ending the day before) shows realized volatility before and after scaling,
+    and inverse-volatility weights are given for a fully invested portfolio.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+
+    import numpy as np
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.volatility_targeting import (
+        VolatilityTargeter,
+        VolTargetConfig,
+        vol_targeted_returns,
+    )
+
+    if args.target_vol <= 0:
+        print(f"Error: --target-vol must be positive, got {args.target_vol}")
+        return 1
+    if args.lookback < 2:
+        print(f"Error: --lookback must be at least 2, got {args.lookback}")
+        return 1
+    if args.max_leverage <= 0:
+        print(f"Error: --max-leverage must be positive, got {args.max_leverage}")
+        return 1
+    if args.current_exposure < 0:
+        print(
+            f"Error: --current-exposure must be non-negative, got {args.current_exposure}"
+        )
+        return 1
+
+    settings = Settings()
+    features_path = (
+        Path(args.features)
+        if args.features
+        else Path(settings.data.gold_dir) / "features.parquet"
+    )
+    if not features_path.exists():
+        print(f"Error: Features file not found at {features_path}")
+        return 1
+
+    try:
+        df = pl.read_parquet(features_path)
+    except Exception as e:
+        print(f"Error reading features file: {e}")
+        return 1
+
+    if args.asset_col:
+        asset_col = args.asset_col
+    elif "asset_id" in df.columns:
+        asset_col = "asset_id"
+    else:
+        asset_col = "ticker"
+
+    for column in (asset_col, args.return_col, args.date_col):
+        if column not in df.columns:
+            print(f"Error: Column '{column}' not found in features file")
+            print(f"Available columns: {df.columns}")
+            return 1
+
+    config = VolTargetConfig(
+        target_vol=args.target_vol,
+        lookback_days=args.lookback,
+        max_leverage=args.max_leverage,
+        rebalance_threshold=args.threshold,
+    )
+    targeter = VolatilityTargeter(config)
+
+    panel = df.select([args.date_col, asset_col, args.return_col]).drop_nulls()
+    assets = {}
+    series_by_asset = {}
+    skipped = []
+    for (asset,), group in panel.sort(args.date_col).group_by(
+        asset_col, maintain_order=True
+    ):
+        returns = group[args.return_col].to_pandas()
+        # The backtest needs at least one bar after the first full window.
+        if len(returns) <= args.lookback:
+            skipped.append(str(asset))
+            continue
+
+        rebalance = targeter.rebalance_portfolio(returns, args.current_exposure)
+        backtest = vol_targeted_returns(returns, config).dropna()
+        raw = returns.loc[backtest.index]
+        assets[str(asset)] = {
+            "observations": len(returns),
+            "realized_vol": float(rebalance["current_vol"]),
+            "target_exposure": float(rebalance["new_exposure"]),
+            "deviation_pct": float(rebalance["deviation_pct"]),
+            "rebalance_needed": bool(rebalance["rebalance_needed"]),
+            "backtest": {
+                "days": len(backtest),
+                "unscaled_vol": float(raw.std() * np.sqrt(252)),
+                "scaled_vol": float(backtest["scaled_return"].std() * np.sqrt(252)),
+                "mean_exposure": float(backtest["exposure"].mean()),
+            },
+        }
+        series_by_asset[str(asset)] = returns
+
+    if not assets:
+        print(f"Error: No asset has more than {args.lookback} return observations")
+        return 1
+
+    weights = targeter.calculate_multi_asset_positions(series_by_asset)
+    output = {
+        "target_vol": args.target_vol,
+        "lookback": args.lookback,
+        "max_leverage": args.max_leverage,
+        "current_exposure": args.current_exposure,
+        "assets": assets,
+        "inverse_vol_weights": {k: float(v) for k, v in weights.items()},
+        "skipped_assets": sorted(skipped),
+    }
+
+    if args.json:
+        print(json_module.dumps(output, indent=2))
+        return 0
+
+    print(
+        f"\nVolatility targeting  target={args.target_vol:.1%}  "
+        f"lookback={args.lookback}d  max leverage={args.max_leverage:.2f}x"
+    )
+    print("=" * 79)
+    print(
+        f"{'Asset':<12}{'Real.vol':>10}{'Target exp':>12}{'Rebal?':>8}"
+        f"{'Unscaled':>11}{'Scaled':>10}{'Weight':>10}"
+    )
+    print("-" * 79)
+    for asset, info in assets.items():
+        bt = info["backtest"]
+        print(
+            f"{asset:<12}{info['realized_vol']:>10.2%}"
+            f"{info['target_exposure']:>11.2f}x"
+            f"{'yes' if info['rebalance_needed'] else 'no':>8}"
+            f"{bt['unscaled_vol']:>11.2%}{bt['scaled_vol']:>10.2%}"
+            f"{weights[asset]:>10.2%}"
+        )
+    print(
+        "\nReal.vol: trailing annualized vol. Unscaled/Scaled: backtest vol "
+        "before/after targeting."
+    )
+    if skipped:
+        print(f"Skipped (<= {args.lookback} observations): {', '.join(sorted(skipped))}")
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -6625,6 +6838,7 @@ COMMANDS = {
         "attribution": cmd_attribution,
         "lots": cmd_lots,
         "shrinkage": cmd_shrinkage,
+        "voltarget": cmd_voltarget,
 }
 
 
