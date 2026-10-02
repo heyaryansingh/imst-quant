@@ -86,7 +86,7 @@ def conditional_drawdown_at_risk(returns: Vector, alpha: float = 0.95) -> float:
     arr = _validate_returns(returns)
     dd = drawdown_series(arr)
     dar = np.quantile(dd, alpha)
-    tail = dd[dd >= dar]
+    tail = dd[dd > dar]
     return float(tail.mean()) if tail.size else float(dar)
 
 
