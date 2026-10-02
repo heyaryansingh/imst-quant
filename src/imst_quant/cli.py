@@ -6553,6 +6553,10 @@ def main() -> int:
     parser = create_parser()
     args = parser.parse_args()
 
+    # structlog prints to stdout by default, which interleaves log lines with
+    # command output and breaks every --json payload. Keep stdout for results.
+    structlog.configure(logger_factory=structlog.PrintLoggerFactory(sys.stderr))
+
     if args.verbose:
         structlog.configure(
             wrapper_class=structlog.make_filtering_bound_logger(0),
