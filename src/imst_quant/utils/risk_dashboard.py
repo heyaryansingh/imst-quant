@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
+from scipy import stats
 from datetime import datetime, timedelta
 
 from imst_quant.utils.risk_metrics import downside_deviation
@@ -172,6 +173,10 @@ class RiskDashboard:
             List of PositionRisk objects
         """
         position_risks = []
+        # Parametric (delta-normal) quantile; marginal VaRs below are the
+        # gradient of mean + z * sigma_P, so weight * marginal sums to it.
+        z_score = stats.norm.ppf(0.05)
+        portfolio_std = self.returns.std()
 
         for _, pos in self.positions.iterrows():
             symbol = pos['symbol']
@@ -183,17 +188,29 @@ class RiskDashboard:
 
             # Position-specific metrics
             pos_vol = pos_returns.std() * np.sqrt(252)
-            pos_var = np.percentile(pos_returns, 5)
 
-            # Marginal VaR contribution
-            portfolio_var, _ = self.calculate_var(0.95)
-            marginal_var = (pos_var - portfolio_var) / weight if weight > 0 else 0
+            # Marginal VaR: d(VaR_P)/d(w_i) = mu_i + z * cov(r_i, r_P) / sigma_P.
+            # The old (pos_var - portfolio_var) / weight was not a derivative,
+            # blew up for small weights and ignored correlation entirely.
+            pos_series = pd.Series(pos_returns)
+            joined = pd.concat([pos_series, self.returns], axis=1, join="inner").dropna()
+            if joined.empty and len(pos_series) == len(self.returns):
+                # Same history on different indexes (e.g. RangeIndex vs dates).
+                joined = pd.DataFrame(
+                    {0: pos_series.to_numpy(), 1: self.returns.to_numpy()}
+                ).dropna()
+            if len(joined) > 1 and portfolio_std > 0:
+                cov_with_portfolio = joined.iloc[:, 0].cov(joined.iloc[:, 1])
+                marginal_var = pos_series.mean() + z_score * cov_with_portfolio / portfolio_std
+            else:
+                marginal_var = 0.0
 
             # Beta if benchmark available
             pos_beta = 1.0
             if self.benchmark_returns is not None:
                 cov = np.cov(pos_returns, self.benchmark_returns)[0, 1]
-                bench_var = np.var(self.benchmark_returns)
+                # ddof=1 to match np.cov; ddof=0 inflated beta by n/(n-1).
+                bench_var = np.var(self.benchmark_returns, ddof=1)
                 pos_beta = cov / bench_var if bench_var > 0 else 1.0
 
             # Drawdown
