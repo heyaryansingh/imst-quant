@@ -1523,6 +1523,49 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- fracdiff subcommand ---
+    fracdiff_parser = subparsers.add_parser(
+        "fracdiff",
+        help="Find the minimum fractional differencing order that makes each "
+             "asset's cumulative-return series stationary",
+    )
+    fracdiff_parser.add_argument(
+        "--features", help="Path to features parquet (default: gold/features.parquet)"
+    )
+    fracdiff_parser.add_argument(
+        "--d",
+        type=float,
+        help="Fixed differencing order; skips the search for the minimum d",
+    )
+    fracdiff_parser.add_argument(
+        "--threshold",
+        type=float,
+        default=1e-4,
+        help="FFD weight truncation cutoff (default: 1e-4)",
+    )
+    fracdiff_parser.add_argument(
+        "--alpha",
+        type=float,
+        default=0.05,
+        help="ADF p-value below which a series counts as stationary (default: 0.05)",
+    )
+    fracdiff_parser.add_argument(
+        "--return-col",
+        default="return_1d",
+        help="Column name for returns, cumulated into a log-price level "
+             "(default: return_1d)",
+    )
+    fracdiff_parser.add_argument(
+        "--asset-col",
+        help="Column name for assets (default: asset_id, falling back to ticker)",
+    )
+    fracdiff_parser.add_argument(
+        "--date-col", default="date", help="Column name for dates (default: date)"
+    )
+    fracdiff_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -6634,6 +6677,141 @@ def cmd_shrinkage(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_fracdiff(args: argparse.Namespace) -> int:
+    """Fractionally difference each asset's log-price level.
+
+    The level is the cumulative sum of ``--return-col``. Without ``--d`` the
+    command scans d = 0, 0.05, ..., 1 for the smallest order whose ADF p-value
+    is below ``--alpha`` (the p-value is the coarse approximation in
+    ``utils.cointegration.adf_test``). Reports d, ADF p-value and the
+    correlation between the differenced and original level (memory kept).
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+
+    import numpy as np
+    import pandas as pd
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.cointegration import adf_test
+    from imst_quant.utils.fractional_diff import frac_diff_ffd
+
+    if args.d is not None and not 0 <= args.d <= 2:
+        print(f"Error: --d must be between 0 and 2, got {args.d}")
+        return 1
+    if args.threshold <= 0:
+        print(f"Error: --threshold must be positive, got {args.threshold}")
+        return 1
+    if not 0 < args.alpha < 1:
+        print(f"Error: --alpha must be in (0, 1), got {args.alpha}")
+        return 1
+
+    settings = Settings()
+    features_path = (
+        Path(args.features)
+        if args.features
+        else Path(settings.data.gold_dir) / "features.parquet"
+    )
+    if not features_path.exists():
+        print(f"Error: Features file not found at {features_path}")
+        return 1
+
+    try:
+        df = pl.read_parquet(features_path)
+    except Exception as e:
+        print(f"Error reading features file: {e}")
+        return 1
+
+    if args.asset_col:
+        asset_col = args.asset_col
+    elif "asset_id" in df.columns:
+        asset_col = "asset_id"
+    else:
+        asset_col = "ticker"
+
+    for column in (asset_col, args.return_col, args.date_col):
+        if column not in df.columns:
+            print(f"Error: Column '{column}' not found in features file")
+            print(f"Available columns: {df.columns}")
+            return 1
+
+    def evaluate(level, d):
+        result = frac_diff_ffd(level, d, args.threshold)
+        values = result["values"]
+        aligned = level[result["start_index"]:]
+        _, pvalue, _ = adf_test(pd.Series(values))
+        if values.size < 3 or np.std(values) == 0 or np.std(aligned) == 0:
+            corr = None
+        else:
+            corr = float(np.corrcoef(values, aligned)[0, 1])
+        return {
+            "d": float(d),
+            "adf_pvalue": pvalue,
+            "correlation_with_original": corr,
+            "window_width": result["width"],
+        }
+
+    grid = [args.d] if args.d is not None else [round(0.05 * i, 2) for i in range(21)]
+    panel = df.select([args.date_col, asset_col, args.return_col]).drop_nulls()
+    assets = {}
+    skipped = []
+    for (asset,), group in panel.sort(args.date_col).group_by(
+        asset_col, maintain_order=True
+    ):
+        level = np.cumsum(group[args.return_col].to_numpy().astype(float))
+        found = None
+        try:
+            for d in grid:
+                entry = evaluate(level, d)
+                found = entry
+                if entry["adf_pvalue"] < args.alpha:
+                    break
+        except ValueError:
+            # Level shorter than the FFD window at this d; nothing to report.
+            found = None
+        if found is None or len(level) < 30:
+            skipped.append(str(asset))
+            continue
+        found["observations"] = len(level)
+        found["stationary"] = bool(found["adf_pvalue"] < args.alpha)
+        assets[str(asset)] = found
+
+    if not assets:
+        print("Error: No asset has enough observations for fractional differencing")
+        return 1
+
+    output = {
+        "mode": "fixed" if args.d is not None else "min_d_search",
+        "threshold": args.threshold,
+        "alpha": args.alpha,
+        "assets": assets,
+        "skipped_assets": sorted(skipped),
+    }
+
+    if args.json:
+        print(json_module.dumps(output, indent=2))
+        return 0
+
+    print(f"\nFractional differentiation  mode={output['mode']}  alpha={args.alpha}")
+    print("=" * 62)
+    print(f"{'Asset':<14}{'d':>7}{'ADF p':>9}{'Corr':>9}{'Window':>9}{'Stat?':>8}")
+    print("-" * 62)
+    for name, info in assets.items():
+        corr = info["correlation_with_original"]
+        corr_s = f"{corr:>9.3f}" if corr is not None else f"{'n/a':>9}"
+        print(
+            f"{name:<14}{info['d']:>7.2f}{info['adf_pvalue']:>9.3f}{corr_s}"
+            f"{info['window_width']:>9d}{'yes' if info['stationary'] else 'no':>8}"
+        )
+    return 0
+
+
 def cmd_riskparity(args: argparse.Namespace) -> int:
     """Report risk parity weights, risk shares and portfolio volatility.
 
@@ -7004,6 +7182,7 @@ COMMANDS = {
         "shrinkage": cmd_shrinkage,
         "voltarget": cmd_voltarget,
         "riskparity": cmd_riskparity,
+        "fracdiff": cmd_fracdiff,
 }
 
 

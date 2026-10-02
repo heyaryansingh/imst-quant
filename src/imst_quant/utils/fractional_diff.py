@@ -35,9 +35,11 @@ def ffd_weights(d: float, threshold: float = 1e-4, max_width: int = 10000) -> np
     Raises:
         ValueError: If d < 0 or threshold <= 0.
     """
-    if d < 0:
-        raise ValueError(f"d must be >= 0, got {d}")
-    if threshold <= 0:
+    # NaN passes a plain `< 0` check and then never trips the threshold break,
+    # so the loop would silently build a max_width window of NaN weights.
+    if not np.isfinite(d) or d < 0:
+        raise ValueError(f"d must be finite and >= 0, got {d}")
+    if not np.isfinite(threshold) or threshold <= 0:
         raise ValueError(f"threshold must be positive, got {threshold}")
 
     weights = [1.0]
