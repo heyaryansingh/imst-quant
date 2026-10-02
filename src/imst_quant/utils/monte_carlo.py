@@ -219,7 +219,9 @@ class MonteCarloSimulator:
         cumulative = np.cumprod(1 + simulated_returns, axis=1)
         terminal_values = initial_price * cumulative[:, -1]
 
-        return self._create_result(simulated_returns, terminal_values, is_price=True)
+        return self._create_result(
+            simulated_returns, terminal_values, is_price=True, initial_value=initial_price
+        )
 
     def var_simulation(
         self,
@@ -368,10 +370,11 @@ class MonteCarloSimulator:
         simulated_returns: np.ndarray,
         terminal_values: np.ndarray,
         is_price: bool = False,
+        initial_value: float = 1.0,
     ) -> SimulationResult:
         """Create SimulationResult from simulation outputs."""
         if is_price:
-            total_returns = terminal_values / terminal_values.mean() - 1
+            total_returns = terminal_values / initial_value - 1
         else:
             total_returns = terminal_values - 1.0
 
