@@ -232,22 +232,41 @@ def calculate_portfolio_var(
         method: VaR calculation method
 
     Returns:
-        Dictionary with total VaR and marginal VaR by position
+        Dictionary with ``total_var``, ``standalone_var`` (VaR of each
+        position held alone; these ignore diversification and sum to more
+        than the total) and ``component_var`` (Euler allocation of
+        ``total_var``, which sums to it exactly). ``marginal_var`` is kept as
+        an alias of ``standalone_var`` for backward compatibility.
     """
     # Calculate portfolio returns
     aligned_positions = positions.reindex(returns.index, method='ffill')
-    portfolio_returns = (aligned_positions * returns).sum(axis=1)
+    contributions = (aligned_positions * returns)[positions.columns]
+    portfolio_returns = contributions.sum(axis=1)
 
     # Calculate total VaR
     calculator = VaRCalculator(portfolio_returns, confidence_level, method)
     total_var = calculator.calculate_var()
 
-    # Calculate marginal VaR for each position
-    marginal_vars = {}
+    standalone_vars = {}
     for asset in positions.columns:
-        asset_contribution = aligned_positions[asset] * returns[asset]
-        asset_calculator = VaRCalculator(asset_contribution, confidence_level, method)
-        marginal_vars[asset] = asset_calculator.calculate_var()
+        asset_calculator = VaRCalculator(contributions[asset], confidence_level, method)
+        standalone_vars[asset] = asset_calculator.calculate_var()
+
+    # Parametric Euler decomposition: VaR_i = -(mu_i + z * cov(c_i, P) / sigma_P)
+    # sums to the parametric total. Its shares are applied to total_var so the
+    # components also add up under the historical and Monte Carlo methods.
+    # ponytail: normal-based shares; tail-conditional (historical Euler) shares
+    # would be more faithful for fat-tailed books.
+    z_score = stats.norm.ppf(1 - confidence_level)
+    portfolio_std = portfolio_returns.std()
+    if portfolio_std > 0:
+        betas = contributions.apply(lambda c: c.cov(portfolio_returns)) / portfolio_std
+        parametric = -(contributions.mean() + z_score * betas)
+        parametric_total = parametric.sum()
+        shares = parametric / parametric_total if parametric_total != 0 else parametric * 0.0
+    else:
+        shares = pd.Series(1.0 / len(positions.columns), index=positions.columns)
+    component_vars = {asset: float(shares[asset] * total_var) for asset in positions.columns}
 
     logger.info(
         "portfolio_var_calculated",
@@ -257,7 +276,9 @@ def calculate_portfolio_var(
 
     return {
         "total_var": total_var,
-        "marginal_var": marginal_vars
+        "standalone_var": standalone_vars,
+        "component_var": component_vars,
+        "marginal_var": standalone_vars,
     }
 
 
