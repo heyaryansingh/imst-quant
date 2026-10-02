@@ -79,7 +79,7 @@ def analyze_day_of_week_effect(
             periods_analyzed=0,
         )
 
-    # Extract day of week (0=Monday, 6=Sunday)
+    # Extract day of week (polars: 1=Monday, 7=Sunday)
     analysis = df.with_columns(
         pl.col(date_col).dt.weekday().alias("dow")
     )
@@ -98,7 +98,7 @@ def analyze_day_of_week_effect(
     )
 
     # Map day numbers to names
-    day_names = {0: "Monday", 1: "Tuesday", 2: "Wednesday", 3: "Thursday", 4: "Friday", 5: "Saturday", 6: "Sunday"}
+    day_names = {1: "Monday", 2: "Tuesday", 3: "Wednesday", 4: "Thursday", 5: "Friday", 6: "Saturday", 7: "Sunday"}
     by_dow = by_dow.with_columns(
         pl.col("dow").replace_strict(day_names, default="Unknown").alias("day_name")
     )
