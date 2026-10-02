@@ -95,7 +95,8 @@ def coskewness(asset: Vector, benchmark: Vector) -> float:
         ValueError: If inputs are malformed or either series is constant.
     """
     a, b = _validate_pair(asset, benchmark)
-    sa, sb = a.std(ddof=1), b.std(ddof=1)
+    # ddof=0 to match the population (1/n) co-moment in the numerator
+    sa, sb = a.std(), b.std()
     if sa < 1e-12 or sb < 1e-12:
         raise ValueError("inputs must not be constant")
     da, db = a - a.mean(), b - b.mean()
@@ -116,7 +117,8 @@ def cokurtosis(asset: Vector, benchmark: Vector) -> float:
         ValueError: If inputs are malformed or either series is constant.
     """
     a, b = _validate_pair(asset, benchmark)
-    sa, sb = a.std(ddof=1), b.std(ddof=1)
+    # ddof=0 to match the population (1/n) co-moment in the numerator
+    sa, sb = a.std(), b.std()
     if sa < 1e-12 or sb < 1e-12:
         raise ValueError("inputs must not be constant")
     da, db = a - a.mean(), b - b.mean()
