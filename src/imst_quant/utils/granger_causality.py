@@ -52,18 +52,6 @@ class GrangerResult:
     direction: str
 
 
-def _prepare_series(series: pl.Series) -> np.ndarray:
-    """Prepare a polars Series for regression by handling nulls and converting to numpy.
-
-    Args:
-        series: Input polars Series.
-
-    Returns:
-        Numpy array with nulls removed.
-    """
-    return series.drop_nulls().to_numpy().astype(np.float64)
-
-
 def _create_lagged_matrix(
     y: np.ndarray,
     x: np.ndarray,
@@ -158,12 +146,15 @@ def granger_causality_test(
     x_name = x.name if x.name else "X"
     y_name = y.name if y.name else "Y"
 
-    # Convert to numpy
-    x_arr = _prepare_series(x)
-    y_arr = _prepare_series(y)
-
-    # Align series lengths
-    min_len = min(len(x_arr), len(y_arr))
+    # Convert to numpy, keeping x and y paired by position. Dropping nulls from
+    # each series separately would shift one against the other and pair x_{t+k}
+    # with y_t (look-ahead), manufacturing spurious causality.
+    min_len = min(len(x), len(y))
+    x_arr = x[:min_len].cast(pl.Float64).to_numpy()
+    y_arr = y[:min_len].cast(pl.Float64).to_numpy()
+    valid = np.isfinite(x_arr) & np.isfinite(y_arr)
+    x_arr, y_arr = x_arr[valid], y_arr[valid]
+    min_len = len(x_arr)
     if min_len < max_lag + 2:
         # Insufficient data for any meaningful test
         for lag in range(1, max_lag + 1):
