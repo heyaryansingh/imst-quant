@@ -1486,6 +1486,43 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- riskparity subcommand ---
+    riskparity_parser = subparsers.add_parser(
+        "riskparity",
+        help="Risk parity portfolio weights, risk contributions and volatility "
+             "across assets",
+    )
+    riskparity_parser.add_argument(
+        "--features", help="Path to features parquet (default: gold/features.parquet)"
+    )
+    riskparity_parser.add_argument(
+        "--method",
+        choices=["equal_risk_contribution", "hierarchical", "adaptive"],
+        default="equal_risk_contribution",
+        help="Risk parity method (default: equal_risk_contribution)",
+    )
+    riskparity_parser.add_argument(
+        "--lookback",
+        type=int,
+        default=252,
+        help="Trailing days of returns used (default: 252)",
+    )
+    riskparity_parser.add_argument(
+        "--return-col",
+        default="return_1d",
+        help="Column name for returns (default: return_1d)",
+    )
+    riskparity_parser.add_argument(
+        "--asset-col",
+        help="Column name for assets (default: asset_id, falling back to ticker)",
+    )
+    riskparity_parser.add_argument(
+        "--date-col", default="date", help="Column name for dates (default: date)"
+    )
+    riskparity_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -6597,6 +6634,133 @@ def cmd_shrinkage(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_riskparity(args: argparse.Namespace) -> int:
+    """Report risk parity weights, risk shares and portfolio volatility.
+
+    Returns are pivoted to a date x asset panel (dates where every asset has a
+    return), trimmed to the last ``--lookback`` rows, and fed to
+    ``RiskParityOptimizer``.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+
+    import numpy as np
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.risk_parity import RiskParityOptimizer
+
+    if args.lookback < 20:
+        print(f"Error: --lookback must be at least 20, got {args.lookback}")
+        return 1
+
+    settings = Settings()
+    features_path = (
+        Path(args.features)
+        if args.features
+        else Path(settings.data.gold_dir) / "features.parquet"
+    )
+    if not features_path.exists():
+        print(f"Error: Features file not found at {features_path}")
+        return 1
+
+    try:
+        df = pl.read_parquet(features_path)
+    except Exception as e:
+        print(f"Error reading features file: {e}")
+        return 1
+
+    if args.asset_col:
+        asset_col = args.asset_col
+    elif "asset_id" in df.columns:
+        asset_col = "asset_id"
+    else:
+        asset_col = "ticker"
+
+    for column in (asset_col, args.return_col, args.date_col):
+        if column not in df.columns:
+            print(f"Error: Column '{column}' not found in features file")
+            print(f"Available columns: {df.columns}")
+            return 1
+
+    wide = (
+        df.select([args.date_col, asset_col, args.return_col])
+        .drop_nulls()
+        .unique(subset=[args.date_col, asset_col], keep="last")
+        .pivot(on=asset_col, index=args.date_col, values=args.return_col)
+        .sort(args.date_col)
+        .drop_nulls()
+    )
+    returns = wide.drop(args.date_col).to_pandas().tail(args.lookback)
+    returns.columns = [str(c) for c in returns.columns]
+
+    if returns.shape[1] < 2:
+        print("Error: Need at least 2 assets with overlapping returns")
+        return 1
+    if len(returns) < 20:
+        print(f"Error: Need at least 20 overlapping dates, got {len(returns)}")
+        return 1
+
+    optimizer = RiskParityOptimizer(returns, method=args.method)
+    if args.method == "adaptive":
+        weights = optimizer.optimize(lookback_period=args.lookback)
+    else:
+        weights = optimizer.optimize()
+
+    cov = optimizer.cov_matrix.to_numpy()
+    w = weights.to_numpy()
+    port_var = float(w @ cov @ w)
+    if port_var <= 0:
+        print("Error: Portfolio variance is zero; returns carry no risk")
+        return 1
+    shares = w * (cov @ w) / port_var
+    port_vol = float(np.sqrt(port_var))
+
+    output = {
+        "method": args.method,
+        "lookback": args.lookback,
+        "observations": len(returns),
+        "portfolio_vol_daily": port_vol,
+        "portfolio_vol_annualized": port_vol * float(np.sqrt(252)),
+        "diversification_ratio": float(
+            optimizer.calculate_diversification_ratio(weights)
+        ),
+        "assets": {
+            name: {
+                "weight": float(weights[name]),
+                "risk_share": float(shares[i]),
+                "volatility_annualized": float(np.sqrt(cov[i, i] * 252)),
+            }
+            for i, name in enumerate(returns.columns)
+        },
+    }
+
+    if args.json:
+        print(json_module.dumps(output, indent=2))
+        return 0
+
+    print(f"\nRisk parity  method={args.method}  obs={len(returns)}")
+    print("=" * 52)
+    print(f"{'Asset':<14}{'Weight':>10}{'Risk share':>13}{'Ann.vol':>12}")
+    print("-" * 52)
+    for name, info in output["assets"].items():
+        print(
+            f"{name:<14}{info['weight']:>10.2%}{info['risk_share']:>13.2%}"
+            f"{info['volatility_annualized']:>12.2%}"
+        )
+    print("-" * 52)
+    print(
+        f"Portfolio vol (ann.): {output['portfolio_vol_annualized']:.2%}  "
+        f"Diversification ratio: {output['diversification_ratio']:.2f}"
+    )
+    return 0
+
+
 def cmd_voltarget(args: argparse.Namespace) -> int:
     """Report volatility-targeted exposure per asset and how well it worked.
 
@@ -6839,6 +7003,7 @@ COMMANDS = {
         "lots": cmd_lots,
         "shrinkage": cmd_shrinkage,
         "voltarget": cmd_voltarget,
+        "riskparity": cmd_riskparity,
 }
 
 

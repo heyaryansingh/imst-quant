@@ -202,8 +202,9 @@ class RiskParityOptimizer:
         Returns:
             Adaptive risk parity weights
         """
-        # Calculate rolling volatility
-        rolling_vol = self.returns.rolling(lookback_period).std()
+        # min_periods lets a history shorter than the lookback use what exists
+        # instead of returning all-NaN weights.
+        rolling_vol = self.returns.rolling(lookback_period, min_periods=2).std()
         current_vol = rolling_vol.iloc[-1]
 
         # Inverse volatility weights
