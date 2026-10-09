@@ -86,6 +86,41 @@ def probabilistic_sharpe_ratio(
     return float(stats.norm.cdf(z))
 
 
+def min_track_record_length(
+    sharpe_ratio: float,
+    benchmark_sharpe: float = 0.0,
+    skewness: float = 0.0,
+    kurtosis: float = 3.0,
+    confidence: float = 0.95,
+) -> float:
+    """Minimum Track Record Length (Bailey & Lopez de Prado, 2012).
+
+    Number of observations needed before PSR(benchmark) reaches
+    ``confidence`` given the observed per-period Sharpe ratio and return
+    shape. Inverts the Mertens standard error used by
+    probabilistic_sharpe_ratio, so the two agree exactly.
+
+    Args:
+        sharpe_ratio: Observed (non-annualized) Sharpe ratio.
+        benchmark_sharpe: Sharpe ratio to beat, same units.
+        skewness: Sample skewness of returns.
+        kurtosis: Sample kurtosis of returns, non-excess convention.
+        confidence: Target PSR, in (0, 1).
+
+    Returns:
+        Required number of observations, or ``inf`` when the observed
+        Sharpe ratio does not exceed the benchmark.
+    """
+    if not 0.0 < confidence < 1.0:
+        raise ValueError("confidence must be in (0, 1)")
+    edge = sharpe_ratio - benchmark_sharpe
+    if edge <= 0:
+        return float("inf")
+    shape = 1 - skewness * sharpe_ratio + ((kurtosis - 1) / 4) * sharpe_ratio**2
+    z = stats.norm.ppf(confidence)
+    return float(1 + max(shape, 0.0) * (z / edge) ** 2)
+
+
 def expected_max_sharpe_ratio(
     n_trials: int,
     sharpe_variance: float = 1.0,
@@ -201,6 +236,8 @@ def deflated_sharpe_ratio_from_returns(
     Returns:
         Same dictionary as deflated_sharpe_ratio, plus:
             - sharpe_ratio: The (possibly annualized) Sharpe ratio used.
+            - min_track_record_length: Observations needed for the DSR to
+              reach 0.95 at the observed Sharpe (inf if it never will).
 
     Raises:
         ValueError: If fewer than 2 finite return observations are provided.
@@ -226,6 +263,10 @@ def deflated_sharpe_ratio_from_returns(
         skewness=skewness,
         kurtosis=kurtosis,
         sharpe_variance=sharpe_variance,
+    )
+
+    result["min_track_record_length"] = min_track_record_length(
+        sharpe, result["expected_max_sharpe"], skewness, kurtosis
     )
 
     annualization = float(np.sqrt(periods_per_year))

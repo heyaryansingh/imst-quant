@@ -249,6 +249,7 @@ from imst_quant.utils.var_backtesting import (
 from imst_quant.utils.deflated_sharpe import (
     deflated_sharpe_ratio,
     deflated_sharpe_ratio_from_returns,
+    min_track_record_length,
     estimated_sharpe_ratio_stderr,
     expected_max_sharpe_ratio,
     probabilistic_sharpe_ratio,
@@ -662,6 +663,7 @@ __all__ = [
     # Deflated Sharpe ratio
     "deflated_sharpe_ratio",
     "deflated_sharpe_ratio_from_returns",
+    "min_track_record_length",
     "estimated_sharpe_ratio_stderr",
     "expected_max_sharpe_ratio",
     "probabilistic_sharpe_ratio",

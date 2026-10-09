@@ -52,3 +52,33 @@ def test_nans_dropped():
     b = deflated_sharpe_ratio_from_returns(with_nan, n_trials=3)
     assert a["n_observations"] == b["n_observations"] == 100
     assert abs(a["deflated_sharpe_ratio"] - b["deflated_sharpe_ratio"]) < 1e-12
+
+
+def test_min_track_record_length_inverts_psr():
+    from imst_quant.utils.deflated_sharpe import min_track_record_length
+
+    sr, skew, kurt = 0.08, -0.5, 6.0
+    n = min_track_record_length(sr, 0.0, skew, kurt, confidence=0.95)
+    assert abs(probabilistic_sharpe_ratio(sr, 0.0, int(np.ceil(n)), skew, kurt) - 0.95) < 0.01
+    assert probabilistic_sharpe_ratio(sr, 0.0, int(np.ceil(n)), skew, kurt) >= 0.95
+    assert probabilistic_sharpe_ratio(sr, 0.0, int(np.floor(n)) - 1, skew, kurt) < 0.95
+    assert min_track_record_length(-0.1) == float("inf")
+
+
+def test_cli_reports_min_track_record(tmp_path, capsys):
+    import json
+
+    import polars as pl
+
+    from imst_quant.cli import cmd_deflated_sharpe, create_parser
+
+    path = tmp_path / "returns.parquet"
+    pl.DataFrame({"returns": _series(120, 0.1)}).write_parquet(path)
+    args = create_parser().parse_args(
+        ["deflated-sharpe", "--returns", str(path), "--n-trials", "5", "--json"]
+    )
+    assert cmd_deflated_sharpe(args) == 0
+    out = json.loads(capsys.readouterr().out)
+    # Not enough history yet for 5 trials at SR 0.1/bar.
+    assert out["deflated_sharpe_ratio"] < 0.95
+    assert out["min_track_record_length"] > 120

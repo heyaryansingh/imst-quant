@@ -4823,6 +4823,9 @@ def cmd_deflated_sharpe(args: argparse.Namespace) -> int:
             print(f"Expected Max Sharpe:   {result['expected_max_sharpe']:>10.4f}")
             print(f"Sharpe StdErr:         {result['sharpe_stderr']:>10.4f}")
             print(f"Deflated Sharpe Ratio: {result['deflated_sharpe_ratio']:>10.4f}")
+            mintrl = result["min_track_record_length"]
+            mintrl_str = "never" if mintrl == float("inf") else f"{mintrl:.0f}"
+            print(f"Min Track Record:      {mintrl_str:>10}  observations for DSR >= 0.95")
             print()
             verdict = "SKILL LIKELY GENUINE" if result["deflated_sharpe_ratio"] > 0.95 else "INSUFFICIENT EVIDENCE OF SKILL"
             print(f"Verdict: {verdict}")
