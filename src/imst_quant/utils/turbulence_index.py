@@ -185,7 +185,7 @@ def rolling_absorption_ratio(
         n_components: Passed through to absorption_ratio.
 
     Returns:
-        Dict with absorption_ratios (NaN during warmup), window,
+        Dict with absorption_ratios (NaN for the first window - 1 periods), window,
         current_ratio, and trend ("rising", "falling", or "stable" based
         on the last window-half change exceeding 0.02).
 
@@ -195,9 +195,14 @@ def rolling_absorption_ratio(
     arr = _validate_matrix(returns, min_rows=window + 5)
     n_periods = arr.shape[0]
 
+    # Window ending at (and including) t, so current_ratio reflects the
+    # latest bar. Unlike turbulence, AR describes the window itself and
+    # isn't scored against a held-out observation.
     ratios = np.full(n_periods, np.nan)
-    for t in range(window, n_periods):
-        ratios[t] = absorption_ratio(arr[t - window : t], n_components)["absorption_ratio"]
+    for t in range(window - 1, n_periods):
+        ratios[t] = absorption_ratio(arr[t - window + 1 : t + 1], n_components)[
+            "absorption_ratio"
+        ]
 
     valid = ratios[np.isfinite(ratios)]
     half = max(len(valid) // 2, 1)

@@ -226,8 +226,15 @@ class TestRollingAbsorptionRatio:
     def test_structure_and_warmup(self, multi_asset_returns):
         result = rolling_absorption_ratio(multi_asset_returns, window=60)
         ratios = np.array(result["absorption_ratios"])
-        assert np.all(np.isnan(ratios[:60]))
+        assert np.all(np.isnan(ratios[:59]))
+        assert np.isfinite(ratios[59])
         assert np.isfinite(result["current_ratio"])
+
+    def test_current_ratio_includes_latest_bar(self, multi_asset_returns):
+        window = 60
+        result = rolling_absorption_ratio(multi_asset_returns, window=window)
+        expected = absorption_ratio(multi_asset_returns[-window:])["absorption_ratio"]
+        assert result["current_ratio"] == pytest.approx(expected)
         assert result["trend"] in ("rising", "falling", "stable")
 
     def test_too_short_raises(self, rng):
