@@ -122,7 +122,7 @@ def _family_p_value(results: List[GrangerResult]) -> float:
     """
     if not results:
         return 1.0
-    return min(1.0, min(r.p_value for r in results) * len(results))
+    return float(min(1.0, min(r.p_value for r in results) * len(results)))
 
 
 def granger_causality_test(
@@ -251,7 +251,7 @@ def granger_causality_test(
                 except (ValueError, RuntimeWarning):
                     p_value = 1.0
 
-        is_significant = p_value < significance
+        is_significant = bool(p_value < significance)
 
         results.append(
             GrangerResult(

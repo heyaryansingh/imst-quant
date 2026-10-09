@@ -1687,6 +1687,31 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- leadlag subcommand ---
+    leadlag_parser = subparsers.add_parser(
+        "leadlag",
+        help="Granger-test whether sentiment leads returns, returns lead sentiment, or both",
+    )
+    leadlag_parser.add_argument(
+        "--data", required=True, help="Path to parquet file with sentiment and returns columns"
+    )
+    leadlag_parser.add_argument(
+        "--sentiment-col", default="sentiment", help="Sentiment column name (default: sentiment)"
+    )
+    leadlag_parser.add_argument(
+        "--returns-col", default="returns", help="Returns column name (default: returns)"
+    )
+    leadlag_parser.add_argument(
+        "--max-lag", type=int, default=5, help="Maximum lag in bars to test (default: 5)"
+    )
+    leadlag_parser.add_argument(
+        "--significance", type=float, default=0.05,
+        help="Family-wise significance level across lags (default: 0.05)",
+    )
+    leadlag_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -7640,6 +7665,77 @@ def cmd_decay(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_leadlag(args: argparse.Namespace) -> int:
+    """Report the Granger lead-lag relationship between sentiment and returns.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+    from dataclasses import asdict
+
+    import polars as pl
+
+    from imst_quant.utils.granger_causality import sentiment_price_causality
+
+    if args.max_lag < 1:
+        print(f"Error: --max-lag must be at least 1, got {args.max_lag}")
+        return 1
+    if not 0 < args.significance < 1:
+        print(f"Error: --significance must be in (0, 1), got {args.significance}")
+        return 1
+
+    data_path = Path(args.data)
+    if not data_path.exists():
+        print(f"Error: Data file not found: {data_path}")
+        return 1
+    try:
+        df = pl.read_parquet(data_path)
+    except Exception as e:
+        print(f"Error reading data file: {e}")
+        return 1
+
+    missing = [c for c in (args.sentiment_col, args.returns_col) if c not in df.columns]
+    if missing:
+        print(f"Error: Missing columns {missing}")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    # Unrestricted model needs 2*lag+1 params plus residual degrees of freedom.
+    min_rows = 3 * args.max_lag + 10
+    if df.height < min_rows:
+        print(f"Error: Need at least {min_rows} rows for --max-lag {args.max_lag}, got {df.height}")
+        return 1
+
+    result = sentiment_price_causality(
+        df[args.sentiment_col], df[args.returns_col],
+        max_lag=args.max_lag, significance=args.significance,
+    )
+
+    if args.json:
+        payload = {
+            k: [asdict(r) for r in v] if k in ("sentiment_to_returns", "returns_to_sentiment") else v
+            for k, v in result.items()
+        }
+        payload["n_observations"] = df.height
+        print(json_module.dumps(payload, indent=2))
+        return 0
+
+    print(f"\nSentiment/returns lead-lag ({df.height} obs, max lag {args.max_lag})")
+    print("=" * 50)
+    print(f"{'Lag':>4}{'S->R F':>10}{'p':>9}{'R->S F':>10}{'p':>9}")
+    for sr, rs in zip(result["sentiment_to_returns"], result["returns_to_sentiment"]):
+        print(f"{sr.lag:>4}{sr.f_statistic:>10.2f}{sr.p_value:>9.4f}{rs.f_statistic:>10.2f}{rs.p_value:>9.4f}")
+    print(f"\nAdjusted p (S->R): {result['adjusted_p_sentiment_to_returns']:.4f}")
+    print(f"Adjusted p (R->S): {result['adjusted_p_returns_to_sentiment']:.4f}")
+    print(f"\n{result['lead_lag_relationship']}")
+    print(result["recommendation"])
+    return 0
+
+
 # Maps the subcommand name registered in create_parser to its handler. Keep in
 # sync with create_parser; tests/unit/test_cli_dispatch.py enforces that.
 COMMANDS = {
@@ -7698,6 +7794,7 @@ COMMANDS = {
         "barriers": cmd_barriers,
         "cfvar": cmd_cfvar,
         "decay": cmd_decay,
+        "leadlag": cmd_leadlag,
 }
 
 
