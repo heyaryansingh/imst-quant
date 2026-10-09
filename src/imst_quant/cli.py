@@ -1634,6 +1634,33 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- cfvar subcommand ---
+    cfvar_parser = subparsers.add_parser(
+        "cfvar",
+        help="Cornish-Fisher VaR/CVaR vs parametric and historical, with normality test",
+    )
+    cfvar_parser.add_argument(
+        "--returns", help="Path to returns parquet file (default: gold/returns.parquet)"
+    )
+    cfvar_parser.add_argument(
+        "--return-col", default="returns", help="Column name for returns (default: returns)"
+    )
+    cfvar_parser.add_argument(
+        "--confidence", type=float, default=0.95,
+        help="VaR confidence level in (0, 1) (default: 0.95)",
+    )
+    cfvar_parser.add_argument(
+        "--risk-free", type=float, default=0.0,
+        help="Per-period risk-free rate for the modified Sharpe ratio (default: 0.0)",
+    )
+    cfvar_parser.add_argument(
+        "--periods-per-year", type=int, default=252,
+        help="Periods per year for annualization (default: 252)",
+    )
+    cfvar_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -7419,6 +7446,95 @@ def cmd_barriers(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_cfvar(args: argparse.Namespace) -> int:
+    """Compare Cornish-Fisher tail risk with Gaussian and historical estimates.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+    from dataclasses import asdict
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.cornish_fisher_var import (
+        modified_sharpe_ratio,
+        risk_summary,
+    )
+
+    if not 0 < args.confidence < 1:
+        print(f"Error: --confidence must be between 0 and 1, got {args.confidence}")
+        return 1
+
+    settings = Settings()
+    returns_path = (
+        Path(args.returns)
+        if args.returns
+        else Path(settings.data.gold_dir) / "returns.parquet"
+    )
+    if not returns_path.exists():
+        print(f"Error: Returns file not found: {returns_path}")
+        print("Expected columns: [date, returns] or specify with --return-col")
+        return 1
+
+    try:
+        df = pl.read_parquet(returns_path)
+    except Exception as e:
+        print(f"Error reading returns file: {e}")
+        return 1
+
+    if args.return_col not in df.columns:
+        print(f"Error: Column '{args.return_col}' not found in returns file")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    returns = df[args.return_col].cast(pl.Float64)
+    n_obs = int(returns.drop_nulls().drop_nans().len())
+    if n_obs < 4:
+        print(f"Error: Need at least 4 finite returns, got {n_obs}")
+        return 1
+
+    summary = risk_summary(
+        returns, confidence_level=args.confidence, risk_free_rate=args.risk_free
+    )
+    result = {
+        "n_observations": n_obs,
+        "confidence": args.confidence,
+        **asdict(summary),
+        "modified_sharpe": modified_sharpe_ratio(
+            returns,
+            risk_free_rate=args.risk_free,
+            confidence_level=args.confidence,
+            periods_per_year=args.periods_per_year,
+        ),
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    pct = f"{args.confidence:.1%}"
+    print(f"\nCornish-Fisher tail risk ({pct}, {n_obs} obs)")
+    print("=" * 44)
+    print(f"{'':<14}{'VaR':>10}{'CVaR':>10}")
+    print(f"{'Parametric':<14}{summary.parametric_var:>10.4f}{summary.parametric_cvar:>10.4f}")
+    print(f"{'Cornish-Fisher':<14}{summary.cornish_fisher_var:>10.4f}{summary.cornish_fisher_cvar:>10.4f}")
+    print(f"{'Historical':<14}{summary.historical_var:>10.4f}{'-':>10}")
+    print(f"\nSkewness:       {summary.skewness:+.3f}")
+    print(f"Excess kurtosis: {summary.excess_kurtosis:+.3f}")
+    print(
+        f"Jarque-Bera p:   {summary.jarque_bera_pvalue:.4f} "
+        f"({'normal' if summary.is_normal else 'non-normal'})"
+    )
+    print(f"CF adjustment:   {summary.cf_adjustment_pct:+.1f}% vs parametric VaR")
+    print(f"Modified Sharpe: {result['modified_sharpe']:.3f}")
+    return 0
+
+
 # Maps the subcommand name registered in create_parser to its handler. Keep in
 # sync with create_parser; tests/unit/test_cli_dispatch.py enforces that.
 COMMANDS = {
@@ -7475,8 +7591,10 @@ COMMANDS = {
         "fracdiff": cmd_fracdiff,
         "comoments": cmd_comoments,
         "barriers": cmd_barriers,
+        "cfvar": cmd_cfvar,
 }
 
 
 if __name__ == "__main__":
     sys.exit(main())
+
