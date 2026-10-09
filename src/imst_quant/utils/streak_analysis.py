@@ -23,6 +23,7 @@ from typing import Optional
 
 import numpy as np
 import polars as pl
+from scipy.optimize import brentq
 
 
 @dataclass
@@ -229,11 +230,13 @@ def analyze_streaks(
     else:
         current_streak = 0
 
-    # Expected maximum streak (geometric distribution)
+    # Expected longest run (Schilling): longest win run ~ log_{1/p}(n q),
+    # longest loss run ~ log_{1/q}(n p).
     if win_rate > 0 and win_rate < 1:
-        expected_max_win = np.log(n * win_rate * (1 - win_rate)) / np.log(win_rate)
-        expected_max_loss = np.log(n * win_rate * (1 - win_rate)) / np.log(1 - win_rate)
-        expected_max = max(expected_max_win, expected_max_loss)
+        loss_rate = 1 - win_rate
+        expected_max_win = np.log(max(n * loss_rate, 1.0)) / -np.log(win_rate)
+        expected_max_loss = np.log(max(n * win_rate, 1.0)) / -np.log(loss_rate)
+        expected_max = max(expected_max_win, expected_max_loss, 1.0)
     else:
         expected_max = n
 
@@ -352,7 +355,9 @@ def calculate_gambler_ruin_prob(
 ) -> dict:
     """Estimate probability of ruin under geometric random walk.
 
-    Uses simplified model assuming symmetric position sizing.
+    Models each trade as +rr_ratio units with probability win_rate or -1 unit
+    otherwise and uses the Cramer-Lundberg estimate ruin = z**bankroll_units,
+    where z in (0, 1) solves p * z**-rr + q * z = 1 (exact (q/p)**B when rr=1).
 
     Args:
         win_rate: Probability of winning trade.
@@ -382,14 +387,16 @@ def calculate_gambler_ruin_prob(
     if edge <= 0:
         ruin_prob = 1.0  # Negative edge = certain ruin
     else:
-        # Approximate using exponential decay
-        q_over_p = (1 - win_rate) / win_rate
-        if rr_ratio == 1:
-            ruin_prob = (q_over_p ** bankroll_units)
-        else:
-            # Adjust for asymmetric payoffs
-            effective_units = bankroll_units * (1 + rr_ratio) / 2
-            ruin_prob = max(0, min(1, q_over_p ** effective_units))
+        # Positive edge means f(lam) = p e^{-lam rr} + q e^{lam} - 1 dips
+        # below zero after lam=0 and has exactly one positive root.
+        def f(lam: float) -> float:
+            return win_rate * np.exp(-lam * rr_ratio) + (1 - win_rate) * np.exp(lam) - 1
+
+        hi = 1.0
+        while f(hi) < 0:
+            hi *= 2
+        lam = brentq(f, 1e-12, hi)
+        ruin_prob = float(min(1.0, np.exp(-lam * bankroll_units)))
 
     return {
         "win_rate": win_rate,
