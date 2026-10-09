@@ -40,7 +40,8 @@ class GrangerResult:
         lag: Number of lags tested.
         f_statistic: F-test statistic comparing restricted vs unrestricted models.
         p_value: P-value for the F-test (lower = more significant).
-        is_significant: Whether the test is significant at the given level.
+        is_significant: Whether this single-lag test is significant at the given
+            level (uncorrected; family verdicts use _family_p_value).
         direction: String describing causality direction (e.g., "X -> Y").
     """
 
@@ -109,6 +110,19 @@ def _ols_sse(y: np.ndarray, X: np.ndarray) -> float:
         return float(sse)
     except (np.linalg.LinAlgError, ValueError):
         return float("inf")
+
+
+def _family_p_value(results: List[GrangerResult]) -> float:
+    """Bonferroni-adjusted p-value for "x causes y at some tested lag".
+
+    Declaring causality whenever any of max_lag per-lag tests is significant
+    inflates the false positive rate well above the nominal level (about 14%
+    at 5% for max_lag=10 on independent noise), so family-level verdicts use
+    the smallest per-lag p-value times the number of lags tested.
+    """
+    if not results:
+        return 1.0
+    return min(1.0, min(r.p_value for r in results) * len(results))
 
 
 def granger_causality_test(
@@ -233,7 +247,7 @@ def granger_causality_test(
                 f_stat = ((sse_restricted - sse_unrestricted) / q) / denominator
                 # P-value from F-distribution
                 try:
-                    p_value = 1.0 - stats.f.cdf(f_stat, q, n - k)
+                    p_value = stats.f.sf(f_stat, q, n - k)
                 except (ValueError, RuntimeWarning):
                     p_value = 1.0
 
@@ -299,9 +313,11 @@ def bidirectional_granger_test(
     # Test y -> x
     y_causes_x = granger_causality_test(y_renamed, x_renamed, max_lag, significance)
 
-    # Check for significant causality in each direction
-    x_to_y_significant = any(r.is_significant for r in x_causes_y)
-    y_to_x_significant = any(r.is_significant for r in y_causes_x)
+    # Check for significant causality in each direction (corrected across lags)
+    p_adj_x_to_y = _family_p_value(x_causes_y)
+    p_adj_y_to_x = _family_p_value(y_causes_x)
+    x_to_y_significant = p_adj_x_to_y < significance
+    y_to_x_significant = p_adj_y_to_x < significance
 
     # Feedback loop exists if both directions are significant
     feedback = x_to_y_significant and y_to_x_significant
@@ -338,6 +354,8 @@ def bidirectional_granger_test(
         "best_lag_y_to_x": best_y_to_x.lag if best_y_to_x else None,
         "min_p_x_to_y": best_x_to_y.p_value if best_x_to_y else 1.0,
         "min_p_y_to_x": best_y_to_x.p_value if best_y_to_x else 1.0,
+        "adjusted_p_x_to_y": p_adj_x_to_y,
+        "adjusted_p_y_to_x": p_adj_y_to_x,
     }
 
 
@@ -413,7 +431,7 @@ def pairwise_granger_matrix(
                 best_result = min(results, key=lambda r: r.p_value)
                 causality_matrix[col_x][col_y] = best_result.p_value
 
-                if best_result.is_significant:
+                if _family_p_value(results) < significance:
                     significant_pairs.append(
                         (col_x, col_y, best_result.lag, best_result.p_value)
                     )
@@ -480,8 +498,10 @@ def sentiment_price_causality(
     )
 
     # Analyze results
-    sentiment_causes_returns = any(r.is_significant for r in sent_to_ret)
-    returns_cause_sentiment = any(r.is_significant for r in ret_to_sent)
+    p_adj_sent_to_ret = _family_p_value(sent_to_ret)
+    p_adj_ret_to_sent = _family_p_value(ret_to_sent)
+    sentiment_causes_returns = p_adj_sent_to_ret < significance
+    returns_cause_sentiment = p_adj_ret_to_sent < significance
 
     # Find optimal lag for sentiment -> returns
     optimal_lag = None
@@ -489,7 +509,7 @@ def sentiment_price_causality(
 
     if sent_to_ret:
         best_sent_to_ret = min(sent_to_ret, key=lambda r: r.p_value)
-        if best_sent_to_ret.is_significant:
+        if sentiment_causes_returns:
             optimal_lag = best_sent_to_ret.lag
             strongest_f = best_sent_to_ret.f_statistic
 
@@ -548,6 +568,8 @@ def sentiment_price_causality(
         "sentiment_to_returns": sent_to_ret,
         "returns_to_sentiment": ret_to_sent,
         "strongest_f_statistic": float(strongest_f),
+        "adjusted_p_sentiment_to_returns": p_adj_sent_to_ret,
+        "adjusted_p_returns_to_sentiment": p_adj_ret_to_sent,
         "recommendation": recommendation,
     }
 
