@@ -93,16 +93,22 @@ def cusum_mean_shift(
     }
 
 
-def _max_dk(sq: np.ndarray) -> tuple:
-    """Return (k*, sqrt(T/2)*|D_k*|) for the centered cumsum-of-squares."""
+def _max_dk(sq: np.ndarray, min_segment: int = 1) -> tuple:
+    """Return (k*, sqrt(T/2)*|D_k*|) for the centered cumsum-of-squares.
+
+    The argmax is restricted to split points leaving at least
+    ``min_segment`` observations on each side, so a single outlier near
+    the segment edge can't mask a genuine interior break.
+    """
     total = sq.sum()
-    if total <= 0:
-        return 0, 0.0
     t = sq.size
+    lo, hi = min_segment - 1, t - min_segment  # idx range, hi exclusive
+    if total <= 0 or hi <= lo:
+        return 0, 0.0
     ck = np.cumsum(sq)
     k = np.arange(1, t + 1)
     dk = ck / total - k / t
-    idx = int(np.argmax(np.abs(dk[:-1]))) if t > 1 else 0
+    idx = lo + int(np.argmax(np.abs(dk[lo:hi])))
     stat = float(np.sqrt(t / 2.0) * abs(dk[idx]))
     return idx, stat
 
@@ -144,9 +150,9 @@ def icss_variance_breaks(
     def _scan(start: int, end: int) -> None:
         if end - start < 2 * min_segment:
             return
-        idx, stat = _max_dk(sq[start:end])
+        idx, stat = _max_dk(sq[start:end], min_segment)
         cp = start + idx + 1  # first index of the new regime
-        if stat > critical_value and min_segment <= cp - start and end - cp >= min_segment:
+        if stat > critical_value:
             breaks.append(cp)
             _scan(start, cp)
             _scan(cp, end)
