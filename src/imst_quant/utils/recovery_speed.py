@@ -181,11 +181,7 @@ def _classify_pattern(period: DrawdownPeriod, recovery_returns: pl.Series) -> Re
         if negative_count > recovery_returns.len() * 0.3:
             return RecoveryPattern.W_SHAPED
 
-    # U-shaped: Moderate recovery speed
-    if period.recovery_duration > period.duration_to_trough:
-        return RecoveryPattern.U_SHAPED
-
-    # L-shaped: Very slow recovery
+    # L-shaped: Very slow recovery (checked before U-shaped, which it implies)
     if period.recovery_duration > period.duration_to_trough * 2:
         return RecoveryPattern.L_SHAPED
 
@@ -211,7 +207,10 @@ def _calculate_milestone_times(
     trough_idx = period.trough_idx
     end_idx = period.end_idx
 
-    recovery_segment = returns[trough_idx : end_idx + 1]
+    # trough_value is wealth *after* the trough bar, so compound only the
+    # returns that follow it; counting the trough return again (a further
+    # loss) left most recoveries unable to ever reach their milestones.
+    recovery_segment = returns[trough_idx + 1 : end_idx + 1]
     cumulative_from_trough = (1 + recovery_segment).cum_prod()
 
     # Target values
@@ -225,7 +224,7 @@ def _calculate_milestone_times(
     time_90 = None
 
     cumulative_list = cumulative_from_trough.to_list()
-    for i, val in enumerate(cumulative_list):
+    for i, val in enumerate(cumulative_list, start=1):
         current_value = trough_value * val
 
         if time_50 is None and current_value >= target_50pct:
