@@ -53,6 +53,14 @@ def _extract_series(
     return returns
 
 
+def _to_array(
+    returns: Union[pl.Series, pl.DataFrame], return_col: str = "returns"
+) -> np.ndarray:
+    """Return finite float observations; nulls and NaN/inf would poison every moment."""
+    arr = _extract_series(returns, return_col).drop_nulls().to_numpy().astype(np.float64)
+    return arr[np.isfinite(arr)]
+
+
 def cornish_fisher_var(
     returns: Union[pl.Series, pl.DataFrame],
     confidence_level: float = 0.95,
@@ -83,8 +91,7 @@ def cornish_fisher_var(
         >>> var_95 = cornish_fisher_var(returns, confidence_level=0.95)
         >>> print(f"95% CF-VaR: {var_95:.4f}")
     """
-    ret = _extract_series(returns, return_col)
-    arr = ret.drop_nulls().to_numpy().astype(np.float64)
+    arr = _to_array(returns, return_col)
 
     if len(arr) < 4:
         return 0.0
@@ -136,8 +143,7 @@ def cornish_fisher_cvar(
         >>> returns = pl.Series([0.01, -0.03, 0.02, -0.05, 0.015])
         >>> cvar = cornish_fisher_cvar(returns, confidence_level=0.95)
     """
-    ret = _extract_series(returns, return_col)
-    arr = ret.drop_nulls().to_numpy().astype(np.float64)
+    arr = _to_array(returns, return_col)
 
     if len(arr) < 4:
         return 0.0
@@ -147,8 +153,9 @@ def cornish_fisher_cvar(
 
     tail_losses = arr[arr <= threshold]
     if len(tail_losses) == 0:
-        # If no observations beyond CF-VaR, fall back to worst observation
-        return float(-np.min(arr))
+        # No sample reaches the CF quantile; expected shortfall can never be
+        # below VaR, so the CF-VaR itself is the tightest defensible estimate.
+        return cf_var_val
 
     return float(-np.mean(tail_losses))
 
@@ -182,8 +189,7 @@ def modified_sharpe_ratio(
         >>> returns = pl.Series([0.01, -0.02, 0.015, -0.005, 0.02])
         >>> msr = modified_sharpe_ratio(returns, risk_free_rate=0.0001)
     """
-    ret = _extract_series(returns, return_col)
-    arr = ret.drop_nulls().to_numpy().astype(np.float64)
+    arr = _to_array(returns, return_col)
 
     if len(arr) < 4:
         return 0.0
@@ -226,8 +232,7 @@ def jarque_bera_test(
         >>> result = jarque_bera_test(returns)
         >>> print(f"Normal: {result['is_normal']}, p={result['pvalue']:.4f}")
     """
-    ret = _extract_series(returns, return_col)
-    arr = ret.drop_nulls().to_numpy().astype(np.float64)
+    arr = _to_array(returns, return_col)
 
     if len(arr) < 4:
         return {
@@ -276,8 +281,7 @@ def risk_summary(
         >>> summary = risk_summary(returns, confidence_level=0.99)
         >>> print(f"CF adjustment: {summary.cf_adjustment_pct:+.1f}%")
     """
-    ret = _extract_series(returns, return_col)
-    arr = ret.drop_nulls().to_numpy().astype(np.float64)
+    arr = _to_array(returns, return_col)
 
     if len(arr) < 4:
         return RiskComparison(
