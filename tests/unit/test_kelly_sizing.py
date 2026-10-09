@@ -59,18 +59,16 @@ class TestSizePosition:
         result = sizer.size_position(win_rate=0.9, avg_win=5.0, avg_loss=1.0)
         assert result["recommended_size"] <= 0.1
 
-    def test_tiny_fractional_kelly_clips_up_to_min_position(self):
-        # np.clip floors fractional_kelly at min_position, so a tiny
-        # fractional Kelly gets raised to min_position rather than zeroed.
+    def test_tiny_fractional_kelly_below_min_position_is_zeroed(self):
+        # min_position is the "don't trade below this" threshold, not a floor.
         sizer = KellySizer(kelly_fraction=0.01, max_position=0.25, min_position=0.05)
         result = sizer.size_position(win_rate=0.55, avg_win=1.1, avg_loss=1.0)
-        assert result["recommended_size"] == pytest.approx(0.05)
+        assert result["recommended_size"] == 0.0
 
-    def test_zero_kelly_input_becomes_zero(self):
-        # min_position=0 means clip floor is 0, so an invalid (zero) Kelly
-        # correctly results in a zero recommended size.
-        sizer = KellySizer(kelly_fraction=0.5, max_position=0.25, min_position=1e-9)
-        result = sizer.size_position(win_rate=0.0, avg_win=1.0, avg_loss=1.0)
+    def test_negative_expectancy_never_recommends_a_trade(self):
+        sizer = KellySizer()  # default min_position=0.01
+        result = sizer.size_position(win_rate=0.2, avg_win=1.0, avg_loss=1.0)
+        assert result["full_kelly"] == 0.0
         assert result["recommended_size"] == 0.0
 
     def test_expectancy_calculation(self):
@@ -141,6 +139,14 @@ class TestCalculateOptimalF:
         # largest_loss is abs(min(pnl)); a min pnl of exactly 0 triggers
         # the "no losses" guard regardless of the other values' signs.
         assert calculate_optimal_f(pd.DataFrame({"pnl": [0.0, 2.0, 3.0]})) == 0.0
+
+    def test_all_winning_trades_returns_zero(self):
+        # No losses means no loss scale; the biggest win must not stand in for it.
+        assert calculate_optimal_f(pd.DataFrame({"pnl": [1.0, 2.0, 3.0]})) == 0.0
+
+    def test_losing_strategy_returns_zero(self):
+        trades = pd.DataFrame({"pnl": [-2.0, -1.0, 0.5, -1.5]})
+        assert calculate_optimal_f(trades) == 0.0
 
     def test_returns_value_in_valid_range(self):
         trades = pd.DataFrame({"pnl": [10.0, -5.0, 8.0, -4.0, 12.0, -6.0, 3.0, -2.0]})

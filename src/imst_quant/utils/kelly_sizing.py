@@ -115,15 +115,12 @@ class KellySizer:
         fractional_kelly = full_kelly * self.kelly_fraction
 
         # Apply position constraints
-        recommended_size = np.clip(
-            fractional_kelly,
-            self.min_position,
-            self.max_position,
-        )
-
-        # If below minimum, set to 0 (don't trade)
-        if recommended_size < self.min_position:
+        # Below minimum (including zero Kelly from negative expectancy) means
+        # don't trade; check before clipping or the floor would force a trade.
+        if fractional_kelly < self.min_position:
             recommended_size = 0.0
+        else:
+            recommended_size = min(fractional_kelly, self.max_position)
 
         # Calculate expectancy
         expectancy = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
@@ -203,9 +200,9 @@ def calculate_optimal_f(trades: pd.DataFrame) -> float:
         return 0.0
 
     # Largest loss (used as normalization)
-    largest_loss = abs(trades["pnl"].min())
+    largest_loss = -trades["pnl"].min()
 
-    if largest_loss == 0:
+    if largest_loss <= 0:
         logger.warning("no_losses_in_trades")
         return 0.0
 
@@ -224,6 +221,9 @@ def calculate_optimal_f(trades: pd.DataFrame) -> float:
 
     # Find f that maximizes TWR
     optimal_idx = np.argmax(terminal_wealth)
+    if terminal_wealth[optimal_idx] <= 1.0:
+        # No fraction grows capital: the strategy loses money at any size.
+        return 0.0
     optimal_f = f_values[optimal_idx]
 
     return float(optimal_f)
