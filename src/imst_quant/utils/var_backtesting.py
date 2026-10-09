@@ -36,6 +36,39 @@ def compute_violations(
     return returns_arr < -np.abs(var_arr)
 
 
+def rolling_historical_var(
+    returns: ArrayLike,
+    window: int = 250,
+    confidence_level: float = 0.95,
+) -> np.ndarray:
+    """Out-of-sample historical VaR forecasts for backtesting.
+
+    The forecast for period t uses only returns[t - window : t], so the
+    realized return being tested never informs its own forecast. A single
+    full-sample VaR breaches at the target rate by construction and makes
+    the coverage tests vacuous.
+
+    Args:
+        returns: Realized returns for each period.
+        window: Trailing estimation window.
+        confidence_level: VaR confidence level (e.g. 0.95).
+
+    Returns:
+        Array of positive VaR forecasts, NaN for the first ``window``
+        periods and wherever the window holds no finite returns.
+    """
+    r = np.asarray(returns, dtype=float)
+    if window < 2:
+        raise ValueError("window must be at least 2")
+    out = np.full(r.shape, np.nan)
+    for t in range(window, len(r)):
+        hist = r[t - window : t]
+        hist = hist[np.isfinite(hist)]
+        if hist.size:
+            out[t] = -np.quantile(hist, 1 - confidence_level)
+    return out
+
+
 def kupiec_pof_test(
     violations: ArrayLike,
     confidence_level: float = 0.95,
@@ -194,13 +227,22 @@ def var_backtest_summary(
         Dict with violation series stats and the Kupiec, independence, and
         conditional coverage test results. Includes a plain-language
         ``model_adequate`` verdict (True if no test rejects the null).
+        Periods where either input is NaN/inf are dropped.
     """
-    violations = compute_violations(returns, var_forecasts)
+    returns_arr = np.asarray(returns, dtype=float)
+    var_arr = np.asarray(var_forecasts, dtype=float)
+    if returns_arr.shape != var_arr.shape:
+        raise ValueError("returns and var_forecasts must have the same shape")
+    # NaN compares False, so unfiltered warmup/missing bars would count as
+    # clean non-violations and bias the coverage tests toward acceptance.
+    mask = np.isfinite(returns_arr) & np.isfinite(var_arr)
+    violations = compute_violations(returns_arr[mask], var_arr[mask])
     conditional = christoffersen_conditional_coverage_test(violations, confidence_level)
 
     model_adequate = not (
         conditional["unconditional_coverage"]["reject_null"]
         or conditional["independence"]["reject_null"]
+        or conditional["reject_null"]
     )
 
     return {

@@ -794,8 +794,14 @@ Examples:
     var_backtest_parser.add_argument(
         "--var-col",
         default=None,
-        help="Column with per-period VaR forecasts. If omitted, a constant "
-        "historical VaR over the full sample is used.",
+        help="Column with per-period VaR forecasts. If omitted, an "
+        "out-of-sample rolling historical VaR is used (see --window).",
+    )
+    var_backtest_parser.add_argument(
+        "--window",
+        type=int,
+        default=250,
+        help="Trailing window for the default rolling historical VaR (default: 250)",
     )
     var_backtest_parser.add_argument(
         "--var-confidence", type=float, default=0.95, help="VaR confidence level (default: 0.95)"
@@ -4691,11 +4697,12 @@ def cmd_var_backtest(args: argparse.Namespace) -> int:
         Exit code (0 for success)
     """
     from imst_quant.config.settings import Settings
-    from imst_quant.utils.var_backtesting import var_backtest_summary
-    from imst_quant.utils.var_calculator import VaRCalculator
+    from imst_quant.utils.var_backtesting import (
+        rolling_historical_var,
+        var_backtest_summary,
+    )
     import polars as pl
     import json as json_module
-    import numpy as np
 
     settings = Settings()
 
@@ -4730,12 +4737,9 @@ def cmd_var_backtest(args: argparse.Namespace) -> int:
                 return 1
             var_forecasts = df[args.var_col].to_numpy()
         else:
-            calc = VaRCalculator(
-                pl.Series(returns).to_pandas(),
-                confidence_level=args.var_confidence,
-                method="historical",
+            var_forecasts = rolling_historical_var(
+                returns, window=args.window, confidence_level=args.var_confidence
             )
-            var_forecasts = np.full(len(returns), calc.calculate_var())
 
         summary = var_backtest_summary(
             returns, var_forecasts, confidence_level=args.var_confidence
