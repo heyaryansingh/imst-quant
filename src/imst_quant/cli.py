@@ -1661,6 +1661,32 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- decay subcommand ---
+    decay_parser = subparsers.add_parser(
+        "decay",
+        help="Signal IC decay across horizons, half-life and staleness check",
+    )
+    decay_parser.add_argument(
+        "--data", required=True, help="Path to parquet file with signal and returns columns"
+    )
+    decay_parser.add_argument(
+        "--signal-col", default="signal", help="Signal column name (default: signal)"
+    )
+    decay_parser.add_argument(
+        "--returns-col", default="returns", help="Returns column name (default: returns)"
+    )
+    decay_parser.add_argument(
+        "--horizons", default="1,2,5,10,20",
+        help="Comma-separated forward horizons in bars (default: 1,2,5,10,20)",
+    )
+    decay_parser.add_argument(
+        "--window", type=int, default=60,
+        help="Rolling IC / staleness window in bars (default: 60)",
+    )
+    decay_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -7534,6 +7560,85 @@ def cmd_cfvar(args: argparse.Namespace) -> int:
     print(f"Modified Sharpe: {result['modified_sharpe']:.3f}")
     return 0
 
+def cmd_decay(args: argparse.Namespace) -> int:
+    """Report how a signal's rank IC decays with horizon and whether it is stale.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+    from dataclasses import asdict
+
+    import polars as pl
+
+    from imst_quant.utils.signal_decay import decay_report
+
+    try:
+        horizons = sorted({int(h) for h in args.horizons.split(",") if h.strip()})
+    except ValueError:
+        print(f"Error: --horizons must be comma-separated integers, got {args.horizons!r}")
+        return 1
+    if not horizons or horizons[0] < 1:
+        print("Error: --horizons must contain positive integers")
+        return 1
+    if args.window < 10:
+        print(f"Error: --window must be at least 10, got {args.window}")
+        return 1
+
+    data_path = Path(args.data)
+    if not data_path.exists():
+        print(f"Error: Data file not found: {data_path}")
+        return 1
+    try:
+        df = pl.read_parquet(data_path)
+    except Exception as e:
+        print(f"Error reading data file: {e}")
+        return 1
+
+    missing = [c for c in (args.signal_col, args.returns_col) if c not in df.columns]
+    if missing:
+        print(f"Error: Missing columns {missing}")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    if df.height < args.window + 10:
+        print(f"Error: Need at least {args.window + 10} rows for --window {args.window}, got {df.height}")
+        return 1
+
+    report = decay_report(
+        df[args.signal_col], df[args.returns_col], horizons=horizons, window=args.window
+    )
+    curve, staleness = report["decay_curve"], report["staleness"]
+
+    if args.json:
+        payload = {
+            "n_observations": df.height,
+            "decay_curve": asdict(curve),
+            "staleness": asdict(staleness),
+            "rolling_ic_summary": report["rolling_ic_summary"],
+            "recommendation": report["recommendation"],
+        }
+        print(json_module.dumps(payload, indent=2))
+        return 0
+
+    print(f"\nSignal decay ({df.height} obs)")
+    print("=" * 40)
+    print(f"{'Horizon':>8}{'IC':>10}{'p-value':>10}  sig")
+    for h, ic, p, sig in zip(
+        curve.horizons, curve.ic_values, curve.ic_pvalues, curve.is_significant_at
+    ):
+        print(f"{h:>8}{ic:>10.4f}{p:>10.4f}  {'*' if sig else ''}")
+    half_life = f"{curve.half_life:.1f} bars" if curve.half_life is not None else "n/a"
+    print(f"\nHalf-life:       {half_life}")
+    print(f"Current IC:      {staleness.current_ic:+.4f} (z={staleness.ic_zscore:+.2f})")
+    print(f"Hit rate:        {staleness.recent_hit_rate:.1%}")
+    print(f"Stale:           {'yes' if staleness.is_stale else 'no'}")
+    print(f"\n{report['recommendation']}")
+    return 0
+
 
 # Maps the subcommand name registered in create_parser to its handler. Keep in
 # sync with create_parser; tests/unit/test_cli_dispatch.py enforces that.
@@ -7592,6 +7697,7 @@ COMMANDS = {
         "comoments": cmd_comoments,
         "barriers": cmd_barriers,
         "cfvar": cmd_cfvar,
+        "decay": cmd_decay,
 }
 
 
