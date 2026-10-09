@@ -219,8 +219,8 @@ class TestSignalDecay:
         np.random.seed(42)
         n = 300
         signal = np.random.choice([-1, 1], size=n).astype(float)
-        # Returns partially follow the signal
-        returns = signal * 0.01 + np.random.randn(n) * 0.005
+        # Next bar's return partially follows the signal
+        returns = np.roll(signal, 1) * 0.01 + np.random.randn(n) * 0.005
         return pl.Series("signal", signal.tolist()), pl.Series("returns", returns.tolist())
 
     @pytest.fixture

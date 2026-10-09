@@ -56,7 +56,9 @@ class StalenessResult:
 def _to_numpy(series: Union[pl.Series, np.ndarray]) -> np.ndarray:
     """Convert to numpy array."""
     if isinstance(series, pl.Series):
-        return series.drop_nulls().to_numpy().astype(np.float64)
+        # Nulls become NaN in place: dropping them would shift one series
+        # against the other and pair each signal with the wrong return.
+        return series.cast(pl.Float64).to_numpy().astype(np.float64)
     return np.asarray(series, dtype=np.float64)
 
 
@@ -113,7 +115,7 @@ def measure_signal_decay(
             for i in range(n)
         ])
 
-        valid = ~np.isnan(fwd_returns)
+        valid = np.isfinite(fwd_returns) & np.isfinite(sig)
         if np.sum(valid) < 10:
             ic_values.append(0.0)
             ic_pvalues.append(1.0)
@@ -237,7 +239,7 @@ def rolling_signal_ic(
         s_win = sig[start:end]
         r_win = fwd_ret[start:end]
 
-        valid = ~np.isnan(r_win)
+        valid = np.isfinite(r_win) & np.isfinite(s_win)
         if np.sum(valid) < 10:
             indices.append(end)
             ics.append(0.0)
@@ -358,9 +360,12 @@ def detect_signal_staleness(
             break
 
     # Hit rate: fraction of correct direction predictions
-    recent_sig = sig[n - recent_window : n]
+    # Pair each signal with the next bar's return, the same alignment the IC
+    # uses; flat signals or returns are neither hits nor misses.
+    recent_sig = sig[n - recent_window - 1 : n - 1]
     recent_ret = ret[n - recent_window : n]
-    valid_mask = recent_sig != 0
+    valid_mask = (recent_sig != 0) & (recent_ret != 0)
+    valid_mask &= np.isfinite(recent_sig) & np.isfinite(recent_ret)
     if np.sum(valid_mask) > 0:
         hits = np.sum(np.sign(recent_sig[valid_mask]) == np.sign(recent_ret[valid_mask]))
         hit_rate = float(hits / np.sum(valid_mask))
