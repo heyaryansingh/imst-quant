@@ -1035,6 +1035,11 @@ Examples:
         help="Quantile threshold for flagging turbulent periods (default: 0.9)",
     )
     turbulence_parser.add_argument(
+        "--ar-window",
+        type=int,
+        help="Also report a rolling absorption ratio over this window and its trend",
+    )
+    turbulence_parser.add_argument(
         "--json", action="store_true", help="Output results as JSON"
     )
 
@@ -5148,6 +5153,7 @@ def cmd_turbulence(args: argparse.Namespace) -> int:
     """
     from imst_quant.utils.turbulence_index import (
         absorption_ratio,
+        rolling_absorption_ratio,
         turbulence_index,
         turbulence_regimes,
     )
@@ -5178,6 +5184,11 @@ def cmd_turbulence(args: argparse.Namespace) -> int:
         turb = turbulence_index(matrix, lookback=args.lookback)
         regimes = turbulence_regimes(turb["turbulence"], quantile=args.quantile)
         absorption = absorption_ratio(matrix)
+        rolling = (
+            rolling_absorption_ratio(matrix, window=args.ar_window)
+            if args.ar_window
+            else None
+        )
 
         if args.json:
             payload = {
@@ -5188,6 +5199,10 @@ def cmd_turbulence(args: argparse.Namespace) -> int:
                     k: v for k, v in absorption.items() if k != "eigenvalue_share"
                 },
             }
+            if rolling:
+                payload["rolling_absorption"] = {
+                    k: v for k, v in rolling.items() if k != "absorption_ratios"
+                }
             print(json_module.dumps(payload, indent=2, default=float))
         else:
             print("\n=== Market Turbulence ===\n")
@@ -5198,6 +5213,8 @@ def cmd_turbulence(args: argparse.Namespace) -> int:
             print(f"Turbulent periods:     {regimes['n_turbulent']:>10} ({regimes['pct_turbulent']:.1%})")
             print(f"Currently turbulent:   {'YES' if regimes['currently_turbulent'] else 'no':>10}")
             print(f"Absorption ratio:      {absorption['absorption_ratio']:>10.3f}  (top {absorption['n_components']} of {absorption['n_assets']} components)")
+            if rolling:
+                print(f"Rolling AR ({rolling['window']}):      {rolling['current_ratio']:>10.3f}  trend: {rolling['trend']}")
             print()
 
     except Exception as e:
