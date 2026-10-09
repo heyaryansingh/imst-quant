@@ -12,7 +12,7 @@ ratio exceeds that benchmark.
 
 import numpy as np
 from scipy import stats
-from typing import Any, Dict, Sequence, Union
+from typing import Any, Dict, Optional, Sequence, Union
 
 ArrayLike = Union[Sequence[float], np.ndarray]
 
@@ -179,23 +179,34 @@ def deflated_sharpe_ratio_from_returns(
     returns: ArrayLike,
     n_trials: int,
     periods_per_year: int = 1,
+    sharpe_variance: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Convenience wrapper computing DSR directly from a return series.
 
+    The PSR/DSR probability is always computed on the per-period Sharpe
+    ratio: the Mertens standard error is only valid in the units the
+    returns were sampled in, so feeding it an annualized Sharpe ratio
+    overstates confidence by roughly sqrt(periods_per_year).
+
     Args:
-        returns: Array of periodic returns.
+        returns: Array of periodic returns. NaN/inf values are dropped.
         n_trials: Number of independent strategy variants tried.
-        periods_per_year: If greater than 1, annualizes the Sharpe ratio
-            before computing DSR (also scales sharpe_variance accordingly).
+        periods_per_year: If greater than 1, the reported ``sharpe_ratio``,
+            ``expected_max_sharpe`` and ``sharpe_stderr`` are annualized.
+            The DSR probability itself is unit-free and unaffected.
+        sharpe_variance: Variance of the per-period Sharpe ratios across
+            trials. Defaults to the sampling variance of a zero-skill
+            Sharpe estimate, 1 / (n - 1).
 
     Returns:
         Same dictionary as deflated_sharpe_ratio, plus:
             - sharpe_ratio: The (possibly annualized) Sharpe ratio used.
 
     Raises:
-        ValueError: If fewer than 2 return observations are provided.
+        ValueError: If fewer than 2 finite return observations are provided.
     """
     returns_arr = np.asarray(returns, dtype=float)
+    returns_arr = returns_arr[np.isfinite(returns_arr)]
     if returns_arr.size < 2:
         raise ValueError("returns must contain at least 2 observations")
 
@@ -205,16 +216,20 @@ def deflated_sharpe_ratio_from_returns(
     skewness = float(stats.skew(returns_arr))
     kurtosis = float(stats.kurtosis(returns_arr, fisher=False))
 
-    annualization = np.sqrt(periods_per_year)
-    annualized_sharpe = sharpe * annualization
+    if sharpe_variance is None:
+        sharpe_variance = 1.0 / (returns_arr.size - 1)
 
     result = deflated_sharpe_ratio(
-        sharpe_ratio=annualized_sharpe,
+        sharpe_ratio=sharpe,
         n_observations=returns_arr.size,
         n_trials=n_trials,
         skewness=skewness,
         kurtosis=kurtosis,
-        sharpe_variance=annualization**2,
+        sharpe_variance=sharpe_variance,
     )
-    result["sharpe_ratio"] = annualized_sharpe
+
+    annualization = float(np.sqrt(periods_per_year))
+    result["sharpe_ratio"] = sharpe * annualization
+    result["expected_max_sharpe"] *= annualization
+    result["sharpe_stderr"] *= annualization
     return result
