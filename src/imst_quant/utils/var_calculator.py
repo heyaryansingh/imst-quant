@@ -28,6 +28,10 @@ class VaRCalculator:
             confidence_level: Confidence level for VaR (default: 0.95 for 95%)
             method: VaR calculation method
         """
+        if not 0 < confidence_level < 1:
+            raise ValueError(
+                f"confidence_level must be a fraction in (0, 1), got {confidence_level}"
+            )
         self.returns = returns
         self.confidence_level = confidence_level
         self.method = method
