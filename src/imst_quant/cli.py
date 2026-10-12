@@ -2864,8 +2864,9 @@ def cmd_montecarlo(args: argparse.Namespace) -> int:
         print("Error: Insufficient data for Monte Carlo simulation (need at least 30 observations)")
         return 1
 
-    print(f"Running {args.simulations:,} Monte Carlo simulations...")
-    print(f"Method: {args.method}, Horizon: {args.horizon} days, Confidence: {args.confidence:.0%}")
+    if not args.json:
+        print(f"Running {args.simulations:,} Monte Carlo simulations...")
+        print(f"Method: {args.method}, Horizon: {args.horizon} days, Confidence: {args.confidence:.0%}")
 
     simulator = MonteCarloSimulator(
         returns,
@@ -2880,8 +2881,14 @@ def cmd_montecarlo(args: argparse.Namespace) -> int:
     else:  # gbm
         result = simulator.run_gbm_simulation(horizon=args.horizon)
 
-    var = simulator.var_simulation(confidence=args.confidence)
-    es = simulator.expected_shortfall(confidence=args.confidence)
+    # Re-simulate at the requested horizon; the util only knows historical/parametric
+    var_method = "historical" if args.method == "historical" else "parametric"
+    var = simulator.var_simulation(
+        confidence=args.confidence, horizon=args.horizon, method=var_method
+    )
+    es = simulator.expected_shortfall_simulation(
+        confidence=args.confidence, horizon=args.horizon, method=var_method
+    )
 
     if args.json:
         output = {
@@ -3378,6 +3385,22 @@ def cmd_seasonality(args: argparse.Namespace) -> int:
             print(json_module.dumps(output, indent=2))
         else:
             print(generate_seasonality_report(df, date_col))
+    elif args.json:
+        if args.type in ("dow", "monthly"):
+            analyze = (
+                analyze_day_of_week_effect if args.type == "dow" else analyze_monthly_seasonality
+            )
+            result = analyze(df, date_col)
+            output = {
+                "best": str(result.best_period),
+                "worst": str(result.worst_period),
+                "spread": result.spread,
+                "significant": result.is_significant,
+            }
+        else:
+            analyze = analyze_turn_of_month_effect if args.type == "tom" else analyze_holiday_effect
+            output = analyze(df, date_col)
+        print(json_module.dumps(output, indent=2))
     else:
         if args.type == "dow":
             result = analyze_day_of_week_effect(df, date_col)
@@ -4310,8 +4333,8 @@ def cmd_distribution(args: argparse.Namespace) -> int:
         output["normality_tests"] = {
             "jarque_bera": {"statistic": normality.jarque_bera[0], "pvalue": normality.jarque_bera[1]},
             "kolmogorov_smirnov": {"statistic": normality.kolmogorov_smirnov[0], "pvalue": normality.kolmogorov_smirnov[1]},
-            "is_normal_5pct": normality.is_normal_5pct,
-            "is_normal_1pct": normality.is_normal_1pct,
+            "is_normal_5pct": bool(normality.is_normal_5pct),
+            "is_normal_1pct": bool(normality.is_normal_1pct),
         }
         if normality.shapiro_wilk:
             output["normality_tests"]["shapiro_wilk"] = {"statistic": normality.shapiro_wilk[0], "pvalue": normality.shapiro_wilk[1]}
@@ -5395,7 +5418,7 @@ def cmd_quality_check(args: argparse.Namespace) -> int:
         Exit code (0 for success)
     """
     from imst_quant.config.settings import Settings
-    from imst_quant.utils.data_quality import check_data_quality
+    from imst_quant.utils.data_quality import generate_quality_report
     import polars as pl
     import json as json_module
     from datetime import datetime
@@ -5430,32 +5453,34 @@ def cmd_quality_check(args: argparse.Namespace) -> int:
         print(f"No files found matching pattern: {pattern}")
         return 1
 
-    print(f"\n=== Data Quality Check: {args.layer.upper()} Layer ===\n")
-    print(f"Checking {len(files)} file(s)...\n")
+    if not args.json:
+        print(f"\n=== Data Quality Check: {args.layer.upper()} Layer ===\n")
+        print(f"Checking {len(files)} file(s)...\n")
 
     issues_found = []
 
     for file in files:
         try:
             df = pl.read_parquet(file)
-            result = check_data_quality(df)
+            report = generate_quality_report(df)
+            issues = [i["message"] for i in report["issues"]]
+            is_valid = report["summary"]["errors"] == 0
 
-            if not result["is_valid"]:
+            if not is_valid:
                 issues_found.append({
                     "file": file.name,
-                    "issues": result["issues"],
+                    "issues": issues,
                 })
 
             if args.json:
                 continue
 
             # Print results
-            status = "✓" if result["is_valid"] else "✗"
+            status = "✓" if is_valid else "✗"
             print(f"{status} {file.name}")
 
-            if result["issues"]:
-                for issue in result["issues"]:
-                    print(f"  ⚠️  {issue}")
+            for issue in issues:
+                print(f"  ⚠️  {issue}")
 
         except Exception as e:
             print(f"✗ {file.name}: Error reading file - {e}")
