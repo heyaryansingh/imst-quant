@@ -19,3 +19,13 @@ def test_slow_recovery_is_l_shaped():
     r = pl.Series([0.0, -0.1] + [0.012] * 9 + [0.0])
     (m,) = calculate_recovery_rate(r)
     assert m.pattern == RecoveryPattern.L_SHAPED
+
+
+def test_open_drawdown_counts_as_incomplete():
+    from imst_quant.utils.recovery_speed import classify_recovery_pattern, recovery_efficiency_score
+
+    recovered = pl.Series([0.05, -0.10, 0.12, 0.01])
+    underwater = pl.Series([0.05, -0.10, 0.12, 0.01, -0.20, 0.01])
+    assert classify_recovery_pattern(recovered)["Incomplete"] == 0
+    assert classify_recovery_pattern(underwater)["Incomplete"] == 1
+    assert recovery_efficiency_score(underwater) < recovery_efficiency_score(recovered)

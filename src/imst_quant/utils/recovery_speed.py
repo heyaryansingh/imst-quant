@@ -323,6 +323,11 @@ def classify_recovery_pattern(
     for m in metrics:
         pattern_counts[m.pattern] += 1
 
+    # calculate_recovery_rate only covers recovered drawdowns, so count the
+    # still-open ones here or the Incomplete bucket can never be non-zero.
+    periods = identify_drawdown_periods(returns, return_col=return_col, min_drawdown=0.01)
+    pattern_counts[RecoveryPattern.INCOMPLETE] = sum(1 for p in periods if not p.is_recovered)
+
     return {k.value: v for k, v in pattern_counts.items()}
 
 
