@@ -1723,6 +1723,34 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- consistency subcommand ---
+    consistency_parser = subparsers.add_parser(
+        "consistency",
+        help="Signal persistence, flip rate, consistency score and degradation events",
+    )
+    consistency_parser.add_argument(
+        "--data", required=True, help="Path to parquet file with a signal column"
+    )
+    consistency_parser.add_argument(
+        "--signal-col", default="signal", help="Signal column name (default: signal)"
+    )
+    consistency_parser.add_argument(
+        "--returns-col", default=None,
+        help="Optional returns column; degradation then tracks signal/return correlation "
+        "instead of flip rate",
+    )
+    consistency_parser.add_argument(
+        "--strength-col", default=None,
+        help="Optional signal strength/confidence column folded into the score",
+    )
+    consistency_parser.add_argument(
+        "--window", type=int, default=50,
+        help="Degradation window in bars (default: 50)",
+    )
+    consistency_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -7760,6 +7788,99 @@ def cmd_leadlag(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_consistency(args: argparse.Namespace) -> int:
+    """Report how stable a trading signal is and whether its quality is degrading.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+    from dataclasses import asdict
+
+    import polars as pl
+
+    from imst_quant.utils.signal_consistency import (
+        analyze_signal_flip_rate,
+        calculate_signal_persistence,
+        detect_signal_degradation,
+        signal_consistency_score,
+    )
+
+    if args.window < 2:
+        print(f"Error: --window must be at least 2, got {args.window}")
+        return 1
+
+    data_path = Path(args.data)
+    if not data_path.exists():
+        print(f"Error: Data file not found: {data_path}")
+        return 1
+    try:
+        df = pl.read_parquet(data_path)
+    except Exception as e:
+        print(f"Error reading data file: {e}")
+        return 1
+
+    wanted = [c for c in (args.signal_col, args.returns_col, args.strength_col) if c]
+    missing = [c for c in wanted if c not in df.columns]
+    if missing:
+        print(f"Error: Missing columns {missing}")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    df = df.select(wanted).drop_nulls()
+    if df.height < 2:
+        print(f"Error: Need at least 2 non-null rows, got {df.height}")
+        return 1
+
+    signals = df[args.signal_col]
+    strengths = df[args.strength_col] if args.strength_col else None
+    returns = df[args.returns_col] if args.returns_col else None
+
+    persistence = calculate_signal_persistence(signals)
+    flips = analyze_signal_flip_rate(signals)
+    score = signal_consistency_score(signals, signal_strengths=strengths)
+    # Degradation needs the current window plus three lookback windows.
+    degradation = (
+        detect_signal_degradation(signals, returns=returns, window_size=args.window)
+        if df.height >= 4 * args.window
+        else []
+    )
+
+    if args.json:
+        payload = {
+            "n_observations": df.height,
+            "consistency_score": score,
+            "persistence": asdict(persistence),
+            "flip_rate": flips,
+            "degradation_events": degradation,
+        }
+        print(json_module.dumps(payload, indent=2))
+        return 0
+
+    print(f"\nSignal consistency ({df.height} obs)")
+    print("=" * 40)
+    print(f"Consistency score: {score:.3f}")
+    print(f"Avg run length:    {persistence.avg_run_length:.1f} bars")
+    print(f"Max run length:    {persistence.max_run_length} bars")
+    print(f"Flip rate:         {flips['overall_flip_rate']:.1%}")
+    print(f"Worst window flip: {flips['max_flip_rate_period']:.1%}")
+    if df.height < 4 * args.window:
+        print(f"\nDegradation: skipped (need {4 * args.window} rows for --window {args.window})")
+    elif not degradation:
+        print("\nDegradation: none detected")
+    else:
+        print(f"\nDegradation events ({len(degradation)}):")
+        for e in degradation:
+            print(
+                f"  bar {e['period_start']:>6}: quality {e['quality_before']:.3f} -> "
+                f"{e['quality_current']:.3f} ({e['degradation_pct']:.0%} drop)"
+            )
+    return 0
+
+
 # Maps the subcommand name registered in create_parser to its handler. Keep in
 # sync with create_parser; tests/unit/test_cli_dispatch.py enforces that.
 COMMANDS = {
@@ -7819,6 +7940,7 @@ COMMANDS = {
         "cfvar": cmd_cfvar,
         "decay": cmd_decay,
         "leadlag": cmd_leadlag,
+        "consistency": cmd_consistency,
 }
 
 
