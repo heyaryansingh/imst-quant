@@ -93,6 +93,11 @@ def calculate_hedge_ratio(
         >>> x = pd.Series([50, 51, 50.5, 51.5, 52])
         >>> beta, alpha = calculate_hedge_ratio(y, x)
     """
+    # Align on index and drop NaNs so a single gap doesn't poison the fit
+    y, x = y.align(x, join="inner")
+    valid = y.notna() & x.notna()
+    y, x = y[valid], x[valid]
+
     if method == "ols":
         # Ordinary Least Squares: y = alpha + beta * x
         x_vals = x.values
