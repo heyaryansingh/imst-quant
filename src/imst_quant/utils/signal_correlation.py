@@ -67,7 +67,8 @@ def calculate_signal_correlation_matrix(
                 else:
                     raise ValueError(f"Unknown method: {method}")
 
-                corr_matrix[i, j] = corr if corr is not None else 0.0
+                # Constant signals give NaN; treat them as uncorrelated.
+                corr_matrix[i, j] = 0.0 if corr is None or np.isnan(corr) else corr
 
     # Create DataFrame with signal names as columns
     result = {}
@@ -145,34 +146,15 @@ def calculate_signal_to_returns_correlation(
         ...     data, "signal", "returns", lag=1
         ... )
     """
-    if lag > 0:
-        # Shift returns backward (to align with past signals)
-        df_aligned = df.with_columns([
-            pl.col(returns_col).shift(-lag).alias("shifted_returns")
-        ])
-        returns_to_use = "shifted_returns"
-    elif lag < 0:
-        # Shift signals forward
-        df_aligned = df.with_columns([
-            pl.col(signal_col).shift(-lag).alias("shifted_signal")
-        ])
-        signal_to_use = "shifted_signal"
-        returns_to_use = returns_col
-    else:
-        df_aligned = df
-        signal_to_use = signal_col
-        returns_to_use = returns_col
+    # Pair signal_t with returns_{t+lag}; a negative lag looks at past returns.
+    df_aligned = df.select([
+        pl.col(signal_col).alias("s"),
+        pl.col(returns_col).shift(-lag).alias("r"),
+    ]).drop_nulls()
 
-    # Drop nulls from shifting
-    df_aligned = df_aligned.drop_nulls([signal_to_use if lag < 0 else signal_col,
-                                        returns_to_use if lag >= 0 else returns_col])
+    corr = df_aligned.select(pl.corr("s", "r")).item()
 
-    corr = df_aligned.select([
-        pl.corr(signal_col if lag >= 0 else signal_to_use,
-                returns_to_use if lag >= 0 else returns_col).alias("correlation")
-    ])["correlation"][0]
-
-    return float(corr) if corr is not None else 0.0
+    return float(corr) if corr is not None and not np.isnan(corr) else 0.0
 
 
 def analyze_signal_lead_lag(
