@@ -105,14 +105,12 @@ def calculate_rolling_sortino(
 
     rolling_mean = excess_returns.rolling(window).mean()
 
-    # Downside deviation
-    def downside_std(x):
-        downside = x[x < 0]
-        if len(downside) < 2:
-            return np.nan
-        return np.std(downside)
-
-    rolling_downside_std = excess_returns.rolling(window).apply(downside_std, raw=False)
+    # Downside deviation: RMS shortfall over the whole window, not the std of
+    # the losing bars (which is 0 for a strategy that loses the same each bar).
+    # Windows with no losses have zero downside and yield NaN rather than inf.
+    rolling_downside_std = np.sqrt(
+        excess_returns.clip(upper=0).pow(2).rolling(window).mean()
+    ).replace(0.0, np.nan)
 
     rolling_sortino = (rolling_mean / rolling_downside_std) * np.sqrt(annualization_factor)
 
