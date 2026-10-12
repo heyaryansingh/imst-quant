@@ -1751,6 +1751,21 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- recovery subcommand ---
+    recovery_parser = subparsers.add_parser(
+        "recovery",
+        help="Per-drawdown recovery speed, shape (V/U/L/W) and efficiency score",
+    )
+    recovery_parser.add_argument(
+        "--data", required=True, help="Path to parquet file with a returns column"
+    )
+    recovery_parser.add_argument(
+        "--returns-col", default="returns", help="Returns column name (default: returns)"
+    )
+    recovery_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -7881,6 +7896,99 @@ def cmd_consistency(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_recovery(args: argparse.Namespace) -> int:
+    """Report how fast and in what shape a strategy recovers from drawdowns.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.utils.recovery_speed import (
+        analyze_recovery_velocity,
+        calculate_recovery_rate,
+        classify_recovery_pattern,
+        recovery_efficiency_score,
+    )
+
+    data_path = Path(args.data)
+    if not data_path.exists():
+        print(f"Error: Data file not found: {data_path}")
+        return 1
+    try:
+        df = pl.read_parquet(data_path)
+    except Exception as e:
+        print(f"Error reading data file: {e}")
+        return 1
+
+    if args.returns_col not in df.columns:
+        print(f"Error: Missing columns {[args.returns_col]}")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    returns = df[args.returns_col].drop_nulls()
+    if returns.len() < 2:
+        print(f"Error: Need at least 2 non-null returns, got {returns.len()}")
+        return 1
+
+    recoveries = calculate_recovery_rate(returns)
+    patterns = classify_recovery_pattern(returns)
+    velocity = analyze_recovery_velocity(returns)
+    score = recovery_efficiency_score(returns)
+
+    if args.json:
+        payload = {
+            "n_observations": returns.len(),
+            "efficiency_score": score,
+            "patterns": patterns,
+            "velocity": velocity,
+            "recoveries": [
+                {
+                    "start_idx": m.period.start_idx,
+                    "trough_idx": m.period.trough_idx,
+                    "end_idx": m.period.end_idx,
+                    "max_drawdown": m.period.max_drawdown,
+                    "recovery_duration": m.period.recovery_duration,
+                    "recovery_rate": m.recovery_rate,
+                    "pattern": m.pattern.value,
+                    "time_to_50pct": m.time_to_50pct,
+                    "time_to_90pct": m.time_to_90pct,
+                }
+                for m in recoveries
+            ],
+        }
+        print(json_module.dumps(payload, indent=2))
+        return 0
+
+    print()
+    print(f"Drawdown recovery ({returns.len()} obs)")
+    print("=" * 60)
+    if recoveries:
+        print(f"{'Trough':>7}{'Depth':>9}{'Bars':>6}{'50%':>6}{'90%':>6}  Shape")
+        for m in recoveries:
+            t50 = "-" if m.time_to_50pct is None else str(m.time_to_50pct)
+            t90 = "-" if m.time_to_90pct is None else str(m.time_to_90pct)
+            print(
+                f"{m.period.trough_idx:>7}{m.period.max_drawdown:>9.2%}"
+                f"{m.period.recovery_duration:>6}{t50:>6}{t90:>6}  {m.pattern.value}"
+            )
+    else:
+        print("No completed recoveries from drawdowns of 1% or more.")
+    print()
+    print("Patterns:          " + ", ".join(f"{k} {v}" for k, v in patterns.items() if v))
+    print(f"Avg recovery rate: {velocity['avg_recovery_rate']:+.3%} per bar")
+    print(f"Accelerating:      {velocity['positive_velocity_pct']:.0%} of recoveries")
+    print(f"Efficiency score:  {score:.3f}")
+    if patterns["Incomplete"]:
+        print("Still underwater: the latest drawdown has not recovered.")
+    return 0
+
+
 # Maps the subcommand name registered in create_parser to its handler. Keep in
 # sync with create_parser; tests/unit/test_cli_dispatch.py enforces that.
 COMMANDS = {
@@ -7941,6 +8049,7 @@ COMMANDS = {
         "decay": cmd_decay,
         "leadlag": cmd_leadlag,
         "consistency": cmd_consistency,
+        "recovery": cmd_recovery,
 }
 
 
