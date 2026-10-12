@@ -3076,27 +3076,39 @@ def cmd_regime(args: argparse.Namespace) -> int:
             print(f"Error: No data found for asset {args.asset}")
             return 1
 
-    returns = df["return_1d"].drop_nulls()
+    # Regime functions take a DataFrame; trend detection needs a price path,
+    # so rebuild one from returns when the features file has no close column.
+    base = df.filter(pl.col("return_1d").is_not_null() & pl.col("return_1d").is_not_nan())
+    if "close" not in base.columns:
+        base = base.with_columns((1 + pl.col("return_1d")).cum_prod().alias("close"))
+    base = base.select(["return_1d", "close"])
 
-    print(f"Detecting {args.type} regime(s)...")
-    print(f"Data points: {returns.len()}")
+    if not args.json:
+        print(f"Detecting {args.type} regime(s)...")
+        print(f"Data points: {base.height}")
 
+    fast_window = max(2, args.trend_window // 3)
     if args.type == "volatility":
-        regimes = detect_volatility_regime(returns, window=args.volatility_window)
-        regime_col = "volatility_regime"
+        regimes = detect_volatility_regime(base, window=args.volatility_window)
+        regime_col = "vol_regime"
     elif args.type == "trend":
-        regimes = detect_trend_regime(returns, window=args.trend_window)
+        regimes = detect_trend_regime(
+            base, fast_window=fast_window, slow_window=args.trend_window
+        )
         regime_col = "trend_regime"
     else:  # combined
-        regimes = detect_combined_regime(
-            returns,
-            vol_window=args.volatility_window,
-            trend_window=args.trend_window,
+        regimes = detect_volatility_regime(base, window=args.volatility_window)
+        regimes = detect_trend_regime(
+            regimes, fast_window=fast_window, slow_window=args.trend_window
         )
-        regime_col = "combined_regime"
+        regimes = detect_combined_regime(regimes)
+        regime_col = "market_regime"
 
     stats = regime_statistics(regimes, regime_col)
-    transitions = regime_transition_matrix(regimes, regime_col)
+    transitions = {
+        row["from_regime"]: {k[3:]: v for k, v in row.items() if k.startswith("to_")}
+        for row in regime_transition_matrix(regimes, regime_col).iter_rows(named=True)
+    }
 
     if args.json:
         # Get current regime
@@ -3108,8 +3120,9 @@ def cmd_regime(args: argparse.Namespace) -> int:
             "statistics": {
                 str(k): {
                     "count": int(v["count"]),
-                    "percentage": float(v["percentage"]),
-                    "avg_duration": float(v["avg_duration"]) if v.get("avg_duration") else None,
+                    "percentage": float(v["pct_time"]),
+                    "avg_return": float(v["avg_return"]),
+                    "sharpe": float(v["sharpe"]),
                 }
                 for k, v in stats.items()
             },
@@ -3130,12 +3143,11 @@ def cmd_regime(args: argparse.Namespace) -> int:
 
         # Regime statistics
         print("Regime Distribution:")
-        for regime, data in sorted(stats.items(), key=lambda x: -x[1]["percentage"]):
-            pct = data["percentage"]
-            count = data["count"]
-            duration = data.get("avg_duration")
-            duration_str = f", avg duration: {duration:.1f} days" if duration else ""
-            print(f"  {regime:15} {pct:6.1%} ({count} periods{duration_str})")
+        for regime, data in sorted(stats.items(), key=lambda x: -x[1]["pct_time"]):
+            print(
+                f"  {regime:15} {data['pct_time']:6.1%} ({data['count']} periods, "
+                f"Sharpe {data['sharpe']:.2f})"
+            )
         print()
 
         # Transition probabilities
