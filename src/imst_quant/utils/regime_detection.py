@@ -94,15 +94,15 @@ def detect_volatility_regime(
         pl.col(return_col).rolling_std(window_size=window).alias("rolling_volatility")
     )
 
-    # Calculate mean and std of volatility for thresholding
-    vol_series = df["rolling_volatility"].drop_nulls()
-    if vol_series.len() > 0:
-        vol_mean = float(vol_series.mean())
-        vol_std = float(vol_series.std()) if vol_series.len() > 1 else vol_mean * 0.5
-    else:
-        vol_mean = 0.01
-        vol_std = 0.005
-
+    # Expanding mean/std of volatility so each label uses only data up to
+    # that row (full-sample thresholds leak future information)
+    n = max(df.height, 1)
+    vol_mean = pl.col("rolling_volatility").rolling_mean(window_size=n, min_samples=1)
+    vol_std = (
+        pl.col("rolling_volatility")
+        .rolling_std(window_size=n, min_samples=2)
+        .fill_null(vol_mean * 0.5)
+    )
     low_cutoff = vol_mean - low_threshold * vol_std
     high_cutoff = vol_mean + high_threshold * vol_std
 
