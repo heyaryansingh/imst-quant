@@ -3553,7 +3553,8 @@ def cmd_pairs(args: argparse.Namespace) -> int:
 
     if args.scan:
         # Scan all pairs for cointegration
-        print("Scanning for cointegrated pairs...")
+        if not args.json:
+            print("Scanning for cointegrated pairs...")
 
         # Extract returns columns
         return_cols = [c for c in df.columns if "return" in c.lower()]
