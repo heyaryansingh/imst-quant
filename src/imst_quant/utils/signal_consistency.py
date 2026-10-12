@@ -256,6 +256,13 @@ def measure_signal_strength_stability(
     }
 
 
+def _safe_corr(x: List[float], y: List[float]) -> float:
+    """Pearson correlation, 0.0 when either window is constant (undefined)."""
+    if np.std(x) == 0 or np.std(y) == 0:
+        return 0.0
+    return float(np.corrcoef(x, y)[0, 1])
+
+
 def detect_signal_degradation(
     signals: Union[pl.Series, pl.DataFrame],
     signal_col: str = "signal",
@@ -297,7 +304,11 @@ def detect_signal_degradation(
     signal_list = signal_series.to_list()
     n = len(signal_list)
 
+    if window_size < 2:
+        raise ValueError(f"window_size must be at least 2, got {window_size}")
+
     degradation_events = []
+    step = max(1, window_size // 2)
 
     # If returns provided, use signal-return correlation as quality metric
     if returns is not None:
@@ -312,13 +323,11 @@ def detect_signal_degradation(
             raise ValueError("Signals and returns must have same length")
 
         # Calculate rolling signal quality (correlation)
-        for i in range(window_size * (lookback_periods + 1), n, window_size // 2):
+        for i in range(window_size * (lookback_periods + 1), n + 1, step):
             # Current window quality
             current_window_signals = signal_list[i - window_size : i]
             current_window_returns = return_list[i - window_size : i]
-            current_quality = float(
-                np.corrcoef(current_window_signals, current_window_returns)[0, 1]
-            )
+            current_quality = _safe_corr(current_window_signals, current_window_returns)
 
             # Lookback windows quality
             lookback_qualities = []
@@ -327,7 +336,7 @@ def detect_signal_degradation(
                 end = i - window_size * j
                 lb_signals = signal_list[start:end]
                 lb_returns = return_list[start:end]
-                lb_quality = float(np.corrcoef(lb_signals, lb_returns)[0, 1])
+                lb_quality = _safe_corr(lb_signals, lb_returns)
                 lookback_qualities.append(lb_quality)
 
             avg_lookback_quality = float(np.mean(lookback_qualities))
@@ -350,7 +359,7 @@ def detect_signal_degradation(
 
     else:
         # Without returns, use flip rate as quality proxy (lower is better)
-        for i in range(window_size * (lookback_periods + 1), n, window_size // 2):
+        for i in range(window_size * (lookback_periods + 1), n + 1, step):
             # Current window flip rate
             current_window = signal_list[i - window_size : i]
             current_flips = sum(
@@ -372,7 +381,10 @@ def detect_signal_degradation(
 
             avg_lookback_quality = float(np.mean(lookback_qualities))
 
-            # Check for degradation (flip rate increased)
+            # Check for degradation (flip rate increased); a lookback that
+            # flipped every bar has no quality left to lose.
+            if avg_lookback_quality <= 0:
+                continue
             degradation_pct = (avg_lookback_quality - current_quality) / avg_lookback_quality
 
             if degradation_pct > 0.3:
