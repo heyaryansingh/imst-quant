@@ -153,6 +153,18 @@ def simple_garch_volatility(
     return vol
 
 
+def _garch_params(returns: pd.Series) -> tuple[float, float, float]:
+    """Moment-matched GARCH(1,1) (omega, alpha, beta) with alpha + beta < 1.
+
+    Simplified approach - for production use the arch package.
+    """
+    sample_var = returns.var()
+    alpha = min(0.15, max(0.05, returns.kurtosis() / 50))
+    beta = min(0.92, max(0.80, 0.95 - alpha))
+    omega = sample_var * (1 - alpha - beta)
+    return omega, alpha, beta
+
+
 def garch_volatility(
     returns: pd.Series,
     annualize: bool = True,
@@ -170,16 +182,7 @@ def garch_volatility(
     Returns:
         Series of GARCH volatility estimates.
     """
-    # Estimate parameters using moment matching
-    # This is a simplified approach - for production use arch package
-    sample_var = returns.var()
-    sample_kurtosis = returns.kurtosis()
-
-    # Typical GARCH parameters
-    # alpha + beta should be < 1 for stationarity
-    alpha = min(0.15, max(0.05, sample_kurtosis / 50))
-    beta = min(0.92, max(0.80, 0.95 - alpha))
-    omega = sample_var * (1 - alpha - beta)
+    omega, alpha, beta = _garch_params(returns)
 
     return simple_garch_volatility(
         returns, omega=omega, alpha=alpha, beta=beta,
@@ -315,15 +318,25 @@ def volatility_forecast(
         half_life = np.log(2) / decay
 
     elif method == "garch":
-        vol_series = garch_volatility(returns, annualize=True)
-        current = vol_series.iloc[-1]
-        long_run = returns.std() * np.sqrt(trading_days)
-        # GARCH mean reversion
-        decay = 0.05
-        forecast_1d = current
-        forecast_5d = current * (1 - decay) ** 5 + long_run * (1 - (1 - decay) ** 5)
-        forecast_21d = current * (1 - decay) ** 21 + long_run * (1 - (1 - decay) ** 21)
-        half_life = np.log(2) / decay
+        omega, alpha, beta = _garch_params(returns)
+        vol_series = simple_garch_volatility(
+            returns, omega=omega, alpha=alpha, beta=beta, annualize=False
+        )
+        current = vol_series.iloc[-1] * np.sqrt(trading_days)
+        # sigma^2_{T+1} uses the latest return; later horizons revert to the
+        # unconditional variance at rate alpha + beta per step.
+        persistence = alpha + beta
+        long_run_var = omega / (1 - persistence)
+        next_var = omega + alpha * returns.iloc[-1] ** 2 + beta * vol_series.iloc[-1] ** 2
+
+        def _ahead(h: int) -> float:
+            var_h = long_run_var + persistence ** (h - 1) * (next_var - long_run_var)
+            return np.sqrt(var_h * trading_days)
+
+        forecast_1d = _ahead(1)
+        forecast_5d = _ahead(5)
+        forecast_21d = _ahead(21)
+        half_life = np.log(0.5) / np.log(persistence)
 
     else:  # historical
         vol_series = historical_volatility(returns, window=21, annualize=True)
@@ -372,6 +385,7 @@ def volatility_cone(
     if windows is None:
         windows = [5, 10, 21, 63, 126, 252]
 
+    used_windows = []
     current_vols = []
     min_vols = []
     max_vols = []
@@ -389,6 +403,7 @@ def volatility_cone(
         if len(rolling_vol) == 0:
             continue
 
+        used_windows.append(w)
         current_vols.append(float(rolling_vol.iloc[-1]))
         min_vols.append(float(rolling_vol.min()))
         max_vols.append(float(rolling_vol.max()))
@@ -397,7 +412,7 @@ def volatility_cone(
         p75_vols.append(float(rolling_vol.quantile(0.75)))
 
     return VolatilityCone(
-        windows=windows[:len(current_vols)],
+        windows=used_windows,
         current=current_vols,
         min_vol=min_vols,
         max_vol=max_vols,
