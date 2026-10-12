@@ -1766,6 +1766,36 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- signal-corr subcommand ---
+    signal_corr_parser = subparsers.add_parser(
+        "signal-corr",
+        help="Correlation matrix, redundant pairs, diversification and agreement across signals",
+    )
+    signal_corr_parser.add_argument(
+        "--data", required=True, help="Path to parquet file with signal columns"
+    )
+    signal_corr_parser.add_argument(
+        "--signals", required=True, help="Comma-separated signal column names (at least 2)"
+    )
+    signal_corr_parser.add_argument(
+        "--method", choices=["pearson", "spearman"], default="pearson",
+        help="Correlation method (default: pearson)",
+    )
+    signal_corr_parser.add_argument(
+        "--threshold", type=float, default=0.8,
+        help="Absolute correlation at which a pair is flagged redundant (default: 0.8)",
+    )
+    signal_corr_parser.add_argument(
+        "--returns-col", default=None,
+        help="Optional returns column; adds each signal's best lead/lag correlation",
+    )
+    signal_corr_parser.add_argument(
+        "--max-lag", type=int, default=5, help="Max lead/lag in bars (default: 5)"
+    )
+    signal_corr_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -7989,6 +8019,115 @@ def cmd_recovery(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_signal_corr(args: argparse.Namespace) -> int:
+    """Report how correlated, redundant and in-agreement a set of signals is.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.utils.signal_correlation import (
+        analyze_signal_lead_lag,
+        calculate_signal_agreement,
+        calculate_signal_correlation_matrix,
+        calculate_signal_diversification,
+    )
+
+    signals = list(dict.fromkeys(c.strip() for c in args.signals.split(",") if c.strip()))
+    if len(signals) < 2:
+        print("Error: --signals needs at least 2 distinct columns")
+        return 1
+    if not 0 < args.threshold <= 1:
+        print(f"Error: --threshold must be in (0, 1], got {args.threshold}")
+        return 1
+    if args.max_lag < 1:
+        print(f"Error: --max-lag must be at least 1, got {args.max_lag}")
+        return 1
+
+    data_path = Path(args.data)
+    if not data_path.exists():
+        print(f"Error: Data file not found: {data_path}")
+        return 1
+    try:
+        df = pl.read_parquet(data_path)
+    except Exception as e:
+        print(f"Error reading data file: {e}")
+        return 1
+
+    needed = signals + ([args.returns_col] if args.returns_col else [])
+    missing = [c for c in needed if c not in df.columns]
+    if missing:
+        print(f"Error: Missing columns {missing}")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    df = df.select(needed).drop_nulls()
+    if df.height < 3:
+        print(f"Error: Need at least 3 complete rows, got {df.height}")
+        return 1
+
+    matrix = calculate_signal_correlation_matrix(df, signals, method=args.method)
+    pairs = [
+        (a, b, float(matrix[b][i]))
+        for i, a in enumerate(signals)
+        for b in signals[i + 1:]
+        if abs(float(matrix[b][i])) >= args.threshold
+    ]
+    pairs.sort(key=lambda p: abs(p[2]), reverse=True)
+    diversification = calculate_signal_diversification(df, signals)
+    agreement = calculate_signal_agreement(df, signals).row(0, named=True)
+
+    lead_lag = {}
+    if args.returns_col:
+        for sig in signals:
+            lags = analyze_signal_lead_lag(df, sig, args.returns_col, args.max_lag)
+            best = max(lags, key=lambda k: abs(lags[k]))
+            lead_lag[sig] = {"best_lag": best, "correlation": lags[best], "lag_0": lags[0]}
+
+    if args.json:
+        payload = {
+            "n_observations": df.height,
+            "method": args.method,
+            "matrix": {r["signal"]: {c: r[c] for c in signals} for r in matrix.to_dicts()},
+            "redundant_pairs": [{"a": a, "b": b, "correlation": c} for a, b, c in pairs],
+            "diversification": diversification,
+            "agreement": agreement,
+            "lead_lag": lead_lag,
+        }
+        print(json_module.dumps(payload, indent=2))
+        return 0
+
+    width = max(len(s) for s in signals) + 2
+    print()
+    print(f"Signal correlation ({args.method}, {df.height} obs)")
+    print("=" * 60)
+    print(" " * width + "".join(f"{s[:8]:>9}" for s in signals))
+    for r in matrix.to_dicts():
+        print(f"{r['signal']:<{width}}" + "".join(f"{r[c]:>9.2f}" for c in signals))
+    print()
+    if pairs:
+        print(f"Redundant pairs (|corr| >= {args.threshold}):")
+        for a, b, c in pairs:
+            print(f"  {a} ~ {b}: {c:+.2f}")
+    else:
+        print(f"No redundant pairs at |corr| >= {args.threshold}.")
+    print(f"Diversification:   {diversification:.3f}")
+    print(f"Agreement rate:    {agreement['agreement_rate']:.1%}")
+    if lead_lag:
+        print()
+        print(f"Lead/lag vs {args.returns_col} (+lag = signal leads returns):")
+        for sig, ll in lead_lag.items():
+            print(f"  {sig:<{width}} best lag {ll['best_lag']:+d}: {ll['correlation']:+.3f}"
+                  f"  (lag 0: {ll['lag_0']:+.3f})")
+    return 0
+
+
 # Maps the subcommand name registered in create_parser to its handler. Keep in
 # sync with create_parser; tests/unit/test_cli_dispatch.py enforces that.
 COMMANDS = {
@@ -8050,6 +8189,7 @@ COMMANDS = {
         "leadlag": cmd_leadlag,
         "consistency": cmd_consistency,
         "recovery": cmd_recovery,
+        "signal-corr": cmd_signal_corr,
 }
 
 
