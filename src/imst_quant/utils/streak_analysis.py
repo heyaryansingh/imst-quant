@@ -104,6 +104,7 @@ def identify_streaks(
         Tuple of (win_streaks, loss_streaks).
     """
     values = returns.drop_nulls().to_numpy()
+    values = values[~np.isnan(values)]
     n = len(values)
 
     if n == 0:
@@ -193,6 +194,7 @@ def analyze_streaks(
         StreakStatistics with detailed analysis.
     """
     values = returns.drop_nulls().to_numpy()
+    values = values[~np.isnan(values)]
     n = len(values)
 
     if n == 0:
