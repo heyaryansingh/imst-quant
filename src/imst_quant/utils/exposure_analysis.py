@@ -48,6 +48,19 @@ class ExposureAnalyzer:
         if abs(total_weight - 1.0) > 0.01:
             raise ValueError(f"Portfolio weights sum to {total_weight}, expected ~1.0")
 
+        # Merge duplicate symbols (e.g. multiple lots) so concentration is per
+        # position, and label missing groups so they can be reported.
+        others = [c for c in self.portfolio.columns if c not in ("symbol", "weight")]
+        self.portfolio = (
+            self.portfolio.group_by("symbol", maintain_order=True)
+            .agg(pl.col("weight").sum(), *[pl.col(c).first() for c in others])
+            .with_columns(
+                pl.col(c).fill_null("Unknown")
+                for c in ("sector", "asset_type", "geography")
+                if c in others
+            )
+        )
+
     def analyze(
         self,
         include_geography: bool = False,

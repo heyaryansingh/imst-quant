@@ -4822,7 +4822,7 @@ def cmd_exposure(args: argparse.Namespace) -> int:
             if risks:
                 print("\n⚠️  Concentration Risks Identified:")
                 for risk in risks:
-                    print(f"  • {risk}")
+                    print(f"  - {risk}")
             else:
                 print("\n✓ No concentration risks detected")
 
