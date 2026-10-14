@@ -4703,11 +4703,12 @@ def cmd_summary(args: argparse.Namespace) -> int:
     df = pd.read_parquet(features_path)
 
     # Calculate summary metrics
+    dates = df["date"] if "date" in df.columns else df.index
     summary = {
         "total_records": len(df),
         "date_range": {
-            "start": str(df.index.min()) if hasattr(df.index, 'min') else "N/A",
-            "end": str(df.index.max()) if hasattr(df.index, 'max') else "N/A",
+            "start": str(dates.min()) if len(df) else "N/A",
+            "end": str(dates.max()) if len(df) else "N/A",
         },
     }
 
