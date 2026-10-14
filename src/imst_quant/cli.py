@@ -2978,12 +2978,16 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
     else:
         strat_df = pl.read_csv(strategy_path)
 
-    return_col = "return_1d" if "return_1d" in strat_df.columns else "return"
-    if return_col not in strat_df.columns:
-        print("Error: Strategy file must contain 'return_1d' or 'return' column")
+    def _return_col(frame):
+        return next((c for c in ("return_1d", "returns", "return") if c in frame.columns), None)
+
+    return_col = _return_col(strat_df)
+    if return_col is None:
+        print("Error: Strategy file must contain 'return_1d', 'returns' or 'return' column")
         return 1
 
     strategy_returns = strat_df[return_col].drop_nulls()
+    aligned = False
 
     # Load or generate benchmark returns
     if args.benchmark:
@@ -2993,11 +2997,32 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
                 bench_df = pl.read_parquet(bench_path)
             else:
                 bench_df = pl.read_csv(bench_path)
-            bench_return_col = "return_1d" if "return_1d" in bench_df.columns else "return"
-            benchmark_returns = bench_df[bench_return_col].drop_nulls()
+            bench_return_col = _return_col(bench_df)
+            if bench_return_col is None:
+                print("Error: Benchmark file must contain 'return_1d', 'returns' or 'return' column")
+                return 1
+            if "date" in strat_df.columns and "date" in bench_df.columns:
+                # Align on dates, not on position, so gaps don't shift the series
+                joined = (
+                    strat_df.select("date", pl.col(return_col).alias("_strat"))
+                    .join(
+                        bench_df.select("date", pl.col(bench_return_col).alias("_bench")),
+                        on="date",
+                    )
+                    .sort("date")
+                    .drop_nulls()
+                )
+                if joined.height < 2:
+                    print("Error: Strategy and benchmark share fewer than 2 dates")
+                    return 1
+                strategy_returns = joined["_strat"]
+                benchmark_returns = joined["_bench"]
+                aligned = True
+            else:
+                benchmark_returns = bench_df[bench_return_col].drop_nulls()
         else:
             # Try to fetch benchmark data using ticker
-            print(f"Fetching benchmark data for {args.benchmark}...")
+            print(f"Fetching benchmark data for {args.benchmark}...", file=sys.stderr)
             try:
                 import yfinance as yf
                 ticker = yf.Ticker(args.benchmark)
@@ -3007,14 +3032,17 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
                 print(f"Error: Could not fetch benchmark data: {e}")
                 return 1
     else:
-        # Use equal-weight benchmark from strategy data if available
-        print("Warning: No benchmark specified, using zero benchmark (absolute returns)")
+        print(
+            "Warning: No benchmark specified, using zero benchmark (absolute returns)",
+            file=sys.stderr,
+        )
         benchmark_returns = pl.Series([0.0] * strategy_returns.len())
 
-    # Align series lengths
-    min_len = min(strategy_returns.len(), benchmark_returns.len())
-    strategy_returns = strategy_returns.tail(min_len)
-    benchmark_returns = benchmark_returns.tail(min_len)
+    if not aligned:
+        # ponytail: no dates to join on, so assume both series end on the same bar
+        min_len = min(strategy_returns.len(), benchmark_returns.len())
+        strategy_returns = strategy_returns.tail(min_len)
+        benchmark_returns = benchmark_returns.tail(min_len)
 
     analyzer = BenchmarkAnalyzer(
         strategy_returns,
