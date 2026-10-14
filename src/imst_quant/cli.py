@@ -3656,24 +3656,47 @@ def cmd_optimize(args: argparse.Namespace) -> int:
         print(f"Error: Features file not found: {features_path}")
         return 1
 
-    # Extract returns columns
-    return_cols = [c for c in df.columns if "return" in c.lower()]
-    if not return_cols:
-        return_cols = df.select_dtypes(include=[float]).columns.tolist()[:10]
+    asset_col = next((c for c in ("asset_id", "ticker", "asset") if c in df.columns), None)
+    return_col = next((c for c in ("return_1d", "returns", "return") if c in df.columns), None)
+    if asset_col and return_col and "date" in df.columns:
+        # Long panel (one row per date/asset): pivot to a date x asset matrix
+        returns = (
+            df.drop_duplicates(subset=["date", asset_col], keep="last")
+            .pivot(index="date", columns=asset_col, values=return_col)
+            .sort_index()
+            .dropna()
+        )
+        returns.columns = [str(c) for c in returns.columns]
+    else:
+        # Wide file: every numeric column is one asset's returns
+        returns = df.select_dtypes(include="number").dropna()
 
-    returns = df[return_cols]
+    if returns.shape[1] < 2:
+        print("Error: Need at least 2 assets with overlapping returns")
+        return 1
+    if len(returns) < 20:
+        print(f"Error: Need at least 20 overlapping periods, got {len(returns)}")
+        return 1
+
+    if args.target_return is not None and args.target_volatility is not None:
+        print("Error: Use only one of --target-return and --target-volatility")
+        return 1
 
     # Select optimization method
-    if args.method == "sharpe":
+    if args.method in ("sharpe", "variance"):
+        if args.target_return is not None:
+            objective = OptimizationObjective.TARGET_RETURN
+        elif args.target_volatility is not None:
+            objective = OptimizationObjective.TARGET_RISK
+        elif args.method == "sharpe":
+            objective = OptimizationObjective.MAX_SHARPE
+        else:
+            objective = OptimizationObjective.MIN_VARIANCE
         result = mean_variance_optimize(
             returns,
-            OptimizationObjective.MAX_SHARPE,
-            allow_short=args.allow_short,
-        )
-    elif args.method == "variance":
-        result = mean_variance_optimize(
-            returns,
-            OptimizationObjective.MIN_VARIANCE,
+            objective,
+            target_return=args.target_return,
+            target_volatility=args.target_volatility,
             allow_short=args.allow_short,
         )
     elif args.method == "risk-parity":
