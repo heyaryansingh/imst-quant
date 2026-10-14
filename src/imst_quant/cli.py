@@ -1796,6 +1796,31 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- rolling subcommand ---
+    rolling_parser = subparsers.add_parser(
+        "rolling",
+        help="Rolling Sharpe, Sortino, volatility and win rate with stability summary",
+    )
+    rolling_parser.add_argument(
+        "--data", required=True, help="Path to parquet file with a returns column"
+    )
+    rolling_parser.add_argument(
+        "--returns-col", default="returns", help="Returns column name (default: returns)"
+    )
+    rolling_parser.add_argument(
+        "--window", type=int, default=63, help="Rolling window in periods (default: 63)"
+    )
+    rolling_parser.add_argument(
+        "--risk-free-rate", type=float, default=0.0,
+        help="Annualized risk-free rate (default: 0.0)",
+    )
+    rolling_parser.add_argument(
+        "--periods", type=int, default=252, help="Periods per year (default: 252)"
+    )
+    rolling_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -8223,6 +8248,113 @@ def cmd_signal_corr(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rolling(args: argparse.Namespace) -> int:
+    """Report rolling risk-adjusted performance and how stable it has been.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+
+    import numpy as np
+    import polars as pl
+
+    from imst_quant.utils.rolling_performance import (
+        calculate_rolling_sharpe,
+        calculate_rolling_sortino,
+        calculate_rolling_volatility,
+        calculate_rolling_win_rate,
+    )
+
+    data_path = Path(args.data)
+    if not data_path.exists():
+        print(f"Error: Data file not found: {data_path}")
+        return 1
+    try:
+        df = pl.read_parquet(data_path)
+    except Exception as e:
+        print(f"Error reading data file: {e}")
+        return 1
+
+    if args.returns_col not in df.columns:
+        print(f"Error: Missing columns {[args.returns_col]}")
+        print(f"Available columns: {df.columns}")
+        return 1
+    if args.window < 2:
+        print("Error: --window must be at least 2")
+        return 1
+
+    returns = df[args.returns_col].drop_nulls().to_pandas().reset_index(drop=True)
+    if len(returns) < args.window:
+        print(f"Error: Need at least {args.window} non-null returns, got {len(returns)}")
+        return 1
+
+    series = {
+        "sharpe": calculate_rolling_sharpe(
+            returns, args.window, args.risk_free_rate, args.periods
+        ),
+        "sortino": calculate_rolling_sortino(
+            returns, args.window, args.risk_free_rate, args.periods
+        ),
+        "volatility": calculate_rolling_volatility(returns, args.window, args.periods),
+        "win_rate": calculate_rolling_win_rate(returns, args.window),
+    }
+
+    def _stats(values) -> dict:
+        v = values.replace([np.inf, -np.inf], np.nan).dropna()
+        if v.empty:
+            return {"latest": None, "min": None, "median": None, "max": None}
+        return {
+            "latest": float(v.iloc[-1]),
+            "min": float(v.min()),
+            "median": float(v.median()),
+            "max": float(v.max()),
+        }
+
+    metrics = {name: _stats(values) for name, values in series.items()}
+    sharpe = series["sharpe"].replace([np.inf, -np.inf], np.nan).dropna()
+    equity = (1 + returns).cumprod()
+    payload = {
+        "n_observations": len(returns),
+        "window": args.window,
+        "metrics": metrics,
+        # Share of windows with positive Sharpe: how often the edge was there
+        "pct_windows_positive_sharpe": float((sharpe > 0).mean()) if len(sharpe) else None,
+        # Where today's Sharpe sits in its own history (0 = worst, 1 = best)
+        "latest_sharpe_percentile": (
+            float((sharpe <= sharpe.iloc[-1]).mean()) if len(sharpe) else None
+        ),
+        "current_drawdown": float(equity.iloc[-1] / equity.cummax().iloc[-1] - 1),
+    }
+
+    if args.json:
+        print(json_module.dumps(payload, indent=2))
+        return 0
+
+    def _fmt(value, pct: bool) -> str:
+        if value is None:
+            return "n/a"
+        return f"{value:.2%}" if pct else f"{value:.2f}"
+
+    print(f"\n=== Rolling Performance ({args.window}-period window) ===\n")
+    print(f"Observations: {payload['n_observations']}\n")
+    print(f"{'Metric':<12}{'Latest':>10}{'Min':>10}{'Median':>10}{'Max':>10}")
+    for name, stats in metrics.items():
+        pct = name in ("volatility", "win_rate")
+        cells = "".join(f"{_fmt(stats[k], pct):>10}" for k in ("latest", "min", "median", "max"))
+        print(f"{name:<12}{cells}")
+    print()
+    if payload["pct_windows_positive_sharpe"] is not None:
+        print(f"Windows with Sharpe > 0:  {payload['pct_windows_positive_sharpe']:.1%}")
+        print(f"Latest Sharpe percentile: {payload['latest_sharpe_percentile']:.1%}")
+    print(f"Current drawdown:         {payload['current_drawdown']:.2%}")
+    print()
+    return 0
+
+
 # Maps the subcommand name registered in create_parser to its handler. Keep in
 # sync with create_parser; tests/unit/test_cli_dispatch.py enforces that.
 COMMANDS = {
@@ -8285,6 +8417,7 @@ COMMANDS = {
         "consistency": cmd_consistency,
         "recovery": cmd_recovery,
         "signal-corr": cmd_signal_corr,
+        "rolling": cmd_rolling,
 }
 
 
