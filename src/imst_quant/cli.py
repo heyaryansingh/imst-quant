@@ -4217,7 +4217,13 @@ def cmd_streaks(args: argparse.Namespace) -> int:
         if df.height == 0:
             print(f"Error: No data found for asset {args.asset}")
             return 1
+    elif asset_col in df.columns and df[asset_col].n_unique() > 1:
+        # Interleaved assets would splice unrelated return series into fake streaks
+        print("Error: multiple assets in features file; specify --asset")
+        return 1
 
+    if "date" in df.columns:
+        df = df.sort("date")
     returns = df["return_1d"].drop_nulls()
 
     stats = analyze_streaks(returns, threshold=args.threshold)
