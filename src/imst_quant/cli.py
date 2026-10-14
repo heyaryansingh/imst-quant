@@ -7437,6 +7437,12 @@ def main() -> int:
     Returns:
         Exit code from the executed subcommand (0 for success).
     """
+    # Reports use glyphs like α, β, ✓, ⚠. A Windows pipe/redirect defaults to
+    # cp1252, which cannot encode them and crashes mid-report. Degrade to '?'.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
     parser = create_parser()
     args = parser.parse_args()
 
