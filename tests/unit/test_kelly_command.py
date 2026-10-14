@@ -108,7 +108,7 @@ def test_kelly_command_reports_an_all_null_column(tmp_path, capsys):
     args = create_parser().parse_args(["kelly", "--returns", str(path)])
 
     assert cmd_kelly(args) == 1
-    assert "no non-null values" in capsys.readouterr().out
+    assert "no finite values" in capsys.readouterr().out
 
 
 def test_kelly_command_reports_missing_file(tmp_path, capsys):
@@ -116,3 +116,17 @@ def test_kelly_command_reports_missing_file(tmp_path, capsys):
 
     assert cmd_kelly(args) == 1
     assert "not found" in capsys.readouterr().out
+
+
+def test_kelly_command_ignores_nan_returns(tmp_path, capsys):
+    clean = _returns_file(tmp_path, WINNERS_AND_LOSERS, name="clean.parquet")
+    dirty = _returns_file(tmp_path, WINNERS_AND_LOSERS + [float("nan")], name="dirty.parquet")
+
+    assert cmd_kelly(create_parser().parse_args(["kelly", "--returns", str(clean), "--json"])) == 0
+    expected = json.loads(capsys.readouterr().out)
+    assert cmd_kelly(create_parser().parse_args(["kelly", "--returns", str(dirty), "--json"])) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["n_periods"] == len(WINNERS_AND_LOSERS)
+    assert payload["full_kelly"] == pytest.approx(expected["full_kelly"])
+    assert payload["optimal_f"] == pytest.approx(expected["optimal_f"])

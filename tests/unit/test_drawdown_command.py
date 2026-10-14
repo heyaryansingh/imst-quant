@@ -102,3 +102,19 @@ def test_drawdown_command_reports_missing_file(tmp_path, capsys):
 
     assert cmd_drawdown(args) == 1
     assert "not found" in capsys.readouterr().out
+
+
+def test_drawdown_command_skips_nan_rows(tmp_path, capsys):
+    import json
+
+    returns = [0.01, -0.02, float("nan"), 0.015, -0.05, None, 0.02, -0.01, 0.03, -0.04, 0.01, 0.02]
+    path = tmp_path / "returns.parquet"
+    _returns_frame(returns).write_parquet(path)
+
+    args = create_parser().parse_args(["drawdown", "--returns", str(path), "--json"])
+    assert cmd_drawdown(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["drawdown_at_risk"]["n_observations"] == 10
+    # Trough dates come from the surviving rows, not shifted by the dropped NaN/null
+    assert payload["worst_drawdowns"][0]["trough_date"] == "2024-01-10"

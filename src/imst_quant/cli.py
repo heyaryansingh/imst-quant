@@ -5923,9 +5923,11 @@ def cmd_drawdown(args: argparse.Namespace) -> int:
         print(f"Error: --worst must not be negative, got {args.worst}")
         return 1
 
-    returns = df[args.return_col].drop_nulls()
+    # Float NaN/inf is not null in polars; drop whole rows so worst_drawdowns stays date-aligned
+    df = df.filter(pl.col(args.return_col).is_finite())
+    returns = df[args.return_col]
     if returns.is_empty():
-        print(f"Error: Column '{args.return_col}' has no non-null values")
+        print(f"Error: Column '{args.return_col}' has no finite values")
         return 1
 
     date_col = args.date_col if args.date_col in df.columns else None
@@ -6059,8 +6061,9 @@ def cmd_kelly(args: argparse.Namespace) -> int:
         print(f"Available columns: {df.columns}")
         return 1
 
-    if df[args.return_col].drop_nulls().is_empty():
-        print(f"Error: Column '{args.return_col}' has no non-null values")
+    df = df.filter(pl.col(args.return_col).is_finite())
+    if df.is_empty():
+        print(f"Error: Column '{args.return_col}' has no finite values")
         return 1
 
     try:
@@ -6071,7 +6074,7 @@ def cmd_kelly(args: argparse.Namespace) -> int:
         recommended = metrics[f"kelly_{round(args.fraction, 4)}"]
 
         payload = {
-            "n_periods": df[args.return_col].drop_nulls().len(),
+            "n_periods": df.height,
             "fraction": args.fraction,
             "recommended_size": recommended,
             **metrics,
@@ -6313,9 +6316,9 @@ def cmd_tail_risk(args: argparse.Namespace) -> int:
         print(f"Available columns: {df.columns}")
         return 1
 
-    returns = df[args.return_col].drop_nulls()
+    returns = df[args.return_col].filter(df[args.return_col].is_finite())
     if returns.is_empty():
-        print(f"Error: Column '{args.return_col}' has no non-null values")
+        print(f"Error: Column '{args.return_col}' has no finite values")
         return 1
 
     try:

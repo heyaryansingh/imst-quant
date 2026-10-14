@@ -124,7 +124,7 @@ def test_tail_risk_command_reports_an_all_null_column(tmp_path, capsys):
     args = create_parser().parse_args(["tail-risk", "--returns", str(path)])
 
     assert cmd_tail_risk(args) == 1
-    assert "no non-null values" in capsys.readouterr().out
+    assert "no finite values" in capsys.readouterr().out
 
 
 def test_tail_risk_command_reports_missing_file(tmp_path, capsys):
@@ -134,3 +134,13 @@ def test_tail_risk_command_reports_missing_file(tmp_path, capsys):
 
     assert cmd_tail_risk(args) == 1
     assert "not found" in capsys.readouterr().out
+
+
+def test_tail_risk_command_ignores_nan_returns(tmp_path, capsys):
+    path = _returns_file(tmp_path, MIXED_RETURNS + [float("nan")])
+
+    assert cmd_tail_risk(create_parser().parse_args(["tail-risk", "--returns", str(path), "--json"])) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["n_periods"] == len(MIXED_RETURNS)
+    assert payload["tail_ratio"] == payload["tail_ratio"]  # not NaN
