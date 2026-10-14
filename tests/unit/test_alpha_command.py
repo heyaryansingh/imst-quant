@@ -132,3 +132,21 @@ def test_seed_makes_output_reproducible(tmp_path, capsys):
     second = capsys.readouterr().out
 
     assert first == second
+
+
+def test_alpha_drops_nan_periods_pairwise(tmp_path, capsys):
+    path = tmp_path / "returns.parquet"
+    _write_returns(path)
+    df = pl.read_parquet(path).with_columns(
+        returns=pl.when(pl.int_range(pl.len()) == 3).then(float("nan")).otherwise(pl.col("returns")),
+        benchmark_returns=pl.when(pl.int_range(pl.len()) == 7)
+        .then(None)
+        .otherwise(pl.col("benchmark_returns")),
+    )
+    df.write_parquet(path)
+
+    assert cmd_alpha(_args(returns=str(path), json=True)) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["observations"] == 248
+    assert result["beta"] == pytest.approx(1.2, abs=0.1)

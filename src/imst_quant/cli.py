@@ -5151,6 +5151,13 @@ def cmd_alpha(args: argparse.Namespace) -> int:
         )
         return 1
 
+    # Drop a period from both series if either side is null/NaN/inf (pairwise, keeps alignment)
+    import numpy as np
+
+    finite = np.isfinite(strategy.to_numpy(dtype=float)) & np.isfinite(benchmark.to_numpy(dtype=float))
+    strategy = strategy[finite].reset_index(drop=True)
+    benchmark = benchmark[finite].reset_index(drop=True)
+
     if len(strategy) < 2:
         print("Error: Need at least 2 observations to compute alpha metrics")
         return 1
