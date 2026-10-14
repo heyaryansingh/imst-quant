@@ -295,6 +295,7 @@ def volatility_forecast(
     returns: pd.Series,
     method: str = "ewma",
     trading_days: int = 252,
+    span: int = 20,
 ) -> VolatilityForecast:
     """Generate volatility forecasts for multiple horizons.
 
@@ -302,16 +303,17 @@ def volatility_forecast(
         returns: Series of returns.
         method: Forecasting method - "ewma", "garch", "historical".
         trading_days: Number of trading days per year.
+        span: EWMA span / historical window.
 
     Returns:
         VolatilityForecast with current and multi-horizon forecasts.
     """
     if method == "ewma":
-        vol_series = ewma_volatility(returns, span=20, annualize=True)
+        vol_series = ewma_volatility(returns, span=span, annualize=True)
         current = vol_series.iloc[-1]
         # EWMA forecasts decay toward long-run mean
         long_run = returns.std() * np.sqrt(trading_days)
-        decay = 2 / 21  # Approximate decay rate
+        decay = 2 / (span + 1)  # EWMA decay rate
         forecast_1d = current
         forecast_5d = current * (1 - decay) ** 5 + long_run * (1 - (1 - decay) ** 5)
         forecast_21d = current * (1 - decay) ** 21 + long_run * (1 - (1 - decay) ** 21)
@@ -339,7 +341,7 @@ def volatility_forecast(
         half_life = np.log(0.5) / np.log(persistence)
 
     else:  # historical
-        vol_series = historical_volatility(returns, window=21, annualize=True)
+        vol_series = historical_volatility(returns, window=span, annualize=True)
         current = vol_series.iloc[-1]
         forecast_1d = current
         forecast_5d = current

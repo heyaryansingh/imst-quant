@@ -4306,19 +4306,24 @@ def cmd_volatility(args: argparse.Namespace) -> int:
     # Filter by asset if specified
     if args.asset and "asset" in df.columns:
         df = df.filter(pl.col("asset") == args.asset)
+    elif "asset" in df.columns and df["asset"].n_unique() > 1:
+        print("Error: multiple assets in features file; specify --asset")
+        return 1
 
     if "returns" not in df.columns:
         print("Error: 'returns' column not found in features file")
         return 1
 
-    returns = df["returns"].drop_nulls().to_pandas()
+    returns = df["returns"].drop_nulls().drop_nans().to_pandas()
 
     output = {}
 
     if args.method == "compare":
         comparison = compare_volatility_methods(returns)
         current = comparison.iloc[-1].to_dict()
-        output["volatility_comparison"] = {k: float(v) for k, v in current.items()}
+        output["volatility_comparison"] = {
+            k: (float(v) if v == v else None) for k, v in current.items()
+        }
     else:
         if args.method == "ewma":
             vol = ewma_volatility(returns, span=args.span)
@@ -4327,11 +4332,12 @@ def cmd_volatility(args: argparse.Namespace) -> int:
         else:
             vol = historical_volatility(returns, window=args.span)
 
-        output["current_volatility"] = float(vol.iloc[-1])
+        last = float(vol.iloc[-1])
+        output["current_volatility"] = last if last == last else None
         output["method"] = args.method
 
     if args.forecast:
-        forecast = volatility_forecast(returns, method=args.method if args.method != "compare" else "ewma")
+        forecast = volatility_forecast(returns, method=args.method if args.method != "compare" else "ewma", span=args.span)
         output["forecast"] = {
             "current": forecast.current,
             "forecast_1d": forecast.forecast_1d,
@@ -4355,12 +4361,14 @@ def cmd_volatility(args: argparse.Namespace) -> int:
     else:
         print("=== Volatility Analysis ===")
         print(f"Method: {args.method}")
-        if "current_volatility" in output:
+        if output.get("current_volatility") is not None:
             print(f"Current Volatility: {output['current_volatility']:.2%}")
+        elif "current_volatility" in output:
+            print("Current Volatility: n/a (not enough data)")
         if "volatility_comparison" in output:
             print("\nVolatility Comparison (current):")
             for method, vol in output["volatility_comparison"].items():
-                print(f"  {method}: {vol:.2%}")
+                print(f"  {method}: {vol:.2%}" if vol is not None else f"  {method}: n/a")
         if "forecast" in output:
             f = output["forecast"]
             print(f"\nVolatility Forecast:")
