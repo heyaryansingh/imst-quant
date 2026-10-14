@@ -114,10 +114,12 @@ def signal_quality_score(
 ) -> float:
     """Calculate overall signal quality score (0-100).
 
-    Combines multiple metrics into a single quality score:
-    - Win rate (0-50 points)
-    - Profit factor (0-25 points)
-    - Win/loss ratio (0-25 points)
+    Combines multiple metrics into a single quality score. Each component
+    scores zero at or below a no-edge baseline, so a coin-flip signal
+    scores near zero instead of earning points for a 50% win rate:
+    - Profit factor (0-50 points): 1.0 -> 0, 2.0 or higher -> 50
+    - Win rate (0-25 points): 40% -> 0, 65% or higher -> 25
+    - Win/loss ratio (0-25 points): 0.5 -> 0, 2.0 or higher -> 25
 
     Args:
         df: DataFrame with signal and returns columns
@@ -130,16 +132,12 @@ def signal_quality_score(
     metrics = calculate_win_metrics(df, signal_col, returns_col)
     profit_factor = calculate_profit_factor(df, signal_col, returns_col)
 
-    # Win rate score (50 points max)
-    win_rate_score = min(metrics["win_rate"] * 100, 50)
+    def _scaled(value: float, zero_at: float, full_at: float, points: float) -> float:
+        return min(max((value - zero_at) / (full_at - zero_at), 0.0), 1.0) * points
 
-    # Profit factor score (25 points max)
-    # PF of 2.0 or higher = max points
-    pf_score = min(profit_factor / 2.0 * 25, 25)
-
-    # Win/loss ratio score (25 points max)
-    # Ratio of 2.0 or higher = max points
-    wl_score = min(metrics["win_loss_ratio"] / 2.0 * 25, 25)
+    pf_score = _scaled(profit_factor, 1.0, 2.0, 50)
+    win_rate_score = _scaled(metrics["win_rate"], 0.40, 0.65, 25)
+    wl_score = _scaled(metrics["win_loss_ratio"], 0.5, 2.0, 25)
 
     return float(win_rate_score + pf_score + wl_score)
 
