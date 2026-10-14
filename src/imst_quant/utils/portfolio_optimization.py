@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from scipy.optimize import minimize
 
 
 class OptimizationObjective(Enum):
@@ -236,54 +237,42 @@ def mean_variance_optimize(
     else:
         bounds = weight_bounds
 
-    # Initial weights (equal weight)
     w0 = np.ones(n_assets) / n_assets
+    constraints = [{"type": "eq", "fun": lambda w: w.sum() - 1.0}]
 
-    # Simple gradient descent optimization
-    w = w0.copy()
-    lr = 0.01
-
-    for iteration in range(max_iterations):
-        if objective == OptimizationObjective.MAX_SHARPE:
-            # Gradient of negative Sharpe
-            ret = w @ mu
+    if objective == OptimizationObjective.MAX_SHARPE:
+        def objective_fn(w):
             vol = np.sqrt(w @ cov @ w)
-            if vol > 1e-10:
-                d_ret = mu
-                d_vol = (cov @ w) / vol
-                d_sharpe = (d_ret * vol - (ret - risk_free_rate) * d_vol) / (vol ** 2)
-                gradient = -d_sharpe
-            else:
-                gradient = np.zeros(n_assets)
+            return -(w @ mu - risk_free_rate) / vol if vol > 1e-12 else 0.0
+    elif objective == OptimizationObjective.MIN_VARIANCE:
+        def objective_fn(w):
+            return w @ cov @ w
+    elif objective == OptimizationObjective.TARGET_RETURN:
+        if target_return is None:
+            raise ValueError("target_return required")
+        def objective_fn(w):
+            return w @ cov @ w
+        constraints.append({"type": "eq", "fun": lambda w: w @ mu - target_return})
+    elif objective == OptimizationObjective.TARGET_RISK:
+        if target_volatility is None:
+            raise ValueError("target_volatility required")
+        def objective_fn(w):
+            return -(w @ mu)
+        constraints.append(
+            {"type": "ineq", "fun": lambda w: target_volatility**2 - w @ cov @ w}
+        )
+    else:
+        raise ValueError(f"Unsupported objective for mean-variance: {objective}")
 
-        elif objective == OptimizationObjective.MIN_VARIANCE:
-            # Gradient of variance
-            gradient = 2 * cov @ w
-
-        elif objective == OptimizationObjective.TARGET_RETURN:
-            if target_return is None:
-                raise ValueError("target_return required")
-            # Minimize variance subject to return constraint
-            # Penalty method
-            ret = w @ mu
-            gradient = 2 * cov @ w + 100 * (ret - target_return) * mu
-
-        elif objective == OptimizationObjective.TARGET_RISK:
-            if target_volatility is None:
-                raise ValueError("target_volatility required")
-            # Maximize return subject to volatility constraint
-            vol = np.sqrt(w @ cov @ w)
-            gradient = -mu + 100 * max(0, vol - target_volatility) * (cov @ w) / vol
-
-        else:
-            gradient = np.zeros(n_assets)
-
-        # Update weights
-        w = w - lr * gradient
-
-        # Project onto constraints
-        w = np.clip(w, bounds[0], bounds[1])
-        w = w / w.sum()  # Ensure weights sum to 1
+    result = minimize(
+        objective_fn,
+        w0,
+        method="SLSQP",
+        bounds=[bounds] * n_assets,
+        constraints=constraints,
+        options={"maxiter": max_iterations, "ftol": 1e-12},
+    )
+    w = result.x
 
     # Calculate final stats
     exp_ret = float(portfolio_return(w, mu))
