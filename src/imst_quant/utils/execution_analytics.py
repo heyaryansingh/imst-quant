@@ -237,9 +237,7 @@ def analyze_execution_quality(
         else:
             size_buckets["large"].append(s["exec_slippage_bps"])
 
-    slippage_by_size = {
-        k: np.mean(v) if v else 0.0 for k, v in size_buckets.items()
-    }
+    slippage_by_size = {k: np.mean(v) for k, v in size_buckets.items() if v}
 
     return ExecutionMetrics(
         total_trades=total_trades,

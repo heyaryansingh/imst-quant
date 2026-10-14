@@ -4114,6 +4114,12 @@ def cmd_execution(args: argparse.Namespace) -> int:
             print(f"Error: Trade file not found: {args.trades}")
             return 1
 
+        # Blank cells would become NaN commission / "nan" venue and poison the aggregates
+        if "commission" in trades_data:
+            trades_data["commission"] = trades_data["commission"].fillna(0.0)
+        if "venue" in trades_data:
+            trades_data["venue"] = trades_data["venue"].fillna("unknown")
+
         # Convert to ExecutedTrade objects
         trades = []
         for _, row in trades_data.iterrows():
