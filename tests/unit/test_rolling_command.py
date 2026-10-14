@@ -53,3 +53,18 @@ def test_rejects_bad_input(tmp_path, capsys, extra):
     code, out = _run(tmp_path, capsys, [0.01, -0.01] * 30, *extra)
     assert code == 1
     assert "Error" in out
+
+
+def test_nan_does_not_stale_latest_window(tmp_path, capsys):
+    clean = list(np.random.default_rng(0).normal(0.001, 0.01, 100))
+    _, out = _run(tmp_path, capsys, clean, "--window", "20", "--json")
+    expected = json.loads(out)
+
+    dirty = clean[:97] + [float("nan")] + clean[97:]
+    _, out = _run(tmp_path, capsys, dirty, "--window", "20", "--json")
+    payload = json.loads(out)
+
+    assert payload["n_observations"] == 100
+    assert payload["metrics"]["sharpe"]["latest"] == pytest.approx(
+        expected["metrics"]["sharpe"]["latest"]
+    )

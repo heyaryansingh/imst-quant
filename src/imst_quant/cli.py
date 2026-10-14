@@ -8454,7 +8454,8 @@ def cmd_rolling(args: argparse.Namespace) -> int:
         print("Error: --window must be at least 2")
         return 1
 
-    returns = df[args.returns_col].drop_nulls().to_pandas().reset_index(drop=True)
+    # A NaN inside a window blanks the whole window, so a stray NaN makes "latest" stale
+    returns = df[args.returns_col].drop_nulls().drop_nans().to_pandas().reset_index(drop=True)
     if len(returns) < args.window:
         print(f"Error: Need at least {args.window} non-null returns, got {len(returns)}")
         return 1
