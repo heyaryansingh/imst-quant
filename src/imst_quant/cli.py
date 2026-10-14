@@ -3524,11 +3524,17 @@ def cmd_liquidity(args: argparse.Namespace) -> int:
 
     # Filter by asset if specified
     asset_col = "asset_id" if "asset_id" in df.columns else "ticker"
-    if args.asset and asset_col in df.columns:
+    if args.asset:
+        if asset_col not in df.columns:
+            print(f"Error: Cannot filter by asset: no asset_id/ticker column in {features_path}")
+            return 1
         df = df.filter(pl.col(asset_col) == args.asset)
         if df.height == 0:
             print(f"Error: No data found for asset {args.asset}")
             return 1
+
+    # Float NaN (e.g. from pandas-written parquet) is not null in polars and poisons every mean
+    df = df.with_columns(pl.col(pl.Float32, pl.Float64).fill_nan(None))
 
     metrics = analyze_liquidity(df)
 

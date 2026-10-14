@@ -314,7 +314,7 @@ def estimate_market_impact(
     # Estimate volatility from returns if available
     if "return_1d" in df.columns:
         returns = df["return_1d"].drop_nulls()
-        volatility = float(returns.std()) if returns.len() > 0 else 0.02
+        volatility = float(returns.std()) if returns.len() > 1 else 0.02
     else:
         volatility = 0.02  # Default 2% daily vol
 
@@ -431,7 +431,7 @@ def analyze_liquidity(
     """
     # Basic volume metrics
     avg_volume = float(df[volume_col].mean()) if volume_col in df.columns else 0.0
-    volume_std = float(df[volume_col].std()) if volume_col in df.columns else 0.0
+    volume_std = float(df[volume_col].std() or 0.0) if volume_col in df.columns else 0.0
     volume_volatility = volume_std / avg_volume if avg_volume > 0 else 0.0
 
     # Dollar volume
