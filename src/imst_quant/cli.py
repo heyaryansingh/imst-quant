@@ -3857,20 +3857,48 @@ def cmd_factors(args: argparse.Namespace) -> int:
         print("Error: Features file must contain 'return_1d' column")
         return 1
 
-    # Filter by asset if specified
     asset_col = "asset_id" if "asset_id" in df.columns else "ticker"
-    if args.asset and asset_col in df.columns:
-        df = df.filter(pl.col(asset_col) == args.asset)
+    is_panel = (
+        "date" in df.columns
+        and asset_col in df.columns
+        and df[asset_col].n_unique() > 1
+    )
+
+    if is_panel:
+        if not args.asset:
+            print(
+                f"Error: Features file has {df[asset_col].n_unique()} assets; "
+                "pick one with --asset"
+            )
+            return 1
+        # Market factor = equal-weight cross-sectional return, so the asset is
+        # not regressed on its own returns (which forces beta=1, R^2=100%).
+        market = df.group_by("date").agg(pl.col("return_1d").mean().alias("_mkt"))
+        df = (
+            df.filter(pl.col(asset_col) == args.asset)
+            .join(market, on="date")
+            .sort("date")
+            .drop_nulls(["return_1d", "_mkt"])
+        )
         if df.height == 0:
             print(f"Error: No data found for asset {args.asset}")
             return 1
+        returns = df["return_1d"]
+        market_returns = df["_mkt"]
+    else:
+        if args.asset and asset_col in df.columns:
+            df = df.filter(pl.col(asset_col) == args.asset)
+            if df.height == 0:
+                print(f"Error: No data found for asset {args.asset}")
+                return 1
+        returns = df["return_1d"].drop_nulls()
+        # ponytail: single series has no market proxy; MKT is the series itself
+        market_returns = returns
 
-    returns = df["return_1d"].drop_nulls()
-
-    # Generate synthetic factors if market data available
-    # In production, would load real factor data
-    print("Generating synthetic factor returns for analysis...")
-    factor_returns = generate_synthetic_factors(returns, seed=42)
+    # SMB/HML/MOM are synthetic until real factor data is wired in.
+    # Log to stderr so --json output stays parseable.
+    print("Generating synthetic factor returns for analysis...", file=sys.stderr)
+    factor_returns = generate_synthetic_factors(market_returns, seed=42)
 
     if args.type == "exposures":
         exposures = estimate_factor_exposures(returns, factor_returns)
@@ -3959,7 +3987,7 @@ def cmd_factors(args: argparse.Namespace) -> int:
                     f"{k}={v:.2f}" for k, v in row.items()
                     if k not in ["alpha", "r_squared"] and v is not None
                 )
-                print(f"  [{i+1}] α={row['alpha']:.2%}  {betas_str}")
+                print(f"  [{i+1}] alpha={row['alpha']:.2%}  {betas_str}")
             print()
 
     return 0
