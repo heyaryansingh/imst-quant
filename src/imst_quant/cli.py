@@ -1821,6 +1821,35 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- bootstrap subcommand ---
+    bootstrap_parser = subparsers.add_parser(
+        "bootstrap",
+        help="Block-bootstrap confidence intervals for Sharpe, annual return and max drawdown",
+    )
+    bootstrap_parser.add_argument(
+        "--data", required=True, help="Path to parquet file with a returns column"
+    )
+    bootstrap_parser.add_argument(
+        "--returns-col", default="returns", help="Returns column name (default: returns)"
+    )
+    bootstrap_parser.add_argument(
+        "--resamples", type=int, default=1000, help="Bootstrap paths (default: 1000)"
+    )
+    bootstrap_parser.add_argument(
+        "--block", type=float, default=None,
+        help="Mean block length in periods (default: n^(1/3))",
+    )
+    bootstrap_parser.add_argument(
+        "--confidence", type=float, default=0.95, help="Interval level (default: 0.95)"
+    )
+    bootstrap_parser.add_argument(
+        "--periods", type=int, default=252, help="Periods per year (default: 252)"
+    )
+    bootstrap_parser.add_argument("--seed", type=int, default=None, help="RNG seed")
+    bootstrap_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -7518,6 +7547,79 @@ def cmd_voltarget(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bootstrap(args: argparse.Namespace) -> int:
+    """Report block-bootstrap confidence intervals for headline strategy metrics.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.utils.block_bootstrap import bootstrap_metrics
+
+    data_path = Path(args.data)
+    if not data_path.exists():
+        print(f"Error: Data file not found: {data_path}")
+        return 1
+    try:
+        df = pl.read_parquet(data_path)
+    except Exception as e:
+        print(f"Error reading data file: {e}")
+        return 1
+
+    if args.returns_col not in df.columns:
+        print(f"Error: Column '{args.returns_col}' not found")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    if "date" in df.columns:
+        df = df.sort("date")
+
+    try:
+        result = bootstrap_metrics(
+            df[args.returns_col].cast(pl.Float64).to_numpy(),
+            n_resamples=args.resamples,
+            mean_block=args.block,
+            confidence=args.confidence,
+            periods_per_year=args.periods,
+            seed=args.seed,
+        )
+    except (ValueError, pl.exceptions.PolarsError) as e:
+        print(f"Error: {e}")
+        return 1
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    pct = f"{result['confidence']:.0%}"
+    print("\n=== Bootstrap Confidence Intervals ===\n")
+    print(f"Observations:   {result['n_observations']:>10,}")
+    print(f"Resamples:      {result['n_resamples']:>10,}")
+    print(f"Mean Block:     {result['mean_block']:>10.1f} periods\n")
+    print(f"{'Metric':<15}{'Point':>10}{pct + ' Low':>12}{pct + ' High':>12}")
+    for name, label, fmt in (
+        ("sharpe", "Sharpe", "{:>10.2f}"),
+        ("annual_return", "Annual Return", "{:>10.2%}"),
+        ("max_drawdown", "Max Drawdown", "{:>10.2%}"),
+    ):
+        m = result[name]
+        print(
+            f"{label:<15}{fmt.format(m['point'])}"
+            f"  {fmt.format(m['lower'])}  {fmt.format(m['upper'])}"
+        )
+    print(f"\nP(Sharpe > 0):  {result['prob_positive_sharpe']:>10.1%}")
+    if result["sharpe"]["lower"] <= 0 <= result["sharpe"]["upper"]:
+        print("Sharpe interval includes zero: edge is not distinguishable from luck.")
+    print()
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -8483,6 +8585,7 @@ COMMANDS = {
         "recovery": cmd_recovery,
         "signal-corr": cmd_signal_corr,
         "rolling": cmd_rolling,
+        "bootstrap": cmd_bootstrap,
 }
 
 
