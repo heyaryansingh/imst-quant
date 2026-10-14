@@ -174,8 +174,9 @@ def max_drawdown(
     # Calculate cumulative returns (equity curve)
     cumulative = (1 + ret_series).cum_prod()
 
-    # Calculate running maximum
-    running_max = cumulative.cum_max()
+    # Running maximum, seeded with the starting equity of 1 so a loss in
+    # the first period counts as a drawdown
+    running_max = cumulative.cum_max().clip(lower_bound=1.0)
 
     # Drawdown at each point
     drawdowns = (running_max - cumulative) / running_max
@@ -295,6 +296,10 @@ def calculate_all_metrics(
         ret_series = returns[return_col]
     else:
         ret_series = returns
+
+    # Missing periods (null/NaN) would otherwise poison every metric
+    ret_series = ret_series.drop_nulls()
+    ret_series = ret_series.filter(ret_series.is_not_nan())
 
     # Calculate cumulative return
     total_return = float((1 + ret_series).product() - 1)
@@ -552,7 +557,7 @@ def burke_ratio(
     annualized_excess = mean_excess * periods_per_year
 
     cumulative = (1 + ret_series).cum_prod()
-    running_max = cumulative.cum_max()
+    running_max = cumulative.cum_max().clip(lower_bound=1.0)
     drawdowns = (running_max - cumulative) / running_max
 
     sum_sq_drawdown = (drawdowns ** 2).sum()
