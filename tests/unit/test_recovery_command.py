@@ -50,3 +50,11 @@ def test_recovery_rejects_bad_input(tmp_path, capsys, extra):
     code, out = _run(tmp_path, capsys, RETURNS, *extra)
     assert code == 1
     assert "Error" in out
+
+
+def test_recovery_ignores_nan_returns(tmp_path, capsys):
+    code, out = _run(tmp_path, capsys, RETURNS[:3] + [float("nan")] + RETURNS[3:], "--json")
+    assert code == 0
+    payload = json.loads(out)
+    assert payload["n_observations"] == len(RETURNS)
+    assert [r["trough_idx"] for r in payload["recoveries"]] == [1, 5]

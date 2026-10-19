@@ -8257,7 +8257,9 @@ def cmd_recovery(args: argparse.Namespace) -> int:
         print(f"Available columns: {df.columns}")
         return 1
 
-    returns = df[args.returns_col].drop_nulls()
+    # NaN/inf would poison the cumulative equity curve every recovery is measured on
+    returns = df[args.returns_col].cast(pl.Float64).drop_nulls()
+    returns = returns.filter(returns.is_finite())
     if returns.len() < 2:
         print(f"Error: Need at least 2 non-null returns, got {returns.len()}")
         return 1
