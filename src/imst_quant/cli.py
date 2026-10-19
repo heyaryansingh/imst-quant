@@ -2930,7 +2930,8 @@ def cmd_montecarlo(args: argparse.Namespace) -> int:
         print("Error: Features file must contain 'return_1d' column")
         return 1
 
-    returns = df["return_1d"].drop_nulls()
+    returns = df["return_1d"].cast(pl.Float64).drop_nulls()
+    returns = returns.filter(returns.is_finite())
 
     if returns.len() < 30:
         print("Error: Insufficient data for Monte Carlo simulation (need at least 30 observations)")

@@ -82,11 +82,10 @@ class MonteCarloSimulator:
             seed: Random seed for reproducibility. Default None.
         """
         if isinstance(returns, pl.Series):
-            self.returns = returns.drop_nulls().to_numpy()
-        elif isinstance(returns, list):
-            self.returns = np.array(returns)
-        else:
-            self.returns = returns
+            returns = returns.drop_nulls().to_numpy()
+        # One NaN/inf would make the mean, std and every resampled path NaN
+        returns = np.asarray(returns, dtype=float)
+        self.returns = returns[np.isfinite(returns)]
 
         self.n_simulations = n_simulations
         self.seed = seed
