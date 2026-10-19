@@ -1868,6 +1868,27 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- pbo subcommand ---
+    pbo_parser = subparsers.add_parser(
+        "pbo",
+        help="Probability of backtest overfitting (CSCV) across strategy variants",
+    )
+    pbo_parser.add_argument(
+        "--data", required=True,
+        help="Parquet file with one returns column per strategy variant",
+    )
+    pbo_parser.add_argument(
+        "--columns", default=None,
+        help="Comma-separated variant columns (default: every numeric column)",
+    )
+    pbo_parser.add_argument(
+        "--blocks", type=int, default=16,
+        help="Even number of time blocks for CSCV (default: 16)",
+    )
+    pbo_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -7597,6 +7618,70 @@ def cmd_voltarget(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pbo(args: argparse.Namespace) -> int:
+    """Report the probability that picking the best backtest variant overfits.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.utils.backtest_overfitting import probability_of_backtest_overfitting
+
+    data_path = Path(args.data)
+    if not data_path.exists():
+        print(f"Error: Data file not found: {data_path}")
+        return 1
+    try:
+        df = pl.read_parquet(data_path)
+    except Exception as e:
+        print(f"Error reading data file: {e}")
+        return 1
+
+    if "date" in df.columns:
+        df = df.sort("date")
+    if args.columns:
+        columns = [c.strip() for c in args.columns.split(",") if c.strip()]
+        missing = [c for c in columns if c not in df.columns]
+        if missing:
+            print(f"Error: Columns not found: {missing}")
+            print(f"Available columns: {df.columns}")
+            return 1
+    else:
+        columns = [c for c, t in df.schema.items() if t.is_numeric()]
+
+    try:
+        result = probability_of_backtest_overfitting(
+            df.select(pl.col(columns).cast(pl.Float64)).to_numpy(),
+            n_blocks=args.blocks,
+        )
+    except (ValueError, pl.exceptions.PolarsError) as e:
+        print(f"Error: {e}")
+        return 1
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    print("\n=== Probability of Backtest Overfitting (CSCV) ===\n")
+    print(f"Variants:          {result['n_strategies']:>10,}")
+    print(f"Observations:      {result['n_observations']:>10,}")
+    print(f"Splits:            {result['n_splits']:>10,}\n")
+    print(f"PBO:               {result['pbo']:>10.1%}")
+    print(f"Median logit:      {result['logit_median']:>10.2f}")
+    print(f"P(OOS Sharpe < 0): {result['prob_oos_loss']:>10.1%}")
+    print(f"IS->OOS slope:     {result['degradation_slope']:>10.2f}")
+    if result["pbo"] > 0.5:
+        print("\nBest in-sample variant usually ranks below median out-of-sample: likely overfit.")
+    print()
+    return 0
+
+
 def cmd_bootstrap(args: argparse.Namespace) -> int:
     """Report block-bootstrap confidence intervals for headline strategy metrics.
 
@@ -8737,6 +8822,7 @@ COMMANDS = {
         "signal-corr": cmd_signal_corr,
         "rolling": cmd_rolling,
         "bootstrap": cmd_bootstrap,
+        "pbo": cmd_pbo,
         "calendar": cmd_calendar,
 }
 
