@@ -1821,6 +1821,24 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- calendar subcommand ---
+    calendar_parser = subparsers.add_parser(
+        "calendar",
+        help="Year-by-month compounded return table with annual totals",
+    )
+    calendar_parser.add_argument(
+        "--data", required=True, help="Path to parquet file with date and returns columns"
+    )
+    calendar_parser.add_argument(
+        "--date-col", default="date", help="Column name for dates (default: date)"
+    )
+    calendar_parser.add_argument(
+        "--returns-col", default="returns", help="Returns column name (default: returns)"
+    )
+    calendar_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     # --- bootstrap subcommand ---
     bootstrap_parser = subparsers.add_parser(
         "bootstrap",
@@ -8534,6 +8552,104 @@ def cmd_rolling(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_calendar(args: argparse.Namespace) -> int:
+    """Print compounded returns per calendar month and year.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    data_path = Path(args.data)
+    if not data_path.exists():
+        print(f"Error: Data file not found: {data_path}")
+        return 1
+    try:
+        df = pl.read_parquet(data_path)
+    except Exception as e:
+        print(f"Error reading data file: {e}")
+        return 1
+
+    missing = [c for c in (args.date_col, args.returns_col) if c not in df.columns]
+    if missing:
+        print(f"Error: Missing columns {missing}")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    try:
+        df = df.select(
+            pl.col(args.date_col).cast(pl.Date).alias("date"),
+            pl.col(args.returns_col).cast(pl.Float64).alias("r"),
+        )
+    except Exception as e:
+        print(f"Error: Could not parse {args.date_col!r} as dates: {e}")
+        return 1
+    df = df.drop_nulls().filter(pl.col("r").is_finite())
+    if df.is_empty():
+        print("Error: No rows with both a date and a finite return")
+        return 1
+    if (df["r"] <= -1).any():
+        print("Error: Returns must be simple returns greater than -1")
+        return 1
+
+    def _compound(by: list[str]) -> pl.DataFrame:
+        return (
+            df.group_by(by)
+            .agg(((pl.col("r") + 1).product() - 1).alias("ret"))
+            .sort(by)
+        )
+
+    df = df.with_columns(
+        pl.col("date").dt.year().alias("year"), pl.col("date").dt.month().alias("month")
+    )
+    monthly = _compound(["year", "month"])
+    annual = _compound(["year"])
+
+    table = {
+        int(y): {"months": {}, "year": None} for y in annual["year"]
+    }
+    for y, m, r in monthly.iter_rows():
+        table[int(y)]["months"][int(m)] = float(r)
+    for y, r in annual.iter_rows():
+        table[int(y)]["year"] = float(r)
+
+    month_rets = monthly["ret"]
+    payload = {
+        "n_observations": df.height,
+        "years": {str(y): v for y, v in table.items()},
+        "n_months": monthly.height,
+        "pct_positive_months": float((month_rets > 0).mean()),
+        "best_month": float(month_rets.max()),
+        "worst_month": float(month_rets.min()),
+    }
+
+    if args.json:
+        print(json_module.dumps(payload, indent=2))
+        return 0
+
+    names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    print("\n=== Calendar Returns ===\n")
+    print("Year " + "".join(f"{n:>8}" for n in names) + f"{'Year':>9}")
+    for y, row in table.items():
+        cells = "".join(
+            f"{row['months'][m]:>8.1%}" if m in row["months"] else f"{'':>8}"
+            for m in range(1, 13)
+        )
+        print(f"{y:<5}{cells}{row['year']:>9.1%}")
+    print()
+    print(f"Positive months: {payload['pct_positive_months']:.1%} of {payload['n_months']}")
+    print(f"Best month:      {payload['best_month']:.2%}")
+    print(f"Worst month:     {payload['worst_month']:.2%}")
+    print()
+    return 0
+
+
 # Maps the subcommand name registered in create_parser to its handler. Keep in
 # sync with create_parser; tests/unit/test_cli_dispatch.py enforces that.
 COMMANDS = {
@@ -8598,6 +8714,7 @@ COMMANDS = {
         "signal-corr": cmd_signal_corr,
         "rolling": cmd_rolling,
         "bootstrap": cmd_bootstrap,
+        "calendar": cmd_calendar,
 }
 
 
