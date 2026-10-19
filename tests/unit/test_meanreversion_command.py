@@ -157,3 +157,17 @@ def test_rolling_window_below_two_is_reported(tmp_path, capsys):
 
     assert cmd_meanreversion(args) == 1
     assert "at least 2" in capsys.readouterr().out
+
+
+def test_nan_prices_are_dropped(tmp_path, capsys):
+    path = _ou_file(tmp_path, n=200)
+    df = pl.read_parquet(path)
+    pl.DataFrame({"close": [float("nan"), *df["close"].to_list(), float("inf")]}).write_parquet(path)
+
+    args = create_parser().parse_args(["meanreversion", "--prices", str(path), "--json"])
+    assert cmd_meanreversion(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["observations"] == 200
+    assert np.isfinite(payload["hurst_exponent"])
+    assert np.isfinite(payload["adf_statistic"])

@@ -5417,7 +5417,9 @@ def cmd_meanreversion(args: argparse.Namespace) -> int:
         print(f"Available columns: {df.columns}")
         return 1
 
-    prices = df[args.price_col].drop_nulls()
+    # Spreads can be negative, so only non-finite values are dropped
+    prices = df[args.price_col].cast(pl.Float64).drop_nulls()
+    prices = prices.filter(prices.is_finite())
 
     if len(prices) < 30:
         print(f"Error: Need at least 30 observations, got {len(prices)}")
