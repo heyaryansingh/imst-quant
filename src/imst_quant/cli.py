@@ -4307,7 +4307,12 @@ def cmd_streaks(args: argparse.Namespace) -> int:
 
     if "date" in df.columns:
         df = df.sort("date")
-    returns = df["return_1d"].drop_nulls()
+    # NaN > threshold is False, so an unfiltered NaN would be scored as a loss
+    returns = df["return_1d"].cast(pl.Float64).drop_nulls()
+    returns = returns.filter(returns.is_finite())
+    if returns.len() == 0:
+        print("Error: 'return_1d' has no finite values")
+        return 1
 
     stats = analyze_streaks(returns, threshold=args.threshold)
 

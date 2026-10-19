@@ -39,3 +39,18 @@ def test_streaks_counts_runs_in_date_order(tmp_path, capsys):
     assert payload["max_win_streak"] == 2
     assert payload["max_loss_streak"] == 2
     assert payload["current_streak"] == -2
+
+
+def test_streaks_ignores_nan_returns(tmp_path, capsys):
+    path = _features(
+        tmp_path,
+        pl.DataFrame({"asset_id": ["X"] * 4, "return_1d": [0.01, float("nan"), 0.02, 0.03]}),
+    )
+
+    args = create_parser().parse_args(["streaks", "--features", str(path), "--asset", "X", "--json"])
+    assert cmd_streaks(args) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["total_periods"] == 3
+    assert payload["max_loss_streak"] == 0
+    assert payload["max_win_streak"] == 3
