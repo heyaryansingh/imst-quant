@@ -24,6 +24,18 @@ from typing import Dict, Optional
 import polars as pl
 
 
+def _finite_rows(df: pl.DataFrame, signal_col: str, returns_col: str) -> pl.DataFrame:
+    """Drop rows where signal or return is null/NaN/inf.
+
+    Polars orders NaN above every number, so a NaN PnL would otherwise be
+    counted as a win and poison the averages.
+    """
+    return df.filter(
+        pl.col(signal_col).cast(pl.Float64).is_finite()
+        & pl.col(returns_col).cast(pl.Float64).is_finite()
+    )
+
+
 def calculate_win_metrics(
     df: pl.DataFrame,
     signal_col: str = "signal",
@@ -39,6 +51,7 @@ def calculate_win_metrics(
     Returns:
         Dictionary with win_rate, avg_win, avg_loss, win_loss_ratio
     """
+    df = _finite_rows(df, signal_col, returns_col)
     # Filter for actual trades (signal != 0)
     trades = df.filter(pl.col(signal_col) != 0)
 
@@ -89,6 +102,7 @@ def calculate_profit_factor(
     Returns:
         Profit factor (values > 1 indicate profitable strategy)
     """
+    df = _finite_rows(df, signal_col, returns_col)
     trades = df.filter(pl.col(signal_col) != 0)
 
     if trades.height == 0:
@@ -167,6 +181,7 @@ def analyze_signal_performance(
         ... })
         >>> metrics = analyze_signal_performance(df)
     """
+    df = _finite_rows(df, signal_col, returns_col)
     win_metrics = calculate_win_metrics(df, signal_col, returns_col)
     profit_factor = calculate_profit_factor(df, signal_col, returns_col)
     quality_score = signal_quality_score(df, signal_col, returns_col)
