@@ -5539,6 +5539,7 @@ def cmd_changepoint(args: argparse.Namespace) -> int:
     """
     from imst_quant.config.settings import Settings
     from imst_quant.utils.change_point import analyze_change_points
+    import numpy as np
     import polars as pl
     import json as json_module
 
@@ -5565,15 +5566,25 @@ def cmd_changepoint(args: argparse.Namespace) -> int:
         print(f"Available columns: {df.columns}")
         return 1
 
-    returns = df[args.return_col].to_numpy()
+    raw = df[args.return_col].cast(pl.Float64).to_numpy()
+    # Drop NaN/inf, then map detector indices back to rows of the input file.
+    keep = np.flatnonzero(np.isfinite(raw))
+    row_of = np.append(keep, len(raw)).tolist()
 
     try:
         result = analyze_change_points(
-            returns,
+            raw[keep],
             cusum_threshold=args.threshold,
             cusum_drift=args.drift,
             min_segment=args.min_segment,
         )
+        for alarm in result["mean_shift"]["alarms"]:
+            alarm["index"] = row_of[alarm["index"]]
+        variance = result["variance"]
+        variance["break_indices"] = [row_of[i] for i in variance["break_indices"]]
+        for seg in variance["segments"]:
+            seg["start"], seg["end"] = row_of[seg["start"]], row_of[seg["end"]]
+        result["n_dropped"] = len(raw) - len(keep)
 
         if args.json:
             print(json_module.dumps(result, indent=2, default=float))
@@ -5582,6 +5593,8 @@ def cmd_changepoint(args: argparse.Namespace) -> int:
             variance = result["variance"]
             print("\n=== Change-Point Analysis ===\n")
             print(f"Observations:        {result['n_observations']:>10}")
+            if result["n_dropped"]:
+                print(f"Dropped non-finite:  {result['n_dropped']:>10}")
             print(f"Stability:           {result['stability']:>10}")
             print(f"\nMean-shift alarms (CUSUM, threshold {mean_shift['threshold']:.1f}):")
             if mean_shift["alarms"]:
