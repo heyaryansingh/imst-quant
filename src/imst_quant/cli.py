@@ -4524,14 +4524,19 @@ def cmd_distribution(args: argparse.Namespace) -> int:
 
     df = pl.read_parquet(features_path)
 
-    if args.asset and "asset" in df.columns:
-        df = df.filter(pl.col("asset") == args.asset)
+    asset_col = next((c for c in ("asset", "asset_id", "ticker") if c in df.columns), None)
+    if args.asset and asset_col:
+        df = df.filter(pl.col(asset_col) == args.asset)
 
     if "returns" not in df.columns:
         print("Error: 'returns' column not found in features file")
         return 1
 
-    returns = df["returns"].drop_nulls().to_pandas()
+    returns = df["returns"].cast(pl.Float64).drop_nulls()
+    returns = returns.filter(returns.is_finite()).to_pandas()
+    if len(returns) < 3:
+        print(f"Error: Need at least 3 finite returns, got {len(returns)}")
+        return 1
 
     output = {}
 
