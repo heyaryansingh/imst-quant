@@ -98,3 +98,21 @@ def test_adaptive_uses_available_history_when_shorter_than_lookback():
     assert not weights.isna().any()
     assert weights.sum() == pytest.approx(1.0)
     assert weights["A"] > weights["B"]
+
+
+def test_riskparity_drops_nan_return_dates(tmp_path, capsys):
+    path = _features_file(tmp_path)
+    df = pl.read_parquet(path)
+    first = df["date"].min()
+    df = df.with_columns(
+        pl.when((pl.col("date") == first) & (pl.col("asset_id") == "MID"))
+        .then(float("nan"))
+        .otherwise(pl.col("return_1d"))
+        .alias("return_1d")
+    )
+    df.write_parquet(path)
+    args = create_parser().parse_args(["riskparity", "--features", str(path), "--json", "--lookback", "400"])
+    assert cmd_riskparity(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["observations"] == 299
+    assert all(np.isfinite(a["weight"]) for a in payload["assets"].values())

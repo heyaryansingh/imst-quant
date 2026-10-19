@@ -7062,7 +7062,7 @@ def cmd_shrinkage(args: argparse.Namespace) -> int:
 
     panel = df.select(
         [args.date_col, asset_col, args.return_col]
-    ).drop_nulls()
+    ).drop_nulls().filter(pl.col(args.return_col).is_finite())
 
     # Assets with a short history would otherwise pull the whole panel down to
     # their overlap once the wide matrix drops incomplete rows.
@@ -7297,7 +7297,11 @@ def cmd_fracdiff(args: argparse.Namespace) -> int:
         }
 
     grid = [args.d] if args.d is not None else [round(0.05 * i, 2) for i in range(21)]
-    panel = df.select([args.date_col, asset_col, args.return_col]).drop_nulls()
+    panel = (
+        df.select([args.date_col, asset_col, args.return_col])
+        .drop_nulls()
+        .filter(pl.col(args.return_col).is_finite())
+    )
     assets = {}
     skipped = []
     for (asset,), group in panel.sort(args.date_col).group_by(
@@ -7408,6 +7412,7 @@ def cmd_riskparity(args: argparse.Namespace) -> int:
     wide = (
         df.select([args.date_col, asset_col, args.return_col])
         .drop_nulls()
+        .filter(pl.col(args.return_col).is_finite())
         .unique(subset=[args.date_col, asset_col], keep="last")
         .pivot(on=asset_col, index=args.date_col, values=args.return_col)
         .sort(args.date_col)
@@ -7557,7 +7562,11 @@ def cmd_voltarget(args: argparse.Namespace) -> int:
     )
     targeter = VolatilityTargeter(config)
 
-    panel = df.select([args.date_col, asset_col, args.return_col]).drop_nulls()
+    panel = (
+        df.select([args.date_col, asset_col, args.return_col])
+        .drop_nulls()
+        .filter(pl.col(args.return_col).is_finite())
+    )
     assets = {}
     series_by_asset = {}
     skipped = []
@@ -7966,7 +7975,11 @@ def cmd_barriers(args: argparse.Namespace) -> int:
             print(f"Available columns: {df.columns}")
             return 1
 
-    panel = df.select([args.date_col, asset_col, args.price_col]).drop_nulls()
+    panel = (
+        df.select([args.date_col, asset_col, args.price_col])
+        .drop_nulls()
+        .filter(pl.col(args.price_col).is_finite())
+    )
     if (panel[args.price_col] <= 0).any():
         print(f"Error: Column '{args.price_col}' must contain positive prices")
         return 1
