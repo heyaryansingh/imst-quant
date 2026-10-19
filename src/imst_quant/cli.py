@@ -8357,6 +8357,10 @@ def cmd_consistency(args: argparse.Namespace) -> int:
         return 1
 
     df = df.select(wanted).drop_nulls()
+    # NaN is not null in polars; drop it so one bad bar can't NaN every statistic
+    floats = [c for c, t in df.schema.items() if t.is_float()]
+    if floats:
+        df = df.filter(pl.all_horizontal(pl.col(c).is_finite() for c in floats))
     if df.height < 2:
         print(f"Error: Need at least 2 non-null rows, got {df.height}")
         return 1
@@ -8551,6 +8555,10 @@ def cmd_signal_corr(args: argparse.Namespace) -> int:
         return 1
 
     df = df.select(needed).drop_nulls()
+    # NaN is not null in polars; drop it so one bad bar can't NaN every statistic
+    floats = [c for c, t in df.schema.items() if t.is_float()]
+    if floats:
+        df = df.filter(pl.all_horizontal(pl.col(c).is_finite() for c in floats))
     if df.height < 3:
         print(f"Error: Need at least 3 complete rows, got {df.height}")
         return 1

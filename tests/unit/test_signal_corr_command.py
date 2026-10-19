@@ -59,3 +59,15 @@ def test_signal_corr_rejects_bad_input(tmp_path, capsys, extra):
     code, out = _run(tmp_path, capsys, *extra)
     assert code == 1
     assert "Error" in out
+
+
+def test_signal_corr_skips_nan_rows(tmp_path, capsys):
+    rng = np.random.default_rng(4)
+    a = rng.normal(size=50)
+    df = pl.DataFrame({"a": np.r_[np.nan, a], "b": np.r_[1.0, a * 2]})
+    path = tmp_path / "signals.parquet"
+    df.write_parquet(path)
+    args = create_parser().parse_args(["signal-corr", "--data", str(path), "--signals", "a,b", "--json"])
+    assert cmd_signal_corr(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [(p["a"], p["b"]) for p in payload["redundant_pairs"]] == [("a", "b")]
