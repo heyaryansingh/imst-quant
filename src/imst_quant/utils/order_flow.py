@@ -335,6 +335,14 @@ def analyze_order_flow(
         >>> metrics = analyze_order_flow(prices, volumes)
         >>> print(f"VPIN: {metrics.vpin:.3f}")
     """
+    # Drop trades with a missing/infinite price or volume; one NaN volume
+    # otherwise poisons the cumulative sum that VPIN buckets on.
+    prices = pd.to_numeric(prices, errors="coerce").astype(float)
+    volumes = pd.to_numeric(volumes, errors="coerce").astype(float)
+    valid = np.isfinite(prices.to_numpy()) & np.isfinite(volumes.to_numpy())
+    prices = prices[valid].reset_index(drop=True)
+    volumes = volumes[valid].reset_index(drop=True)
+
     signs = classify_trades(prices)
 
     # Volume classification

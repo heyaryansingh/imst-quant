@@ -3909,6 +3909,11 @@ def cmd_orderflow(args: argparse.Namespace) -> int:
         print("Error: Could not find price and volume columns")
         return 1
 
+    # Tick-rule classification depends on trade order.
+    time_col = next((c for c in ("timestamp", "time", "datetime", "date") if c in df.columns), None)
+    if time_col:
+        df = df.sort_values(time_col, kind="stable")
+
     prices = df[price_col]
     volumes = df[volume_col]
 
