@@ -42,39 +42,34 @@ def remove_outliers(
     if df.is_empty() or column not in df.columns:
         return df
 
-    if method == "iqr":
-        q1 = df[column].quantile(0.25)
-        q3 = df[column].quantile(0.75)
-        iqr = q3 - q1
+    # Bounds come from finite values only; missing (null/NaN) rows are kept
+    # for fill_missing to handle rather than silently dropped as outliers.
+    values = df[column].cast(pl.Float64)
+    finite = values.filter(values.is_finite())
+    if finite.is_empty():
+        return df
 
+    if method == "iqr":
+        q1 = finite.quantile(0.25)
+        q3 = finite.quantile(0.75)
+        iqr = q3 - q1
         lower_bound = q1 - threshold * iqr
         upper_bound = q3 + threshold * iqr
-
-        return df.filter(
-            (pl.col(column) >= lower_bound) & (pl.col(column) <= upper_bound)
-        )
-
     elif method == "zscore":
-        mean = df[column].mean()
-        std = df[column].std()
-
-        return df.filter(
-            (pl.col(column) >= mean - threshold * std) &
-            (pl.col(column) <= mean + threshold * std)
-        )
-
+        mean = finite.mean()
+        std = finite.std() or 0.0
+        lower_bound = mean - threshold * std
+        upper_bound = mean + threshold * std
     elif method == "percentile":
-        lower_pct = threshold
-        upper_pct = 100 - threshold
+        lower_bound = finite.quantile(threshold / 100)
+        upper_bound = finite.quantile(1 - threshold / 100)
+    else:
+        return df
 
-        lower_bound = df[column].quantile(lower_pct / 100)
-        upper_bound = df[column].quantile(upper_pct / 100)
-
-        return df.filter(
-            (pl.col(column) >= lower_bound) & (pl.col(column) <= upper_bound)
-        )
-
-    return df
+    col = pl.col(column).cast(pl.Float64)
+    return df.filter(
+        col.is_null() | col.is_nan() | col.is_between(lower_bound, upper_bound)
+    )
 
 
 def fill_missing_data(
