@@ -2659,7 +2659,7 @@ def cmd_correlation(args: argparse.Namespace) -> int:
             print(f"Error: Could not calculate correlation for {args.asset1} and {args.asset2}")
             return 1
 
-        valid_corr = rolling_corr.filter(pl.col("rolling_correlation").is_not_null())
+        valid_corr = rolling_corr.filter(pl.col("rolling_correlation").is_finite())
         if valid_corr.height > 0:
             avg_corr = valid_corr["rolling_correlation"].mean()
             min_corr = valid_corr["rolling_correlation"].min()
@@ -2671,9 +2671,9 @@ def cmd_correlation(args: argparse.Namespace) -> int:
                     "asset1": args.asset1,
                     "asset2": args.asset2,
                     "window": args.rolling_window,
-                    "avg_correlation": float(avg_corr) if avg_corr else None,
-                    "min_correlation": float(min_corr) if min_corr else None,
-                    "max_correlation": float(max_corr) if max_corr else None,
+                    "avg_correlation": float(avg_corr),
+                    "min_correlation": float(min_corr),
+                    "max_correlation": float(max_corr),
                     "latest_correlation": latest_corr,
                 }
                 print(json_module.dumps(result, indent=2))
@@ -2682,15 +2682,21 @@ def cmd_correlation(args: argparse.Namespace) -> int:
                 print(f"Window:        {args.rolling_window} periods")
                 print(f"Data points:   {valid_corr.height}")
                 print()
-                print(f"Average:       {avg_corr:.4f}" if avg_corr else "Average:       N/A")
-                print(f"Minimum:       {min_corr:.4f}" if min_corr else "Minimum:       N/A")
-                print(f"Maximum:       {max_corr:.4f}" if max_corr else "Maximum:       N/A")
+                print(f"Average:       {avg_corr:.4f}")
+                print(f"Minimum:       {min_corr:.4f}")
+                print(f"Maximum:       {max_corr:.4f}")
                 print(f"Latest:        {latest_corr:.4f}")
                 print()
+        else:
+            print(
+                f"Error: Not enough overlapping finite returns for {args.asset1} and "
+                f"{args.asset2} in any {args.rolling_window}-period window"
+            )
+            return 1
     else:
         # Full correlation summary
         summary = calculate_correlation_summary(
-            df, return_col="return_1d", asset_col=asset_col
+            df, return_col="return_1d", asset_col=asset_col, method=args.method
         )
 
         if args.json:
@@ -2699,7 +2705,7 @@ def cmd_correlation(args: argparse.Namespace) -> int:
             matrix_dict = {
                 "assets": corr_matrix["asset"].to_list(),
                 "correlations": {
-                    col: corr_matrix[col].to_list()
+                    col: [None if v != v else v for v in corr_matrix[col].to_list()]
                     for col in corr_matrix.columns if col != "asset"
                 },
             }
@@ -2722,6 +2728,9 @@ def cmd_correlation(args: argparse.Namespace) -> int:
         else:
             print("\n=== Correlation Analysis Summary ===\n")
             print(f"Total asset pairs: {summary['total_pairs']}")
+            if summary["avg_correlation"] is None:
+                print("No asset pair has enough overlapping observations (need 30).")
+                return 0
             print(f"Average correlation: {summary['avg_correlation']:.4f}")
             print()
 

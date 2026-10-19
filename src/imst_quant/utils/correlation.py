@@ -76,8 +76,8 @@ def calculate_asset_correlation(
             if asset1 == asset2:
                 correlations.append(1.0)
             else:
-                # Get overlapping non-null values
-                mask = pivot_df[asset1].is_not_null() & pivot_df[asset2].is_not_null()
+                # Get overlapping finite values (NaN is not null in polars)
+                mask = _finite(pivot_df[asset1]) & _finite(pivot_df[asset2])
                 filtered = pivot_df.filter(mask)
 
                 if filtered.height < min_observations:
@@ -99,6 +99,11 @@ def calculate_asset_correlation(
         corr_data[asset1] = correlations
 
     return pl.DataFrame(corr_data)
+
+
+def _finite(s: pl.Series) -> pl.Series:
+    """Boolean mask that is False for null, NaN and inf."""
+    return s.cast(pl.Float64).is_finite().fill_null(False)
 
 
 def _pearson_corr(s1: pl.Series, s2: pl.Series) -> float:
@@ -181,8 +186,8 @@ def calculate_rolling_correlation(
             window_s1 = s1.slice(i - window + 1, window)
             window_s2 = s2.slice(i - window + 1, window)
 
-            # Remove null pairs
-            valid_mask = window_s1.is_not_null() & window_s2.is_not_null()
+            # Remove null/NaN pairs
+            valid_mask = _finite(window_s1) & _finite(window_s2)
             valid_s1 = window_s1.filter(valid_mask)
             valid_s2 = window_s2.filter(valid_mask)
 
@@ -357,6 +362,7 @@ def calculate_correlation_summary(
     return_col: str = "return_1d",
     asset_col: str = "ticker",
     date_col: str = "date",
+    method: str = "pearson",
 ) -> Dict[str, Any]:
     """Generate comprehensive correlation analysis summary.
 
@@ -367,6 +373,7 @@ def calculate_correlation_summary(
         return_col: Column name for returns.
         asset_col: Column name for asset identifiers.
         date_col: Column name for dates.
+        method: Correlation method ('pearson' or 'spearman').
 
     Returns:
         Dictionary with:
@@ -382,7 +389,7 @@ def calculate_correlation_summary(
         >>> print(f"Average correlation: {summary['avg_correlation']:.3f}")
     """
     corr_matrix = calculate_asset_correlation(
-        df, return_col=return_col, asset_col=asset_col, date_col=date_col
+        df, return_col=return_col, asset_col=asset_col, date_col=date_col, method=method
     )
 
     assets = corr_matrix["asset"].to_list()
@@ -397,12 +404,13 @@ def calculate_correlation_summary(
 
     if not pairs:
         return {
-            "avg_correlation": float("nan"),
+            "avg_correlation": None,
             "min_correlation": None,
             "max_correlation": None,
             "correlation_matrix": corr_matrix,
             "highly_correlated": [],
             "negatively_correlated": [],
+            "total_pairs": 0,
         }
 
     correlations = [p[2] for p in pairs]
