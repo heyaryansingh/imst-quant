@@ -4584,13 +4584,22 @@ def cmd_signal(args: argparse.Namespace) -> int:
         print(f"Error: Returns column '{args.returns_col}' not found")
         return 1
 
-    signal = df[args.signal_col].drop_nulls().to_pandas()
-    returns = df[args.returns_col].drop_nulls().to_pandas()
-
-    # Align series
-    common_idx = signal.index.intersection(returns.index)
-    signal = signal.loc[common_idx]
-    returns = returns.loc[common_idx]
+    # Drop incomplete rows jointly: dropping per column re-indexes each series,
+    # so a null in one would pair every later signal with the wrong return.
+    pairs = (
+        df.select(
+            pl.col(args.signal_col).cast(pl.Float64).alias("signal"),
+            pl.col(args.returns_col).cast(pl.Float64).alias("returns"),
+        )
+        .drop_nulls()
+        .filter(pl.col("signal").is_finite() & pl.col("returns").is_finite())
+        .to_pandas()
+    )
+    if len(pairs) < 2:
+        print(f"Error: Need at least 2 rows with both signal and return, got {len(pairs)}")
+        return 1
+    signal = pairs["signal"]
+    returns = pairs["returns"]
 
     output = {}
 
