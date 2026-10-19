@@ -11,6 +11,7 @@ Functions:
     estimate_total_cost: Comprehensive transaction cost estimate
     analyze_turnover_costs: Analyze costs associated with portfolio turnover
     optimal_execution_schedule: Calculate optimal trade execution schedule
+    signal_cost_sensitivity: Breakeven cost and net Sharpe for a position series
 
 Example:
     >>> import polars as pl
@@ -403,3 +404,77 @@ def batch_cost_analysis(
 
     cost_df = pl.DataFrame(results)
     return pl.concat([trades_df, cost_df], how="horizontal")
+
+
+def signal_cost_sensitivity(
+    positions: np.ndarray,
+    returns: np.ndarray,
+    costs_bps: List[float],
+    periods_per_year: int = 252,
+) -> Dict[str, object]:
+    """Measure how much trading cost a position series can absorb.
+
+    Position ``positions[t]`` earns ``returns[t]``; moving from
+    ``positions[t-1]`` to ``positions[t]`` costs ``|delta| * cost_bps / 1e4``.
+    The first period pays to enter from flat.
+
+    Args:
+        positions: Position (signed exposure) held over each period.
+        returns: Asset return realized over each period.
+        costs_bps: One-way costs, in basis points of traded notional, to evaluate.
+        periods_per_year: Annualization factor.
+
+    Returns:
+        Dict with gross stats, ``breakeven_cost_bps`` (cost at which total net
+        PnL is zero; None when there is no turnover or gross PnL <= 0) and a
+        ``scenarios`` list of net stats per cost level.
+
+    Example:
+        >>> pos = np.array([1.0, 1.0, -1.0, -1.0])
+        >>> ret = np.array([0.01, 0.02, -0.01, -0.02])
+        >>> signal_cost_sensitivity(pos, ret, [10.0])["breakeven_cost_bps"]
+        200.0
+    """
+    positions = np.asarray(positions, dtype=float)
+    returns = np.asarray(returns, dtype=float)
+    if positions.shape != returns.shape or positions.ndim != 1:
+        raise ValueError("positions and returns must be 1-D arrays of equal length")
+    if len(positions) < 2:
+        raise ValueError("need at least 2 periods")
+    if any(c < 0 for c in costs_bps):
+        raise ValueError("costs_bps must be non-negative")
+
+    gross = positions * returns
+    turnover = np.abs(np.diff(positions, prepend=0.0))
+    total_turnover = float(turnover.sum())
+
+    def _stats(pnl: np.ndarray) -> Dict[str, float]:
+        std = float(pnl.std(ddof=1))
+        mean = float(pnl.mean())
+        sharpe = mean / std * np.sqrt(periods_per_year) if std > 0 else 0.0
+        return {
+            "total_pnl": float(pnl.sum()),
+            "annual_return": mean * periods_per_year,
+            "sharpe": float(sharpe),
+        }
+
+    gross_total = float(gross.sum())
+    breakeven = (
+        gross_total / total_turnover * 1e4
+        if total_turnover > 0 and gross_total > 0
+        else None
+    )
+
+    scenarios = []
+    for cost in sorted(costs_bps):
+        net = gross - turnover * cost / 1e4
+        scenarios.append({"cost_bps": float(cost), **_stats(net)})
+
+    return {
+        "n_periods": len(positions),
+        "total_turnover": total_turnover,
+        "annual_turnover": total_turnover / len(positions) * periods_per_year,
+        "gross": _stats(gross),
+        "breakeven_cost_bps": breakeven,
+        "scenarios": scenarios,
+    }

@@ -1839,6 +1839,35 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- breakeven subcommand ---
+    breakeven_parser = subparsers.add_parser(
+        "breakeven",
+        help="Breakeven trading cost (bps) and net Sharpe across cost levels for a position series",
+    )
+    breakeven_parser.add_argument(
+        "--data", required=True, help="Path to parquet file with signal and returns columns"
+    )
+    breakeven_parser.add_argument(
+        "--signal-col", default="signal", help="Position/signal column (default: signal)"
+    )
+    breakeven_parser.add_argument(
+        "--returns-col", default="returns", help="Returns column name (default: returns)"
+    )
+    breakeven_parser.add_argument(
+        "--date-col", default="date", help="Date column used for ordering if present (default: date)"
+    )
+    breakeven_parser.add_argument(
+        "--costs",
+        default="0,5,10,25,50",
+        help="Comma-separated one-way costs in bps to evaluate (default: 0,5,10,25,50)",
+    )
+    breakeven_parser.add_argument(
+        "--periods-per-year", type=int, default=252, help="Annualization factor (default: 252)"
+    )
+    breakeven_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     # --- bootstrap subcommand ---
     bootstrap_parser = subparsers.add_parser(
         "bootstrap",
@@ -8790,6 +8819,87 @@ def cmd_calendar(args: argparse.Namespace) -> int:
 
 # Maps the subcommand name registered in create_parser to its handler. Keep in
 # sync with create_parser; tests/unit/test_cli_dispatch.py enforces that.
+def cmd_breakeven(args: argparse.Namespace) -> int:
+    """Report the trading cost at which a position series stops making money.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.utils.transaction_costs import signal_cost_sensitivity
+
+    try:
+        costs = [float(c) for c in args.costs.split(",") if c.strip()]
+    except ValueError:
+        print(f"Error: --costs must be comma-separated numbers, got {args.costs!r}")
+        return 1
+    if not costs or any(c < 0 for c in costs):
+        print("Error: --costs must contain non-negative values")
+        return 1
+    if args.periods_per_year <= 0:
+        print(f"Error: --periods-per-year must be positive, got {args.periods_per_year}")
+        return 1
+
+    data_path = Path(args.data)
+    if not data_path.exists():
+        print(f"Error: Data file not found: {data_path}")
+        return 1
+    try:
+        df = pl.read_parquet(data_path)
+    except Exception as e:
+        print(f"Error reading data file: {e}")
+        return 1
+
+    missing = [c for c in (args.signal_col, args.returns_col) if c not in df.columns]
+    if missing:
+        print(f"Error: Missing columns {missing}")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    if args.date_col in df.columns:
+        df = df.sort(args.date_col)
+    # Dropping a row in the middle merges two position changes into one, which
+    # understates turnover slightly; acceptable versus poisoning every sum with NaN.
+    df = df.select(
+        pl.col(args.signal_col).cast(pl.Float64).alias("pos"),
+        pl.col(args.returns_col).cast(pl.Float64).alias("r"),
+    ).drop_nulls().filter(pl.col("pos").is_finite() & pl.col("r").is_finite())
+    if df.height < 2:
+        print(f"Error: Need at least 2 complete rows, got {df.height}")
+        return 1
+
+    result = signal_cost_sensitivity(
+        df["pos"].to_numpy(), df["r"].to_numpy(), costs, args.periods_per_year
+    )
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    gross = result["gross"]
+    print("\n=== Breakeven Cost Analysis ===\n")
+    print(f"Periods:             {result['n_periods']:>10,}")
+    print(f"Annual Turnover:     {result['annual_turnover']:>10.2f}x")
+    print(f"Gross Annual Return: {gross['annual_return']:>10.2%}")
+    print(f"Gross Sharpe:        {gross['sharpe']:>10.2f}")
+    be = result["breakeven_cost_bps"]
+    print(f"Breakeven Cost:      {'n/a' if be is None else f'{be:.1f} bps':>10}")
+    print()
+    print(f"{'Cost (bps)':>10}  {'Ann. Return':>12}  {'Sharpe':>8}")
+    for row in result["scenarios"]:
+        print(f"{row['cost_bps']:>10.1f}  {row['annual_return']:>12.2%}  {row['sharpe']:>8.2f}")
+    if be is None:
+        print("\nNo positive gross PnL (or no turnover): there is no cost to break even against.")
+    print()
+    return 0
+
+
 COMMANDS = {
         "ingest": cmd_ingest,
         "process": cmd_process,
@@ -8854,6 +8964,7 @@ COMMANDS = {
         "bootstrap": cmd_bootstrap,
         "pbo": cmd_pbo,
         "calendar": cmd_calendar,
+        "breakeven": cmd_breakeven,
 }
 
 
