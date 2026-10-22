@@ -244,7 +244,9 @@ def analyze_win_loss_clustering(
     Returns:
         Dictionary with streak analysis
     """
-    trades = trades.copy()
+    # NaN/inf PnL (open or unpriced trades) is neither a win nor a loss
+    pnl = pd.to_numeric(trades[pnl_col], errors='coerce')
+    trades = trades[np.isfinite(pnl)].copy()
     trades['win'] = trades[pnl_col] > 0
 
     # Identify streaks
