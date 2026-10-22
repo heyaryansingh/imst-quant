@@ -32,7 +32,9 @@ class VaRCalculator:
             raise ValueError(
                 f"confidence_level must be a fraction in (0, 1), got {confidence_level}"
             )
-        self.returns = returns
+        # inf (e.g. a return off a zero price) would turn mean/std into NaN;
+        # treat it as missing like NaN so every method skips it.
+        self.returns = pd.Series(returns, dtype=float).replace([np.inf, -np.inf], np.nan)
         self.confidence_level = confidence_level
         self.method = method
         self.alpha = 1 - confidence_level

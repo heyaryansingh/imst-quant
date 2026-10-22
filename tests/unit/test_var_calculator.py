@@ -15,3 +15,16 @@ def test_rejects_confidence_outside_unit_interval(level):
 def test_historical_var_is_positive_loss():
     returns = pd.Series([-0.05, -0.01, 0.0, 0.01, 0.02] * 20)
     assert VaRCalculator(returns, 0.95).calculate_var() > 0
+
+
+@pytest.mark.parametrize("method", ["parametric", "historical", "monte_carlo"])
+def test_inf_returns_are_ignored(method):
+    clean = pd.Series([-0.05, -0.01, 0.0, 0.01, 0.02] * 20)
+    dirty = pd.concat([clean, pd.Series([float("inf"), float("-inf"), float("nan")])])
+    calc = VaRCalculator(dirty, 0.95, method)
+    var, cvar = calc.calculate_var(), calc.conditional_var()
+    assert pd.notna(var) and pd.notna(cvar)
+    if method != "monte_carlo":
+        ref = VaRCalculator(clean, 0.95, method)
+        assert var == pytest.approx(ref.calculate_var())
+        assert cvar == pytest.approx(ref.conditional_var())
