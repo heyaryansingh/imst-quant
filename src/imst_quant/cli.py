@@ -1592,6 +1592,56 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- corrregime subcommand ---
+    corrregime_parser = subparsers.add_parser(
+        "corrregime",
+        help="Classify the cross-asset correlation regime (crisis/elevated/"
+             "normal/decorrelated) and flag pairs whose correlation shifted",
+    )
+    corrregime_parser.add_argument(
+        "--features", help="Path to features parquet (default: gold/features.parquet)"
+    )
+    corrregime_parser.add_argument(
+        "--window", type=int, default=60,
+        help="Recent window used for the current regime (default: 60)",
+    )
+    corrregime_parser.add_argument(
+        "--baseline", type=int, default=252,
+        help="Trailing days for the baseline the recent window is compared to "
+             "(default: 252)",
+    )
+    corrregime_parser.add_argument(
+        "--crisis", type=float, default=0.7,
+        help="Mean |correlation| at or above which the regime is crisis (default: 0.7)",
+    )
+    corrregime_parser.add_argument(
+        "--elevated", type=float, default=0.5,
+        help="Mean |correlation| at or above which the regime is elevated (default: 0.5)",
+    )
+    corrregime_parser.add_argument(
+        "--decorrelated", type=float, default=0.15,
+        help="Mean |correlation| below which the regime is decorrelated (default: 0.15)",
+    )
+    corrregime_parser.add_argument(
+        "--change-threshold", type=float, default=0.3,
+        help="Correlation change vs. the previous window that flags a pair "
+             "(default: 0.3)",
+    )
+    corrregime_parser.add_argument(
+        "--return-col", default="return_1d",
+        help="Column name for returns (default: return_1d)",
+    )
+    corrregime_parser.add_argument(
+        "--asset-col",
+        help="Column name for assets (default: asset_id, falling back to ticker)",
+    )
+    corrregime_parser.add_argument(
+        "--date-col", default="date", help="Column name for dates (default: date)"
+    )
+    corrregime_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     # --- riskbudget subcommand ---
     riskbudget_parser = subparsers.add_parser(
         "riskbudget",
@@ -7822,6 +7872,165 @@ def cmd_riskparity(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_corrregime(args: argparse.Namespace) -> int:
+    """Report the current correlation regime and recent correlation shifts.
+
+    Returns are pivoted to a date x asset panel (dates where every asset has a
+    finite return). The last ``--window`` rows are classified against the
+    thresholds and compared with the preceding ``--baseline`` rows; the last
+    two windows are compared pair by pair to flag correlation breaks.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.correlation_regime import (
+        correlation_stability,
+        detect_correlation_regime,
+    )
+
+    if args.window < 10:
+        print(f"Error: --window must be at least 10, got {args.window}")
+        return 1
+    if args.baseline <= args.window:
+        print(
+            f"Error: --baseline ({args.baseline}) must exceed --window ({args.window})"
+        )
+        return 1
+    if not 0 <= args.decorrelated < args.elevated < args.crisis <= 1:
+        print(
+            "Error: thresholds must satisfy 0 <= --decorrelated < --elevated "
+            "< --crisis <= 1"
+        )
+        return 1
+    if args.change_threshold <= 0:
+        print(
+            f"Error: --change-threshold must be positive, got {args.change_threshold}"
+        )
+        return 1
+
+    features_path = (
+        Path(args.features)
+        if args.features
+        else Path(Settings().data.gold_dir) / "features.parquet"
+    )
+    if not features_path.exists():
+        print(f"Error: Features file not found at {features_path}")
+        return 1
+    try:
+        df = pl.read_parquet(features_path)
+    except Exception as e:
+        print(f"Error reading features file: {e}")
+        return 1
+
+    if args.asset_col:
+        asset_col = args.asset_col
+    elif "asset_id" in df.columns:
+        asset_col = "asset_id"
+    else:
+        asset_col = "ticker"
+    for column in (asset_col, args.return_col, args.date_col):
+        if column not in df.columns:
+            print(f"Error: Column '{column}' not found in features file")
+            print(f"Available columns: {df.columns}")
+            return 1
+
+    wide = (
+        df.select([args.date_col, asset_col, args.return_col])
+        .drop_nulls()
+        .filter(pl.col(args.return_col).is_finite())
+        .unique(subset=[args.date_col, asset_col], keep="last")
+        .pivot(on=asset_col, index=args.date_col, values=args.return_col)
+        .sort(args.date_col)
+        .drop_nulls()
+    )
+    returns = wide.drop(args.date_col).tail(args.baseline)
+    returns.columns = [str(c) for c in returns.columns]
+
+    if returns.width < 2:
+        print("Error: Need at least 2 assets with overlapping returns")
+        return 1
+    if returns.height < args.window:
+        print(
+            f"Error: Need at least {args.window} overlapping dates, "
+            f"got {returns.height}"
+        )
+        return 1
+
+    regime = detect_correlation_regime(
+        returns,
+        window=args.window,
+        baseline_window=args.baseline,
+        crisis_threshold=args.crisis,
+        elevated_threshold=args.elevated,
+        decorrelated_threshold=args.decorrelated,
+    )
+    stability = correlation_stability(
+        returns, window=args.window, change_threshold=args.change_threshold
+    )
+    has_prior_window = returns.height >= 2 * args.window
+
+    output = {
+        "regime": regime.regime.value,
+        "assets": returns.width,
+        "observations": returns.height,
+        "window": args.window,
+        "mean_abs_correlation": regime.mean_correlation,
+        "median_abs_correlation": regime.median_correlation,
+        "max_abs_correlation": regime.max_correlation,
+        "min_abs_correlation": regime.min_correlation,
+        "correlation_dispersion": regime.correlation_dispersion,
+        "pc1_variance_share": regime.eigenvalue_concentration,
+        "divergence_from_baseline": regime.divergence_from_baseline,
+        "stability": {
+            "compared": has_prior_window,
+            "is_stable": stability.is_stable,
+            "frobenius_distance": stability.frobenius_distance,
+            "max_pairwise_change": stability.max_pairwise_change,
+            "unstable_pairs": [
+                {"pair": [a, b], "change": change}
+                for a, b, change in stability.unstable_pairs
+            ],
+        },
+    }
+
+    if args.json:
+        print(json_module.dumps(output, indent=2))
+        return 0
+
+    print(
+        f"\nCorrelation regime: {output['regime'].upper()}  "
+        f"({returns.width} assets, last {args.window} of {returns.height} days)"
+    )
+    print("=" * 56)
+    print(f"Mean |corr|:              {regime.mean_correlation:.3f}")
+    print(
+        f"Median / min / max:       {regime.median_correlation:.3f} / "
+        f"{regime.min_correlation:.3f} / {regime.max_correlation:.3f}"
+    )
+    print(f"PC1 variance share:       {regime.eigenvalue_concentration:.1%}")
+    print(f"Divergence vs baseline:   {regime.divergence_from_baseline:.3f}")
+    if not has_prior_window:
+        print(f"Stability: need {2 * args.window} days to compare windows")
+    elif stability.is_stable:
+        print(
+            f"Stable: no pair moved >= {args.change_threshold:.2f} "
+            f"(max change {stability.max_pairwise_change:.3f})"
+        )
+    else:
+        print(f"Unstable pairs (|change| >= {args.change_threshold:.2f}):")
+        for a, b, change in stability.unstable_pairs[:10]:
+            print(f"  {a} / {b}: {change:.3f}")
+    return 0
+
+
 def cmd_riskbudget(args: argparse.Namespace) -> int:
     """Report which assets drive a given portfolio's volatility and tail loss.
 
@@ -9447,6 +9656,7 @@ COMMANDS = {
         "shrinkage": cmd_shrinkage,
         "voltarget": cmd_voltarget,
         "riskparity": cmd_riskparity,
+        "corrregime": cmd_corrregime,
         "riskbudget": cmd_riskbudget,
         "fracdiff": cmd_fracdiff,
         "comoments": cmd_comoments,
