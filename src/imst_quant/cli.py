@@ -1592,6 +1592,25 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- behavior subcommand ---
+    behavior_parser = subparsers.add_parser(
+        "behavior",
+        help="Audit closed journal trades for revenge trading, sizing up after "
+             "losses and oversized bets, and what those habits cost",
+    )
+    behavior_parser.add_argument(
+        "--journal",
+        help="Path to trade journal JSON (default: gold/trade_journal.json)",
+    )
+    behavior_parser.add_argument(
+        "--window-hours", type=float, default=2.0,
+        help="A trade entered within this many hours of a losing exit counts as "
+             "a revenge trade (default: 2)",
+    )
+    behavior_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     # --- corrregime subcommand ---
     corrregime_parser = subparsers.add_parser(
         "corrregime",
@@ -7872,6 +7891,142 @@ def cmd_riskparity(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_behavior(args: argparse.Namespace) -> int:
+    """Flag emotional trading habits in the journal and price their cost.
+
+    Closed trades with a PnL are checked for three habits: entering within
+    ``--window-hours`` of a losing exit (revenge), sizing up more than 20% right
+    after a loss, and positions more than two standard deviations above the
+    average notional. Each flagged group is compared with the clean trades.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+
+    import pandas as pd
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.trade_clustering import (
+        analyze_win_loss_clustering,
+        detect_emotional_trading_signals,
+    )
+    from imst_quant.utils.trade_journal import TradeJournal
+
+    if args.window_hours <= 0:
+        print(f"Error: --window-hours must be positive, got {args.window_hours}")
+        return 1
+
+    journal_path = (
+        Path(args.journal)
+        if args.journal
+        else Path(Settings().data.gold_dir) / "trade_journal.json"
+    )
+    if not journal_path.exists():
+        print(f"Error: Trade journal not found at {journal_path}")
+        return 1
+    journal = TradeJournal()
+    try:
+        journal.load(journal_path)
+    except Exception as e:
+        print(f"Error reading trade journal: {e}")
+        return 1
+
+    trades = pd.DataFrame(
+        [
+            {
+                "trade_id": t.trade_id,
+                "symbol": t.symbol,
+                "entry_time": t.entry_time,
+                "exit_time": t.exit_time,
+                "pnl": t.pnl,
+                "notional": abs(t.quantity * t.entry_price),
+            }
+            for t in journal.trades
+            if t.status == "closed" and t.pnl is not None and t.exit_time is not None
+        ]
+    )
+    if len(trades) < 2:
+        print(f"Error: Need at least 2 closed trades with PnL, got {len(trades)}")
+        return 1
+    trades["entry_time"] = pd.to_datetime(trades["entry_time"], utc=True)
+    trades["exit_time"] = pd.to_datetime(trades["exit_time"], utc=True)
+
+    flagged = detect_emotional_trading_signals(
+        trades, pnl_col="pnl", time_col="entry_time", size_col="notional"
+    ).reset_index(drop=True)
+
+    # Revenge: entered shortly after *any* earlier trade closed at a loss.
+    loss_exits = (
+        flagged.loc[flagged["pnl"] < 0, ["exit_time"]]
+        .rename(columns={"exit_time": "last_loss_exit"})
+        .sort_values("last_loss_exit")
+    )
+    flagged = pd.merge_asof(
+        flagged,
+        loss_exits,
+        left_on="entry_time",
+        right_on="last_loss_exit",
+        direction="backward",
+        allow_exact_matches=True,
+    )
+    flagged["revenge"] = (
+        flagged["entry_time"] - flagged["last_loss_exit"]
+    ) <= pd.Timedelta(hours=args.window_hours)
+
+    flags = {
+        "revenge": flagged["revenge"],
+        "size_up_after_loss": flagged["size_increase_after_loss"],
+        "oversized": flagged["unusually_large"],
+    }
+    clean = ~(flags["revenge"] | flags["size_up_after_loss"] | flags["oversized"])
+
+    def _group(mask) -> dict:
+        pnl = flagged.loc[mask, "pnl"]
+        return {
+            "trades": int(mask.sum()),
+            "win_rate": float((pnl > 0).mean()) if len(pnl) else None,
+            "avg_pnl": float(pnl.mean()) if len(pnl) else None,
+            "total_pnl": float(pnl.sum()),
+        }
+
+    output = {
+        "closed_trades": len(flagged),
+        "window_hours": args.window_hours,
+        "groups": {name: _group(mask) for name, mask in flags.items()},
+        "clean": _group(clean),
+        "streaks": analyze_win_loss_clustering(flagged, pnl_col="pnl"),
+        "revenge_trade_ids": flagged.loc[flags["revenge"], "trade_id"].tolist(),
+    }
+
+    if args.json:
+        print(json_module.dumps(output, indent=2))
+        return 0
+
+    def _fmt(value, spec: str) -> str:
+        return "-" if value is None else format(value, spec)
+
+    print(f"\nTrading behavior  {len(flagged)} closed trades")
+    print("=" * 60)
+    print(f"{'Group':<22}{'Trades':>8}{'Win rate':>10}{'Avg PnL':>10}{'Total':>10}")
+    print("-" * 60)
+    for name, g in [*output["groups"].items(), ("clean", output["clean"])]:
+        print(
+            f"{name:<22}{g['trades']:>8}{_fmt(g['win_rate'], '.0%'):>10}"
+            f"{_fmt(g['avg_pnl'], ',.2f'):>10}{g['total_pnl']:>10,.2f}"
+        )
+    print("-" * 60)
+    streaks = output["streaks"]
+    print(
+        f"Longest win/loss streak: {streaks['max_win_streak']}/"
+        f"{streaks['max_loss_streak']}"
+    )
+    return 0
+
+
 def cmd_corrregime(args: argparse.Namespace) -> int:
     """Report the current correlation regime and recent correlation shifts.
 
@@ -9657,6 +9812,7 @@ COMMANDS = {
         "voltarget": cmd_voltarget,
         "riskparity": cmd_riskparity,
         "corrregime": cmd_corrregime,
+        "behavior": cmd_behavior,
         "riskbudget": cmd_riskbudget,
         "fracdiff": cmd_fracdiff,
         "comoments": cmd_comoments,
