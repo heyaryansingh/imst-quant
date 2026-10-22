@@ -228,6 +228,9 @@ def aggregate_sector_sentiment(
     if ticker_col not in df.columns or sentiment_col not in df.columns:
         return []
 
+    # NaN/inf would poison the sector mean and be counted as bearish.
+    df = df.filter(pl.col(sentiment_col).is_finite())
+
     # Map tickers to sectors
     df = df.with_columns(
         pl.col(ticker_col)
