@@ -106,8 +106,12 @@ class BlackScholesModel:
             Dictionary with delta, gamma, vega, theta, rho
         """
         if time_to_expiry <= 0:
+            if option_type == OptionType.CALL:
+                delta = 1.0 if spot > strike else 0.0
+            else:
+                delta = -1.0 if spot < strike else 0.0
             return {
-                'delta': 1.0 if spot > strike else 0.0,
+                'delta': delta,
                 'gamma': 0.0,
                 'vega': 0.0,
                 'theta': 0.0,
