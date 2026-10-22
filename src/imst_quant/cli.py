@@ -5027,6 +5027,11 @@ def cmd_risk_metrics(args: argparse.Namespace) -> int:
         print(f"Available columns: {df.columns}")
         return 1
 
+    df = df.filter(pl.col(args.return_col).is_finite())
+    if df.height < 2:
+        print(f"Error: Need at least 2 finite values in '{args.return_col}'")
+        return 1
+
     try:
         metrics = calculate_all_metrics(
             df,
