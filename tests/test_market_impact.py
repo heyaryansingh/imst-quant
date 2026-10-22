@@ -14,6 +14,7 @@ import pytest
 
 from imst_quant.utils.market_impact import (
     AdaptiveImpactModel,
+    AlmgrenChrissModel,
     ImpactParameters,
     NonlinearImpactModel,
     SquareRootModel,
@@ -108,3 +109,38 @@ def test_estimate_slippage_sell_positive_when_execution_below_arrival():
 
     # favorable sell fill: arrival - execution = +1.0
     assert result["price_diff"][0] == pytest.approx(1.0)
+
+
+def test_sell_orders_cost_the_same_as_buys():
+    params = ImpactParameters(volatility=0.02, daily_volume=1_000_000)
+    for model in (SquareRootModel(params), NonlinearImpactModel(params)):
+        buy = model.estimate_impact(trade_size=50_000, current_price=100.0)
+        sell = model.estimate_impact(trade_size=-50_000, current_price=100.0)
+        assert np.isfinite(sell["impact_bps"])
+        assert sell["impact_bps"] == pytest.approx(buy["impact_bps"])
+        assert sell["total_cost"] == pytest.approx(buy["total_cost"])
+        assert sell["total_cost"] > 0
+
+
+def test_zero_or_negative_adv_is_rejected_not_defaulted():
+    model = SquareRootModel(ImpactParameters(daily_volume=1_000_000))
+    for adv in (0.0, -5.0, float("nan")):
+        with pytest.raises(ValueError):
+            model.estimate_impact(trade_size=1_000, current_price=10.0, adv=adv)
+
+
+@pytest.mark.parametrize("risk_aversion", [0.0, 1.0, 1e4])
+def test_almgren_chriss_trajectory_fully_liquidates(risk_aversion):
+    model = AlmgrenChrissModel(ImpactParameters())
+    sizes = model.optimal_trajectory(300_000, 2.0, 1_000_000, risk_aversion)
+    assert sizes.sum() == pytest.approx(300_000)
+    assert (sizes > 0).all()
+    # more risk aversion front-loads execution
+    if risk_aversion > 1:
+        assert sizes[0] > sizes[-1]
+
+
+def test_almgren_chriss_sub_hour_horizon_does_not_divide_by_zero():
+    model = AlmgrenChrissModel(ImpactParameters())
+    cost = model.expected_cost(10_000, 0.01, 1_000_000, 50.0)
+    assert np.isfinite(cost["cost_bps"]) and cost["optimal_periods"] == 1

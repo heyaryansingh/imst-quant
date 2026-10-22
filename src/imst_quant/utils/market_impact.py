@@ -11,6 +11,17 @@ import pandas as pd
 from dataclasses import dataclass
 
 
+def _participation(trade_size: float, adv: float) -> float:
+    """Order size as a fraction of ADV; side-agnostic so sells cost like buys.
+
+    Raises:
+        ValueError: If ``adv`` is not a positive finite number.
+    """
+    if not np.isfinite(adv) or adv <= 0:
+        raise ValueError(f"adv must be a positive finite number, got {adv}")
+    return abs(trade_size) / adv
+
+
 @dataclass
 class ImpactParameters:
     """Parameters for market impact models."""
@@ -50,8 +61,7 @@ class AlmgrenChrissModel:
         Returns:
             Permanent impact as fraction of price
         """
-        participation_rate = trade_size / adv
-        return self.params.permanent_impact * participation_rate
+        return self.params.permanent_impact * _participation(trade_size, adv)
 
     def temporary_impact(self, trade_rate: float, adv: float) -> float:
         """Calculate temporary market impact.
@@ -63,8 +73,7 @@ class AlmgrenChrissModel:
         Returns:
             Temporary impact as fraction of price
         """
-        participation_rate = trade_rate / adv
-        return self.params.temporary_impact * participation_rate
+        return self.params.temporary_impact * _participation(trade_rate, adv)
 
     def optimal_trajectory(
         self,
@@ -82,27 +91,28 @@ class AlmgrenChrissModel:
             risk_aversion: Risk aversion parameter (higher = trade slower)
 
         Returns:
-            Array of optimal trade sizes over time
+            Array of optimal trade sizes over time; they sum to
+            ``total_shares`` so the position is fully worked by the horizon.
         """
-        # Discretize time
-        n_periods = int(time_horizon * 24)  # Hourly periods
-        dt = time_horizon / n_periods
+        if time_horizon <= 0:
+            raise ValueError(f"time_horizon must be positive, got {time_horizon}")
+        n_periods = max(1, int(time_horizon * 24))  # Hourly periods
 
-        # Calculate trajectory using exponential decay
+        # Almgren-Chriss holdings x(t) = X sinh(kappa (T - t)) / sinh(kappa T);
+        # kappa -> 0 (no risk aversion) is the linear TWAP schedule.
         kappa = np.sqrt(
             risk_aversion * self.params.volatility**2 /
             (2 * self.params.temporary_impact)
         )
-        trajectory = np.zeros(n_periods + 1)
-        trajectory[0] = total_shares
+        remaining = 1.0 - np.linspace(0.0, 1.0, n_periods + 1)
+        if kappa * time_horizon > 1e-12:
+            remaining = (
+                np.sinh(kappa * time_horizon * remaining)
+                / np.sinh(kappa * time_horizon)
+            )
+        trajectory = total_shares * remaining
 
-        for i in range(n_periods):
-            trajectory[i + 1] = trajectory[i] * np.exp(-kappa * dt)
-
-        # Trade sizes (differences)
-        trade_sizes = -np.diff(trajectory)
-
-        return trade_sizes
+        return -np.diff(trajectory)
 
     def expected_cost(
         self,
@@ -130,14 +140,14 @@ class AlmgrenChrissModel:
 
         # Permanent impact cost
         perm_impact = self.permanent_impact(total_shares, adv)
-        perm_cost = 0.5 * perm_impact * total_shares * current_price
+        perm_cost = 0.5 * perm_impact * abs(total_shares) * current_price
 
         # Temporary impact cost
         temp_cost = 0
         for trade_size in trajectory:
             trade_rate = trade_size / (time_horizon / len(trajectory))
             temp_impact = self.temporary_impact(trade_rate, adv)
-            temp_cost += temp_impact * trade_size * current_price
+            temp_cost += temp_impact * abs(trade_size) * current_price
 
         total_cost = perm_cost + temp_cost
 
@@ -145,7 +155,8 @@ class AlmgrenChrissModel:
             'permanent_cost': perm_cost,
             'temporary_cost': temp_cost,
             'total_cost': total_cost,
-            'cost_bps': (total_cost / (total_shares * current_price)) * 10000,
+            'cost_bps': (total_cost / abs(total_shares * current_price)) * 10000
+            if total_shares and current_price else 0.0,
             'optimal_periods': len(trajectory)
         }
 
@@ -177,10 +188,11 @@ class SquareRootModel:
         Returns:
             Dictionary with impact estimates
         """
-        adv = adv or self.params.daily_volume
+        adv = self.params.daily_volume if adv is None else adv
+        participation = _participation(trade_size, adv)
+        trade_size = abs(trade_size)
 
         # Square-root impact
-        participation = trade_size / adv
         impact_fraction = self.params.volatility * np.sqrt(participation)
 
         # Add spread cost
@@ -231,9 +243,9 @@ class NonlinearImpactModel:
         Returns:
             Dictionary with impact estimates
         """
-        adv = adv or self.params.daily_volume
-
-        participation = trade_size / adv
+        adv = self.params.daily_volume if adv is None else adv
+        participation = _participation(trade_size, adv)
+        trade_size = abs(trade_size)
         beta = self.params.power_law_exponent
 
         # Nonlinear impact
@@ -332,7 +344,7 @@ class AdaptiveImpactModel:
         Returns:
             Dictionary with impact estimates from multiple models
         """
-        participation = trade_size / adv
+        participation = _participation(trade_size, adv)
 
         results = {
             'trade_size': trade_size,
