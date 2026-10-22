@@ -839,6 +839,39 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- ddscale subcommand ---
+    ddscale_parser = subparsers.add_parser(
+        "ddscale",
+        help="Backtest drawdown-scaled position sizing (linear/convex/concave/step) vs raw",
+    )
+    ddscale_parser.add_argument(
+        "--returns", help="Path to returns parquet file (default: gold/returns.parquet)"
+    )
+    ddscale_parser.add_argument(
+        "--return-col", default="returns", help="Column name for returns (default: returns)"
+    )
+    ddscale_parser.add_argument(
+        "--method", choices=["linear", "convex", "concave", "step", "all"], default="all",
+        help="Scaling curve, or 'all' to compare every curve (default: all)",
+    )
+    ddscale_parser.add_argument(
+        "--max-drawdown", type=float, default=0.20,
+        help="Drawdown at which the curve reaches --floor (default: 0.20)",
+    )
+    ddscale_parser.add_argument(
+        "--floor", type=float, default=0.25, help="Minimum scale factor (default: 0.25)"
+    )
+    ddscale_parser.add_argument(
+        "--kill-switch", type=float, default=0.30,
+        help="Drawdown that flattens the book (default: 0.30)",
+    )
+    ddscale_parser.add_argument(
+        "--periods", type=int, default=252, help="Trading periods per year (default: 252)"
+    )
+    ddscale_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     # --- var-backtest subcommand ---
     var_backtest_parser = subparsers.add_parser(
         "var-backtest", help="Backtest a VaR model with Kupiec and Christoffersen tests"
@@ -5319,6 +5352,21 @@ def cmd_sectors(args: argparse.Namespace) -> int:
     return 0
 
 
+def _equity_stats(x, periods: int) -> dict:
+    """Total return, annualized vol, Sharpe and max drawdown of a return series."""
+    import numpy as np
+
+    eq = np.cumprod(1 + x)
+    dd = 1 - eq / np.maximum.accumulate(np.maximum(eq, 1.0))
+    std = float(np.std(x, ddof=1))
+    return {
+        "total_return": float(eq[-1] - 1),
+        "volatility_annualized": std * float(np.sqrt(periods)),
+        "sharpe": float(np.mean(x) / std * np.sqrt(periods)) if std > 0 else 0.0,
+        "max_drawdown": float(dd.max()),
+    }
+
+
 def cmd_circuitbreaker(args: argparse.Namespace) -> int:
     """Compare a strategy with and without a tiered drawdown circuit breaker.
 
@@ -5390,24 +5438,13 @@ def cmd_circuitbreaker(args: argparse.Namespace) -> int:
     scale = np.r_[1.0, [s.position_scale for s in states[:-1]]]
     managed = r * scale
 
-    def _stats(x: np.ndarray) -> dict:
-        eq = np.cumprod(1 + x)
-        dd = 1 - eq / np.maximum.accumulate(np.maximum(eq, 1.0))
-        std = float(np.std(x, ddof=1))
-        return {
-            "total_return": float(eq[-1] - 1),
-            "volatility_annualized": std * float(np.sqrt(args.periods)),
-            "sharpe": float(np.mean(x) / std * np.sqrt(args.periods)) if std > 0 else 0.0,
-            "max_drawdown": float(dd.max()),
-        }
-
     actions = [s.current_action.value for s in states]
     output = {
         "observations": len(r),
         "thresholds": dict(zip(("warning", "reduce", "hedge", "halt"), levels)),
         "cooldown": args.cooldown,
-        "raw": _stats(r),
-        "managed": _stats(managed),
+        "raw": _equity_stats(r, args.periods),
+        "managed": _equity_stats(managed, args.periods),
         "time_in_action": {
             a: actions.count(a) / len(actions)
             for a in ("normal", "warning", "reduce", "hedge", "halt")
@@ -5439,6 +5476,119 @@ def cmd_circuitbreaker(args: argparse.Namespace) -> int:
     print(f"Halts: {output['halts']}  Avg exposure: {output['average_exposure']:.0%}")
     print(f"Now: {output['current_action'].upper()} "
           f"(position scale {output['current_position_scale']:.0%})")
+    return 0
+
+
+def cmd_ddscale(args: argparse.Namespace) -> int:
+    """Compare a strategy with and without drawdown-based position scaling.
+
+    The scale factor is computed from the raw strategy's drawdown after
+    period t-1 and applied to the return of period t (no look-ahead).
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+
+    import numpy as np
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.drawdown_position_scaling import ScalingConfig, get_scaling_state
+
+    if not 0 < args.max_drawdown <= 1:
+        print(f"Error: --max-drawdown must be in (0, 1], got {args.max_drawdown}")
+        return 1
+    if not 0 <= args.floor <= 1:
+        print(f"Error: --floor must be in [0, 1], got {args.floor}")
+        return 1
+    if not 0 < args.kill_switch <= 1:
+        print(f"Error: --kill-switch must be in (0, 1], got {args.kill_switch}")
+        return 1
+
+    returns_path = (
+        Path(args.returns)
+        if args.returns
+        else Path(Settings().data.gold_dir) / "returns.parquet"
+    )
+    if not returns_path.exists():
+        print(f"Error: Returns file not found: {returns_path}")
+        return 1
+    try:
+        df = pl.read_parquet(returns_path)
+    except Exception as e:
+        print(f"Error reading returns file: {e}")
+        return 1
+    if args.return_col not in df.columns:
+        print(f"Error: Column '{args.return_col}' not found in returns file")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    r = df[args.return_col].drop_nulls().drop_nans().to_numpy().astype(float)
+    r = r[np.isfinite(r)]
+    if len(r) < 2:
+        print(f"Error: Need at least 2 finite values in '{args.return_col}'")
+        return 1
+
+    equity = np.cumprod(1 + r)
+    hwm = np.maximum.accumulate(np.maximum(equity, 1.0))
+    methods = ["linear", "convex", "concave", "step"] if args.method == "all" else [args.method]
+
+    results = {}
+    for method in methods:
+        config = ScalingConfig(
+            method=method, max_drawdown=args.max_drawdown,
+            floor=args.floor, kill_switch=args.kill_switch,
+        )
+        states = [get_scaling_state(e, h, config) for e, h in zip(equity, hwm)]
+        scale = np.r_[1.0, [st.scale_factor for st in states[:-1]]]
+        results[method] = {
+            **_equity_stats(r * scale, args.periods),
+            "average_exposure": float(scale.mean()),
+            "time_halted": float(np.mean([st.is_halted for st in states])),
+            "current_scale": states[-1].scale_factor,
+        }
+
+    output = {
+        "observations": len(r),
+        "max_drawdown_param": args.max_drawdown,
+        "floor": args.floor,
+        "kill_switch": args.kill_switch,
+        "current_drawdown": float(1 - equity[-1] / hwm[-1]),
+        "raw": _equity_stats(r, args.periods),
+        "scaled": results,
+        "best_sharpe_method": max(results, key=lambda m: results[m]["sharpe"]),
+    }
+
+    if args.json:
+        print(json_module.dumps(output, indent=2))
+        return 0
+
+    width = 16 + 12 * (len(methods) + 1)
+    print(f"\nDrawdown position scaling  obs={len(r)}  "
+          f"max_dd={args.max_drawdown:.0%}  floor={args.floor:.0%}  "
+          f"kill={args.kill_switch:.0%}")
+    print("=" * width)
+    print(f"{'':<16}{'Raw':>12}" + "".join(f"{m.title():>12}" for m in methods))
+    rows = [
+        ("Total return", "total_return", "{:>12.2%}"),
+        ("Ann. vol", "volatility_annualized", "{:>12.2%}"),
+        ("Sharpe", "sharpe", "{:>12.2f}"),
+        ("Max drawdown", "max_drawdown", "{:>12.2%}"),
+    ]
+    for label, key, fmt in rows:
+        print(f"{label:<16}" + fmt.format(output["raw"][key])
+              + "".join(fmt.format(results[m][key]) for m in methods))
+    print(f"{'Avg exposure':<16}{1:>12.0%}"
+          + "".join(f"{results[m]['average_exposure']:>12.0%}" for m in methods))
+    print("-" * width)
+    print(f"Current drawdown {output['current_drawdown']:.2%}  ->  scale: " + "  ".join(
+        f"{m} {results[m]['current_scale']:.0%}" for m in methods
+    ))
+    print(f"Best Sharpe: {output['best_sharpe_method']}")
     return 0
 
 
@@ -9789,6 +9939,7 @@ COMMANDS = {
         "risk-metrics": cmd_risk_metrics,
         "var-backtest": cmd_var_backtest,
         "circuitbreaker": cmd_circuitbreaker,
+        "ddscale": cmd_ddscale,
         "sectors": cmd_sectors,
         "deflated-sharpe": cmd_deflated_sharpe,
         "alpha": cmd_alpha,
