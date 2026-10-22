@@ -872,6 +872,38 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- options subcommand ---
+    options_parser = subparsers.add_parser(
+        "options",
+        help="Black-Scholes price and Greeks for a call/put, or implied vol from a market price",
+    )
+    options_parser.add_argument("--spot", type=float, required=True, help="Underlying price")
+    options_parser.add_argument("--strike", type=float, required=True, help="Strike price")
+    options_parser.add_argument(
+        "--days", type=float, required=True, help="Calendar days to expiry"
+    )
+    options_parser.add_argument(
+        "--vol", type=float, default=None,
+        help="Annualized volatility, e.g. 0.25 (required unless --market-price is given)",
+    )
+    options_parser.add_argument(
+        "--rate", type=float, default=0.04, help="Risk-free rate (default: 0.04)"
+    )
+    options_parser.add_argument(
+        "--div", type=float, default=0.0, help="Continuous dividend yield (default: 0)"
+    )
+    options_parser.add_argument(
+        "--type", choices=["call", "put", "both"], default="both",
+        help="Option type (default: both)",
+    )
+    options_parser.add_argument(
+        "--market-price", type=float, default=None,
+        help="Observed option premium; solves for implied vol (requires --type call or put)",
+    )
+    options_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     # --- var-backtest subcommand ---
     var_backtest_parser = subparsers.add_parser(
         "var-backtest", help="Backtest a VaR model with Kupiec and Christoffersen tests"
@@ -5592,6 +5624,101 @@ def cmd_ddscale(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_options(args: argparse.Namespace) -> int:
+    """Price a European option with Black-Scholes and report its Greeks.
+
+    With ``--market-price`` the volatility is solved for (implied vol) and
+    the Greeks are evaluated at that implied vol.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or no IV solution).
+    """
+    import json as json_module
+
+    from imst_quant.utils.options_strategies import (
+        BlackScholesModel,
+        ImpliedVolatilityCalculator,
+        OptionType,
+    )
+
+    if args.spot <= 0 or args.strike <= 0:
+        print("Error: --spot and --strike must be positive")
+        return 1
+    if args.days < 0:
+        print(f"Error: --days must be non-negative, got {args.days}")
+        return 1
+    t = args.days / 365
+
+    if args.market_price is not None:
+        if args.type == "both":
+            print("Error: --market-price needs --type call or --type put")
+            return 1
+        if args.market_price <= 0 or t == 0:
+            print("Error: implied vol needs a positive --market-price and --days > 0")
+            return 1
+        if args.div:
+            print("Error: implied vol solver does not support --div")
+            return 1
+        vol = ImpliedVolatilityCalculator.calculate_iv(
+            args.market_price, args.spot, args.strike, t, args.rate,
+            option_type=OptionType(args.type),
+        )
+        if vol is None:
+            print("Error: implied vol did not converge (price outside no-arbitrage bounds?)")
+            return 1
+    elif args.vol is None or args.vol <= 0:
+        print("Error: --vol must be positive (or pass --market-price)")
+        return 1
+    else:
+        vol = args.vol
+
+    kinds = ["call", "put"] if args.type == "both" else [args.type]
+    legs = {}
+    for kind in kinds:
+        ot = OptionType(kind)
+        price = BlackScholesModel.price(args.spot, args.strike, t, vol, args.rate, args.div, ot)
+        greeks = BlackScholesModel.greeks(args.spot, args.strike, t, vol, args.rate, args.div, ot)
+        intrinsic = max(args.spot - args.strike, 0) if kind == "call" else max(args.strike - args.spot, 0)
+        legs[kind] = {
+            "price": float(price),
+            "intrinsic": float(intrinsic),
+            "time_value": float(price - intrinsic),
+            **{k: float(v) for k, v in greeks.items()},
+        }
+
+    output = {
+        "spot": args.spot,
+        "strike": args.strike,
+        "days": args.days,
+        "volatility": float(vol),
+        "implied": args.market_price is not None,
+        "rate": args.rate,
+        "dividend_yield": args.div,
+        "options": legs,
+    }
+
+    if args.json:
+        print(json_module.dumps(output, indent=2))
+        return 0
+
+    vol_label = "implied vol" if output["implied"] else "vol"
+    print(f"\nBlack-Scholes  S={args.spot:g}  K={args.strike:g}  {args.days:g}d  "
+          f"{vol_label}={vol:.2%}  r={args.rate:.2%}  q={args.div:.2%}")
+    print("=" * (14 + 14 * len(kinds)))
+    print(f"{'':<14}" + "".join(f"{k.title():>14}" for k in kinds))
+    for key, fmt in [("price", "{:>14.4f}"), ("intrinsic", "{:>14.4f}"),
+                     ("time_value", "{:>14.4f}"), ("delta", "{:>14.4f}"),
+                     ("gamma", "{:>14.5f}"), ("vega", "{:>14.4f}"),
+                     ("theta", "{:>14.4f}"), ("rho", "{:>14.4f}")]:
+        print(f"{key.replace('_', ' ').title():<14}" + "".join(fmt.format(legs[k][key]) for k in kinds))
+    print("-" * (14 + 14 * len(kinds)))
+    print("vega/rho per 1 point, theta per calendar day")
+    return 0
+
+
 def cmd_var_backtest(args: argparse.Namespace) -> int:
     """Backtest a VaR model using Kupiec and Christoffersen tests.
 
@@ -9940,6 +10067,7 @@ COMMANDS = {
         "var-backtest": cmd_var_backtest,
         "circuitbreaker": cmd_circuitbreaker,
         "ddscale": cmd_ddscale,
+        "options": cmd_options,
         "sectors": cmd_sectors,
         "deflated-sharpe": cmd_deflated_sharpe,
         "alpha": cmd_alpha,
