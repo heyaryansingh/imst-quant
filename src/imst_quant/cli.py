@@ -781,6 +781,32 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- circuitbreaker subcommand ---
+    breaker_parser = subparsers.add_parser(
+        "circuitbreaker",
+        help="Backtest a tiered drawdown circuit breaker against the raw strategy",
+    )
+    breaker_parser.add_argument(
+        "--returns", help="Path to returns parquet file (default: gold/returns.parquet)"
+    )
+    breaker_parser.add_argument(
+        "--return-col", default="returns", help="Column name for returns (default: returns)"
+    )
+    breaker_parser.add_argument(
+        "--thresholds", default="0.05,0.10,0.15,0.20",
+        help="Warning,reduce,hedge,halt drawdown levels (default: 0.05,0.10,0.15,0.20)",
+    )
+    breaker_parser.add_argument(
+        "--cooldown", type=int, default=10,
+        help="Periods to stay flat after a halt (default: 10)",
+    )
+    breaker_parser.add_argument(
+        "--periods", type=int, default=252, help="Trading periods per year (default: 252)"
+    )
+    breaker_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     # --- var-backtest subcommand ---
     var_backtest_parser = subparsers.add_parser(
         "var-backtest", help="Backtest a VaR model with Kupiec and Christoffersen tests"
@@ -5105,6 +5131,129 @@ def cmd_risk_metrics(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_circuitbreaker(args: argparse.Namespace) -> int:
+    """Compare a strategy with and without a tiered drawdown circuit breaker.
+
+    The breaker watches the raw strategy's drawdown; the position scale it
+    recommends after period t-1 is applied to the return of period t, so the
+    managed series never uses information from the bar it trades.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+
+    import numpy as np
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.drawdown_circuit_breaker import simulate_circuit_breaker
+
+    try:
+        levels = [float(x) for x in args.thresholds.split(",")]
+    except ValueError:
+        levels = []
+    if len(levels) != 4 or not 0 < levels[0] <= levels[1] <= levels[2] <= levels[3] <= 1:
+        print(
+            f"Error: --thresholds must be 4 increasing values in (0, 1], got {args.thresholds!r}"
+        )
+        return 1
+    if args.cooldown < 0:
+        print(f"Error: --cooldown must be non-negative, got {args.cooldown}")
+        return 1
+
+    returns_path = (
+        Path(args.returns)
+        if args.returns
+        else Path(Settings().data.gold_dir) / "returns.parquet"
+    )
+    if not returns_path.exists():
+        print(f"Error: Returns file not found: {returns_path}")
+        return 1
+    try:
+        df = pl.read_parquet(returns_path)
+    except Exception as e:
+        print(f"Error reading returns file: {e}")
+        return 1
+    if args.return_col not in df.columns:
+        print(f"Error: Column '{args.return_col}' not found in returns file")
+        print(f"Available columns: {df.columns}")
+        return 1
+
+    r = df[args.return_col].drop_nulls().drop_nans().to_numpy().astype(float)
+    r = r[np.isfinite(r)]
+    if len(r) < 2:
+        print(f"Error: Need at least 2 finite values in '{args.return_col}'")
+        return 1
+
+    equity = np.cumprod(1 + r)
+    drawdown = 1 - equity / np.maximum.accumulate(np.maximum(equity, 1.0))
+    states = simulate_circuit_breaker(
+        drawdown.tolist(),
+        warning_threshold=levels[0],
+        reduce_threshold=levels[1],
+        hedge_threshold=levels[2],
+        halt_threshold=levels[3],
+        cooldown_periods=args.cooldown,
+    )
+    scale = np.r_[1.0, [s.position_scale for s in states[:-1]]]
+    managed = r * scale
+
+    def _stats(x: np.ndarray) -> dict:
+        eq = np.cumprod(1 + x)
+        dd = 1 - eq / np.maximum.accumulate(np.maximum(eq, 1.0))
+        std = float(np.std(x, ddof=1))
+        return {
+            "total_return": float(eq[-1] - 1),
+            "volatility_annualized": std * float(np.sqrt(args.periods)),
+            "sharpe": float(np.mean(x) / std * np.sqrt(args.periods)) if std > 0 else 0.0,
+            "max_drawdown": float(dd.max()),
+        }
+
+    actions = [s.current_action.value for s in states]
+    output = {
+        "observations": len(r),
+        "thresholds": dict(zip(("warning", "reduce", "hedge", "halt"), levels)),
+        "cooldown": args.cooldown,
+        "raw": _stats(r),
+        "managed": _stats(managed),
+        "time_in_action": {
+            a: actions.count(a) / len(actions)
+            for a in ("normal", "warning", "reduce", "hedge", "halt")
+        },
+        "halts": sum(1 for prev, cur in zip(["normal", *actions], actions)
+                     if cur == "halt" and prev != "halt"),
+        "average_exposure": float(scale.mean()),
+        "current_action": actions[-1],
+        "current_position_scale": states[-1].position_scale,
+    }
+
+    if args.json:
+        print(json_module.dumps(output, indent=2))
+        return 0
+
+    raw, man = output["raw"], output["managed"]
+    print(f"\nDrawdown circuit breaker  obs={len(r)}  cooldown={args.cooldown}")
+    print("=" * 46)
+    print(f"{'':<16}{'Raw':>14}{'Managed':>14}")
+    print(f"{'Total return':<16}{raw['total_return']:>14.2%}{man['total_return']:>14.2%}")
+    print(f"{'Ann. vol':<16}{raw['volatility_annualized']:>14.2%}"
+          f"{man['volatility_annualized']:>14.2%}")
+    print(f"{'Sharpe':<16}{raw['sharpe']:>14.2f}{man['sharpe']:>14.2f}")
+    print(f"{'Max drawdown':<16}{raw['max_drawdown']:>14.2%}{man['max_drawdown']:>14.2%}")
+    print("-" * 46)
+    print("Time in action: " + "  ".join(
+        f"{a} {p:.0%}" for a, p in output["time_in_action"].items() if p
+    ))
+    print(f"Halts: {output['halts']}  Avg exposure: {output['average_exposure']:.0%}")
+    print(f"Now: {output['current_action'].upper()} "
+          f"(position scale {output['current_position_scale']:.0%})")
+    return 0
+
+
 def cmd_var_backtest(args: argparse.Namespace) -> int:
     """Backtest a VaR model using Kupiec and Christoffersen tests.
 
@@ -9156,6 +9305,7 @@ COMMANDS = {
         "exposure": cmd_exposure,
         "risk-metrics": cmd_risk_metrics,
         "var-backtest": cmd_var_backtest,
+        "circuitbreaker": cmd_circuitbreaker,
         "deflated-sharpe": cmd_deflated_sharpe,
         "alpha": cmd_alpha,
         "quality-check": cmd_quality_check,
