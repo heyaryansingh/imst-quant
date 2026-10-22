@@ -68,6 +68,17 @@ class CorrelationStability:
     is_stable: bool
 
 
+def _finite_rows(returns: pl.DataFrame) -> np.ndarray:
+    """Return the returns as a float array without rows holding NaN/inf/null.
+
+    A single non-finite value makes ``np.corrcoef`` return NaN for its whole
+    column, which ``nan_to_num`` then turns into zero correlation and a false
+    DECORRELATED reading.
+    """
+    arr = returns.to_numpy().astype(np.float64)
+    return arr[np.isfinite(arr).all(axis=1)]
+
+
 def rolling_correlation_matrix(
     returns: pl.DataFrame,
     window: int = 60,
@@ -96,7 +107,7 @@ def rolling_correlation_matrix(
     """
     assets = returns.columns
     n_assets = len(assets)
-    arr = returns.to_numpy().astype(np.float64)
+    arr = _finite_rows(returns)
     n_rows = arr.shape[0]
 
     results = []
@@ -163,7 +174,7 @@ def detect_correlation_regime(
     """
     assets = returns.columns
     n_assets = len(assets)
-    arr = returns.to_numpy().astype(np.float64)
+    arr = _finite_rows(returns)
     n_rows = arr.shape[0]
 
     # Use available data, but at least window size
@@ -302,7 +313,7 @@ def correlation_stability(
         >>> print(f"Stable: {stability.is_stable}")
     """
     assets = returns.columns
-    arr = returns.to_numpy().astype(np.float64)
+    arr = _finite_rows(returns)
     n_rows = arr.shape[0]
     n_assets = len(assets)
 
