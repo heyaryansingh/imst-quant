@@ -1534,6 +1534,43 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- riskbudget subcommand ---
+    riskbudget_parser = subparsers.add_parser(
+        "riskbudget",
+        help="Break a given portfolio's volatility and CVaR into per-asset "
+             "contributions",
+    )
+    riskbudget_parser.add_argument(
+        "--features", help="Path to features parquet (default: gold/features.parquet)"
+    )
+    riskbudget_parser.add_argument(
+        "--weights",
+        help="Comma-separated asset=weight pairs, e.g. AAPL=0.6,MSFT=0.4 "
+             "(default: equal weight across all assets)",
+    )
+    riskbudget_parser.add_argument(
+        "--lookback", type=int, default=252,
+        help="Trailing days of returns used (default: 252)",
+    )
+    riskbudget_parser.add_argument(
+        "--confidence", type=float, default=0.95,
+        help="Confidence level for VaR/CVaR (default: 0.95)",
+    )
+    riskbudget_parser.add_argument(
+        "--return-col", default="return_1d",
+        help="Column name for returns (default: return_1d)",
+    )
+    riskbudget_parser.add_argument(
+        "--asset-col",
+        help="Column name for assets (default: asset_id, falling back to ticker)",
+    )
+    riskbudget_parser.add_argument(
+        "--date-col", default="date", help="Column name for dates (default: date)"
+    )
+    riskbudget_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     # --- fracdiff subcommand ---
     fracdiff_parser = subparsers.add_parser(
         "fracdiff",
@@ -7517,6 +7554,182 @@ def cmd_riskparity(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_riskbudget(args: argparse.Namespace) -> int:
+    """Report which assets drive a given portfolio's volatility and tail loss.
+
+    Unlike ``riskparity`` (which solves for weights), this takes the weights
+    you hold and splits portfolio volatility and historical CVaR into
+    per-asset shares that each sum to 100%.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+
+    import numpy as np
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.risk_decomposition import (
+        calculate_component_risk,
+        calculate_diversification_ratio,
+        calculate_marginal_risk,
+        tail_risk_decomposition,
+    )
+
+    if args.lookback < 20:
+        print(f"Error: --lookback must be at least 20, got {args.lookback}")
+        return 1
+    if not 0.5 <= args.confidence < 1:
+        print(f"Error: --confidence must be in [0.5, 1), got {args.confidence}")
+        return 1
+
+    requested = None
+    if args.weights:
+        requested = {}
+        for pair in args.weights.split(","):
+            name, sep, value = pair.partition("=")
+            name = name.strip()
+            try:
+                weight = float(value)
+            except ValueError:
+                weight = float("nan")
+            if not sep or not name or not np.isfinite(weight):
+                print(f"Error: Invalid --weights entry {pair!r}, expected asset=weight")
+                return 1
+            if name in requested:
+                print(f"Error: Duplicate asset {name!r} in --weights")
+                return 1
+            requested[name] = weight
+        if abs(sum(requested.values())) < 1e-12:
+            print("Error: --weights must not sum to zero")
+            return 1
+
+    settings = Settings()
+    features_path = (
+        Path(args.features)
+        if args.features
+        else Path(settings.data.gold_dir) / "features.parquet"
+    )
+    if not features_path.exists():
+        print(f"Error: Features file not found at {features_path}")
+        return 1
+
+    try:
+        df = pl.read_parquet(features_path)
+    except Exception as e:
+        print(f"Error reading features file: {e}")
+        return 1
+
+    if args.asset_col:
+        asset_col = args.asset_col
+    elif "asset_id" in df.columns:
+        asset_col = "asset_id"
+    else:
+        asset_col = "ticker"
+
+    for column in (asset_col, args.return_col, args.date_col):
+        if column not in df.columns:
+            print(f"Error: Column '{column}' not found in features file")
+            print(f"Available columns: {df.columns}")
+            return 1
+
+    df = df.with_columns(pl.col(asset_col).cast(pl.Utf8))
+    if requested is not None:
+        unknown = sorted(set(requested) - set(df[asset_col].unique().to_list()))
+        if unknown:
+            print(f"Error: Assets not found in features file: {unknown}")
+            return 1
+        df = df.filter(pl.col(asset_col).is_in(list(requested)))
+
+    wide = (
+        df.select([args.date_col, asset_col, args.return_col])
+        .drop_nulls()
+        .filter(pl.col(args.return_col).is_finite())
+        .unique(subset=[args.date_col, asset_col], keep="last")
+        .pivot(on=asset_col, index=args.date_col, values=args.return_col)
+        .sort(args.date_col)
+        .drop_nulls()
+    )
+    returns = wide.drop(args.date_col).to_pandas().tail(args.lookback)
+    returns.columns = [str(c) for c in returns.columns]
+
+    if returns.shape[1] < 2:
+        print("Error: Need at least 2 assets with overlapping returns")
+        return 1
+    if len(returns) < 20:
+        print(f"Error: Need at least 20 overlapping dates, got {len(returns)}")
+        return 1
+
+    names = list(returns.columns)
+    if requested is None:
+        w = np.full(len(names), 1.0 / len(names))
+    else:
+        # Normalise so shares are comparable however the weights were scaled.
+        total = sum(requested.values())
+        w = np.array([requested[n] / total for n in names])
+
+    cov = returns.cov().to_numpy()
+    port_var = float(w @ cov @ w)
+    if port_var <= 0:
+        print("Error: Portfolio variance is zero; returns carry no risk")
+        return 1
+    marginal = calculate_marginal_risk(w, cov)
+    _, vol_share = calculate_component_risk(w, cov)
+    vols = np.sqrt(np.diag(cov))
+    tail = tail_risk_decomposition(returns, w, confidence_level=args.confidence)
+    cvar = float(tail["cvar"])
+
+    assets = {
+        name: {
+            "weight": float(w[i]),
+            "volatility_annualized": float(vols[i] * np.sqrt(252)),
+            "marginal_risk": float(marginal[i]),
+            "vol_share": float(vol_share[i]),
+            "cvar_share": float(tail["component_cvar"][name] / cvar) if cvar else 0.0,
+        }
+        for i, name in enumerate(names)
+    }
+    output = {
+        "observations": len(returns),
+        "lookback": args.lookback,
+        "confidence": args.confidence,
+        "portfolio_vol_annualized": float(np.sqrt(port_var * 252)),
+        "var": float(tail["var"]),
+        "cvar": cvar,
+        "diversification_ratio": float(calculate_diversification_ratio(w, vols, cov)),
+        "top_risk_contributor": max(assets, key=lambda n: assets[n]["vol_share"]),
+        "assets": assets,
+    }
+
+    if args.json:
+        print(json_module.dumps(output, indent=2))
+        return 0
+
+    print(f"\nRisk budget  obs={len(returns)}  confidence={args.confidence:.0%}")
+    print("=" * 58)
+    print(f"{'Asset':<14}{'Weight':>10}{'Ann.vol':>10}{'Vol share':>12}{'CVaR share':>12}")
+    print("-" * 58)
+    for name, info in assets.items():
+        print(
+            f"{name:<14}{info['weight']:>10.2%}{info['volatility_annualized']:>10.2%}"
+            f"{info['vol_share']:>12.2%}{info['cvar_share']:>12.2%}"
+        )
+    print("-" * 58)
+    print(
+        f"Portfolio vol (ann.): {output['portfolio_vol_annualized']:.2%}  "
+        f"VaR: {output['var']:.2%}  CVaR: {cvar:.2%}"
+    )
+    print(
+        f"Diversification ratio: {output['diversification_ratio']:.2f}  "
+        f"Top risk contributor: {output['top_risk_contributor']}"
+    )
+    return 0
+
+
 def cmd_voltarget(args: argparse.Namespace) -> int:
     """Report volatility-targeted exposure per asset and how well it worked.
 
@@ -8964,6 +9177,7 @@ COMMANDS = {
         "shrinkage": cmd_shrinkage,
         "voltarget": cmd_voltarget,
         "riskparity": cmd_riskparity,
+        "riskbudget": cmd_riskbudget,
         "fracdiff": cmd_fracdiff,
         "comoments": cmd_comoments,
         "barriers": cmd_barriers,
