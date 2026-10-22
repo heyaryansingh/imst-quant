@@ -781,6 +781,38 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- sectors subcommand ---
+    sectors_parser = subparsers.add_parser(
+        "sectors",
+        help="Roll the latest per-asset sentiment up to GICS sectors with "
+             "rotation signals and dispersion",
+    )
+    sectors_parser.add_argument(
+        "--sentiment",
+        help="Path to sentiment parquet (default: sentiment/sentiment_aggregates.parquet)",
+    )
+    sectors_parser.add_argument(
+        "--sentiment-col", default="sentiment_index",
+        help="Column name for sentiment scores (default: sentiment_index)",
+    )
+    sectors_parser.add_argument(
+        "--asset-col",
+        help="Column name for assets (default: asset_id, falling back to ticker)",
+    )
+    sectors_parser.add_argument(
+        "--date-col", default="date",
+        help="Date column; when present only each asset's latest row is used "
+             "(default: date)",
+    )
+    sectors_parser.add_argument(
+        "--threshold", type=float, default=0.1,
+        help="Sentiment gap vs. the cross-sector mean that flags over/underweight "
+             "(default: 0.1)",
+    )
+    sectors_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     # --- circuitbreaker subcommand ---
     breaker_parser = subparsers.add_parser(
         "circuitbreaker",
@@ -5131,6 +5163,93 @@ def cmd_risk_metrics(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sectors(args: argparse.Namespace) -> int:
+    """Report sector-level sentiment, rotation signals and dispersion.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.sector_sentiment import sector_sentiment_summary
+
+    if args.threshold < 0:
+        print(f"Error: --threshold must be non-negative, got {args.threshold}")
+        return 1
+
+    sentiment_path = (
+        Path(args.sentiment)
+        if args.sentiment
+        else Path(Settings().data.sentiment_dir) / "sentiment_aggregates.parquet"
+    )
+    if not sentiment_path.exists():
+        print(f"Error: Sentiment file not found: {sentiment_path}")
+        return 1
+    try:
+        df = pl.read_parquet(sentiment_path)
+    except Exception as e:
+        print(f"Error reading sentiment file: {e}")
+        return 1
+
+    if args.asset_col:
+        asset_col = args.asset_col
+    elif "asset_id" in df.columns:
+        asset_col = "asset_id"
+    else:
+        asset_col = "ticker"
+    for column in (asset_col, args.sentiment_col):
+        if column not in df.columns:
+            print(f"Error: Column '{column}' not found in sentiment file")
+            print(f"Available columns: {df.columns}")
+            return 1
+
+    df = df.filter(pl.col(args.sentiment_col).is_finite())
+    if args.date_col in df.columns:
+        df = df.sort(args.date_col).group_by(asset_col, maintain_order=True).last()
+    df = df.select(
+        pl.col(asset_col).cast(pl.Utf8).str.to_uppercase().alias("ticker"),
+        pl.col(args.sentiment_col).cast(pl.Float64).alias("sentiment"),
+    )
+
+    summary = sector_sentiment_summary(df, rotation_threshold=args.threshold)
+    if not summary["sector_metrics"]:
+        print("Error: No assets with finite sentiment map to a known sector")
+        return 1
+
+    if args.json:
+        print(json_module.dumps(summary, indent=2))
+        return 0
+
+    cov = summary["coverage"]
+    rot = summary["rotation_signal"]
+    print(
+        f"\nSector sentiment  {cov['mapped_tickers']}/{cov['total_tickers']} assets "
+        f"mapped, {cov['sectors_covered']} sectors"
+    )
+    print("=" * 66)
+    print(f"{'Sector':<24}{'Avg':>8}{'N':>5}{'Bull':>8}{'Bear':>8}  Best/Worst")
+    print("-" * 66)
+    for s in sorted(summary["sector_metrics"], key=lambda s: -s["avg_sentiment"]):
+        print(
+            f"{s['sector']:<24}{s['avg_sentiment']:>+8.3f}{s['num_assets']:>5}"
+            f"{s['bullish_pct']:>7.0f}%{s['bearish_pct']:>7.0f}%  "
+            f"{s['strongest_ticker']}/{s['weakest_ticker']}"
+        )
+    print("-" * 66)
+    print(f"Overweight:  {', '.join(rot['overweight_sectors']) or '-'}")
+    print(f"Underweight: {', '.join(rot['underweight_sectors']) or '-'}")
+    print(f"Rotation strength: {rot['rotation_strength']:.2f}  "
+          f"Dispersion: {summary['dispersion']['dispersion']:.3f}")
+    print(summary["dispersion"]["interpretation"])
+    return 0
+
+
 def cmd_circuitbreaker(args: argparse.Namespace) -> int:
     """Compare a strategy with and without a tiered drawdown circuit breaker.
 
@@ -9306,6 +9425,7 @@ COMMANDS = {
         "risk-metrics": cmd_risk_metrics,
         "var-backtest": cmd_var_backtest,
         "circuitbreaker": cmd_circuitbreaker,
+        "sectors": cmd_sectors,
         "deflated-sharpe": cmd_deflated_sharpe,
         "alpha": cmd_alpha,
         "quality-check": cmd_quality_check,
