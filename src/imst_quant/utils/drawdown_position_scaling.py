@@ -93,7 +93,11 @@ def calculate_current_drawdown(equity: float, high_water_mark: float) -> float:
 
     Returns:
         Drawdown as a positive fraction (0.0 = at peak, 0.15 = 15% drawdown).
+        Non-finite equity or high-water mark returns 1.0 so callers fail
+        closed (kill switch) instead of trading full size on bad data.
     """
+    if not (np.isfinite(equity) and np.isfinite(high_water_mark)):
+        return 1.0
     if high_water_mark <= 0:
         return 0.0
     dd = (high_water_mark - equity) / high_water_mark

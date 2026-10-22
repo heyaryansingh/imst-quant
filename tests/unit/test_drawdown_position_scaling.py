@@ -135,3 +135,11 @@ class TestDrawdownScalingReport:
             equity=100_000, high_water_mark=100_000, base_position_sizes={}
         )
         assert report["aggregate"]["reduction_pct"] == 0.0
+
+
+@pytest.mark.parametrize("equity,hwm", [
+    (float("nan"), 100_000), (90_000, float("nan")), (float("inf"), 100_000),
+])
+def test_non_finite_inputs_fail_closed(equity, hwm):
+    assert calculate_current_drawdown(equity, hwm) == 1.0
+    assert apply_drawdown_scaling(10_000, equity, hwm) == 0.0
