@@ -98,11 +98,13 @@ def decompose_systematic_idiosyncratic(
         'r_squared': [],
     }
 
-    market_var = market_returns.var()
-
     for asset in assets:
-        asset_returns = returns[asset].dropna()
-        aligned_market = market_returns.loc[asset_returns.index]
+        # Use the same overlapping sample for every moment; mixing a full-sample
+        # market variance with a subsample covariance biases beta and can make
+        # idiosyncratic variance negative.
+        pair = pd.concat([returns[asset], market_returns], axis=1, join='inner').dropna()
+        asset_returns, aligned_market = pair.iloc[:, 0], pair.iloc[:, 1]
+        market_var = aligned_market.var()
 
         # Calculate beta
         cov = asset_returns.cov(aligned_market)
@@ -277,9 +279,11 @@ def calculate_risk_parity_weights(
         # Target is equal contribution (1/N for each asset)
         target = 1.0 / n_assets
 
-        # Adjust weights to move towards equal contributions
-        # Simple iterative scaling
-        adjustment = target / (pct_contributions + 1e-10)
+        # Adjust weights to move towards equal contributions. The undamped
+        # update (target / pct) makes w_new independent of w and oscillates
+        # with period 2 (e.g. diagonal cov flips between 1/var and equal).
+        # The square root damps it; for diagonal cov it lands on 1/vol in one step.
+        adjustment = np.sqrt(target / (pct_contributions + 1e-10))
         new_weights = weights * adjustment
 
         # Normalize
