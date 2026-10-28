@@ -2194,6 +2194,33 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+
+    # --- compare subcommand ---
+    compare_parser = subparsers.add_parser(
+        "compare",
+        help="Side-by-side equity curve leaderboard for several strategy return columns",
+    )
+    compare_parser.add_argument(
+        "--data", required=True, help="Path to parquet file with one returns column per strategy"
+    )
+    compare_parser.add_argument(
+        "--columns", default=None,
+        help="Comma-separated strategy columns (default: every numeric column except date)",
+    )
+    compare_parser.add_argument(
+        "--sort-by",
+        choices=["sharpe", "cagr", "calmar", "total_return", "max_drawdown"],
+        default="sharpe",
+        help="Ranking metric, best first (default: sharpe)",
+    )
+    compare_parser.add_argument(
+        "--periods-per-year", type=int, default=252,
+        help="Periods per year for annualization (default: 252)",
+    )
+    compare_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -10238,6 +10265,87 @@ def cmd_impact(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_compare(args: argparse.Namespace) -> int:
+    """Rank several strategies' equity curves on return, risk and drawdown.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+    from dataclasses import asdict
+
+    import polars as pl
+
+    from imst_quant.utils.equity_curve import compare_equity_curves
+
+    data_path = Path(args.data)
+    if not data_path.exists():
+        print(f"Error: Data file not found: {data_path}")
+        return 1
+    try:
+        df = pl.read_parquet(data_path)
+    except Exception as e:
+        print(f"Error reading data file: {e}")
+        return 1
+
+    if args.columns:
+        columns = [c.strip() for c in args.columns.split(",") if c.strip()]
+        missing = [c for c in columns if c not in df.columns]
+        if missing:
+            print(f"Error: Missing columns {missing}")
+            print(f"Available columns: {df.columns}")
+            return 1
+    else:
+        columns = [c for c, t in df.schema.items() if t.is_numeric() and c != "date"]
+    if not columns:
+        print("Error: No numeric strategy columns found")
+        return 1
+    if args.periods_per_year <= 0:
+        print("Error: --periods-per-year must be positive")
+        return 1
+
+    stats = compare_equity_curves(
+        {c: df[c] for c in columns}, periods_per_year=args.periods_per_year
+    )
+    empty = [name for name, st in stats.items() if st.num_periods < 2]
+    if empty:
+        print(f"Error: Need at least 2 finite returns per strategy, too few in {empty}")
+        return 1
+
+    # max_drawdown is negative, so larger (shallower) is better like the rest
+    field = {"sharpe": "sharpe_ratio", "calmar": "calmar_ratio"}.get(args.sort_by, args.sort_by)
+    ranked = sorted(stats.items(), key=lambda kv: getattr(kv[1], field), reverse=True)
+
+    if args.json:
+        payload = {
+            "sort_by": args.sort_by,
+            "ranking": [{"strategy": name, **asdict(st)} for name, st in ranked],
+        }
+        print(json_module.dumps(payload, indent=2))
+        return 0
+
+    print()
+    print(f"Strategy comparison ({len(ranked)} strategies, ranked by {args.sort_by})")
+    print("=" * 92)
+    print(
+        f"{'#':>2}  {'Strategy':<20} {'Total':>9} {'CAGR':>9} {'Sharpe':>7} "
+        f"{'MaxDD':>9} {'DD len':>7} {'Calmar':>7} {'Win%':>6}"
+    )
+    print("-" * 92)
+    for i, (name, st) in enumerate(ranked, 1):
+        win = st.positive_periods / st.num_periods
+        print(
+            f"{i:>2}  {name[:20]:<20} {st.total_return:>8.2%} {st.cagr:>8.2%} "
+            f"{st.sharpe_ratio:>7.2f} {st.max_drawdown:>8.2%} {st.max_drawdown_duration:>7d} "
+            f"{st.calmar_ratio:>7.2f} {win:>5.1%}"
+        )
+    print()
+    return 0
+
+
 COMMANDS = {
         "ingest": cmd_ingest,
         "process": cmd_process,
@@ -10311,6 +10419,7 @@ COMMANDS = {
         "calendar": cmd_calendar,
         "breakeven": cmd_breakeven,
         "impact": cmd_impact,
+        "compare": cmd_compare,
 }
 
 
