@@ -53,7 +53,7 @@ class SlippageEstimator:
         """Estimate slippage for a trade.
 
         Args:
-            trade_value: Trade value in dollars
+            trade_value: Trade value in dollars (negative for sells)
             avg_daily_volume: Average daily trading volume in dollars
             volatility: Recent volatility (annualized standard deviation)
             bid_ask_spread_bps: Bid-ask spread in bps (optional, estimated if None)
@@ -62,8 +62,9 @@ class SlippageEstimator:
         Returns:
             SlippageEstimate with breakdown of cost components
         """
-        # 1. Price impact based on trade size relative to volume
-        volume_fraction = trade_value / avg_daily_volume if avg_daily_volume > 0 else 1.0
+        # 1. Price impact based on trade size relative to volume. Side-agnostic:
+        # a sell (negative trade_value) crosses the same book as a buy.
+        volume_fraction = abs(trade_value) / avg_daily_volume if avg_daily_volume > 0 else 1.0
         price_impact = self._compute_price_impact(volume_fraction)
 
         # 2. Timing cost based on volatility

@@ -18,6 +18,13 @@ class TestSlippageEstimatorEstimate:
         )
         assert isinstance(result, SlippageEstimate)
 
+    def test_sell_costs_same_as_buy(self):
+        estimator = SlippageEstimator()
+        buy = estimator.estimate(trade_value=1e6, avg_daily_volume=1e7, volatility=0.2)
+        sell = estimator.estimate(trade_value=-1e6, avg_daily_volume=1e7, volatility=0.2)
+        assert sell == buy
+        assert sell.price_impact_bps > 0
+
     def test_total_slippage_is_sum_of_components(self):
         estimator = SlippageEstimator()
         result = estimator.estimate(
