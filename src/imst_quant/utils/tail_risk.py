@@ -185,34 +185,34 @@ def extreme_value_at_risk(
     else:
         ret_series = returns
 
-    # Convert to numpy for scipy
-    ret_np = ret_series.to_numpy()
+    # Convert to numpy for scipy; NaN/inf would poison block extremes and the fit
+    ret_np = ret_series.to_numpy().astype(float)
+    ret_np = ret_np[np.isfinite(ret_np)]
+    clean = pl.Series(ret_np)
 
-    # Extract block minima (we care about losses)
+    # Extract block maxima of losses (GEV models maxima, so negate returns)
     n_blocks = len(ret_np) // block_size
     if n_blocks < 10:
         # Fall back to standard VaR if insufficient data
-        var = ret_series.quantile(1 - confidence_level, interpolation="linear")
+        var = clean.quantile(1 - confidence_level, interpolation="linear")
         return float(-var) if var is not None else 0.0
 
-    block_minima = []
-    for i in range(n_blocks):
-        block = ret_np[i * block_size : (i + 1) * block_size]
-        if len(block) > 0:
-            block_minima.append(block.min())
+    block_max_losses = -ret_np[: n_blocks * block_size].reshape(n_blocks, block_size).min(axis=1)
 
     # Fit Generalized Extreme Value (GEV) distribution
     try:
-        shape, loc, scale = stats.genextreme.fit(block_minima)
+        shape, loc, scale = stats.genextreme.fit(block_max_losses)
 
-        # Calculate VaR at the desired confidence level
-        # GEV quantile for lower tail
-        var = stats.genextreme.ppf(1 - confidence_level, shape, loc=loc, scale=scale)
-        return float(-var)
+        # P(block max loss <= x) = P(single loss <= x) ** block_size, so the
+        # per-period confidence level maps to confidence_level ** block_size.
+        var = stats.genextreme.ppf(confidence_level**block_size, shape, loc=loc, scale=scale)
+        if not np.isfinite(var):
+            raise ValueError("non-finite GEV quantile")
+        return float(var)
 
     except Exception:
         # Fall back to empirical quantile
-        var = ret_series.quantile(1 - confidence_level, interpolation="linear")
+        var = clean.quantile(1 - confidence_level, interpolation="linear")
         return float(-var) if var is not None else 0.0
 
 
@@ -244,34 +244,29 @@ def tail_dependency(
     if len(returns1) != len(returns2):
         raise ValueError("Return series must have the same length")
 
-    r1 = returns1.to_numpy()
-    r2 = returns2.to_numpy()
+    r1 = returns1.to_numpy().astype(float)
+    r2 = returns2.to_numpy().astype(float)
 
     # Lower tail (both assets experiencing losses)
     lower_threshold_1 = float(returns1.quantile(1 - quantile, interpolation="linear"))
     lower_threshold_2 = float(returns2.quantile(1 - quantile, interpolation="linear"))
 
-    both_in_lower_tail = np.sum((r1 <= lower_threshold_1) & (r2 <= lower_threshold_2))
-    either_in_lower_tail = np.sum((r1 <= lower_threshold_1) | (r2 <= lower_threshold_2))
+    # Empirical tail dependence: P(asset 2 in tail | asset 1 in tail)
+    in_lower_1 = r1 <= lower_threshold_1
+    both_in_lower_tail = np.sum(in_lower_1 & (r2 <= lower_threshold_2))
+    n_lower_1 = np.sum(in_lower_1)
 
-    lower_tail_dep = (
-        float(both_in_lower_tail / either_in_lower_tail)
-        if either_in_lower_tail > 0
-        else 0.0
-    )
+    lower_tail_dep = float(both_in_lower_tail / n_lower_1) if n_lower_1 > 0 else 0.0
 
     # Upper tail (both assets experiencing gains)
     upper_threshold_1 = float(returns1.quantile(quantile, interpolation="linear"))
     upper_threshold_2 = float(returns2.quantile(quantile, interpolation="linear"))
 
-    both_in_upper_tail = np.sum((r1 >= upper_threshold_1) & (r2 >= upper_threshold_2))
-    either_in_upper_tail = np.sum((r1 >= upper_threshold_1) | (r2 >= upper_threshold_2))
+    in_upper_1 = r1 >= upper_threshold_1
+    both_in_upper_tail = np.sum(in_upper_1 & (r2 >= upper_threshold_2))
+    n_upper_1 = np.sum(in_upper_1)
 
-    upper_tail_dep = (
-        float(both_in_upper_tail / either_in_upper_tail)
-        if either_in_upper_tail > 0
-        else 0.0
-    )
+    upper_tail_dep = float(both_in_upper_tail / n_upper_1) if n_upper_1 > 0 else 0.0
 
     return lower_tail_dep, upper_tail_dep
 
