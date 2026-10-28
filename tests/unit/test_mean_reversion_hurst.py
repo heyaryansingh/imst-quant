@@ -77,3 +77,15 @@ def test_rolling_hurst_shape_and_range():
     assert np.all((values >= 0.0) & (values <= 1.0))
     # A window this short is noisy, but it must not sit pinned at the clamp.
     assert values.mean() < 0.9
+
+
+def test_rs_window_sizes_align_with_rs_values_when_a_size_is_skipped():
+    import numpy as np
+
+    from imst_quant.utils.hurst_exponent import rescaled_range_hurst
+
+    # Every 8-observation chunk is flat (zero std), so size 8 yields no R/S value.
+    r = np.repeat(np.random.default_rng(1).normal(size=50), 8)
+    out = rescaled_range_hurst(r)
+    assert 8 not in out["window_sizes"]
+    assert len(out["window_sizes"]) == len(out["rs_values"])

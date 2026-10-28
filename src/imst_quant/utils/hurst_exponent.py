@@ -61,6 +61,7 @@ def rescaled_range_hurst(
     log_sizes = []
     log_rs = []
     rs_values = []
+    used_sizes = []
     for size in sizes:
         n_chunks = n // size
         rs_chunk = []
@@ -74,6 +75,7 @@ def rescaled_range_hurst(
         if rs_chunk:
             mean_rs = float(np.mean(rs_chunk))
             rs_values.append(mean_rs)
+            used_sizes.append(int(size))
             log_sizes.append(np.log(size))
             log_rs.append(np.log(mean_rs))
 
@@ -90,7 +92,7 @@ def rescaled_range_hurst(
         "hurst": float(slope),
         "intercept": float(intercept),
         "r_squared": r_squared,
-        "window_sizes": [int(s) for s in sizes[: len(rs_values)]],
+        "window_sizes": used_sizes,
         "rs_values": rs_values,
     }
 
