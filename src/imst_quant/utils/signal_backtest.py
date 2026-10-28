@@ -81,6 +81,28 @@ class SignalComparison:
     information_ratios: list[float]
 
 
+def _strategy_returns(
+    signal: pd.Series,
+    returns: pd.Series,
+    transaction_cost: float = 0.0,
+    lag: int = 1,
+) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+    """Lag the signal and return (position, asset returns, net strategy returns, trades)."""
+    # Align signal and returns
+    aligned = pd.DataFrame({"signal": signal, "returns": returns}).dropna()
+
+    # Lag the signal (to avoid lookahead bias)
+    lagged_signal = aligned["signal"].shift(lag).iloc[lag:]
+    asset_returns = aligned["returns"].iloc[lag:]
+
+    # Transaction costs; the first position is entered from flat
+    trades = lagged_signal.diff().abs()
+    if len(trades) > 0:
+        trades.iloc[0] = abs(lagged_signal.iloc[0])
+    strategy_returns = lagged_signal * asset_returns - trades * transaction_cost
+    return lagged_signal, asset_returns, strategy_returns, trades
+
+
 def backtest_signal(
     signal: pd.Series,
     returns: pd.Series,
@@ -105,21 +127,10 @@ def backtest_signal(
         >>> returns = pd.Series([0.01, -0.02, -0.01, 0.02, 0.01], index=signal.index)
         >>> result = backtest_signal(signal, returns)
     """
-    # Align signal and returns
-    aligned = pd.DataFrame({"signal": signal, "returns": returns}).dropna()
-
-    # Lag the signal (to avoid lookahead bias)
-    lagged_signal = aligned["signal"].shift(lag)
-    aligned = aligned.iloc[lag:]
-    lagged_signal = lagged_signal.iloc[lag:]
-
-    # Calculate strategy returns
-    strategy_returns = lagged_signal * aligned["returns"]
-
-    # Transaction costs
-    trades = lagged_signal.diff().abs()
-    costs = trades * transaction_cost
-    strategy_returns = strategy_returns - costs
+    lagged_signal, asset_returns, strategy_returns, trades = _strategy_returns(
+        signal, returns, transaction_cost, lag
+    )
+    aligned = pd.DataFrame({"returns": asset_returns})
 
     # Calculate metrics
     total_return = (1 + strategy_returns).prod() - 1
@@ -132,13 +143,14 @@ def backtest_signal(
 
     # Drawdown
     cumulative = (1 + strategy_returns).cumprod()
-    running_max = cumulative.expanding().max()
+    running_max = cumulative.expanding().max().clip(lower=1.0)
     drawdown = (cumulative - running_max) / running_max
     max_drawdown = float(drawdown.min())
 
-    # Hit rate (correct direction predictions)
+    # Hit rate (correct direction predictions), only over periods with a position
+    active = lagged_signal != 0
     correct_direction = (lagged_signal * aligned["returns"]) > 0
-    hit_rate = correct_direction.mean()
+    hit_rate = correct_direction[active].mean() if active.any() else 0.0
 
     # Win/Loss statistics
     wins = strategy_returns[strategy_returns > 0]
@@ -218,12 +230,18 @@ def compare_signals(
         sharpe_ratios.append(result.sharpe_ratio)
         hit_rates.append(result.hit_rate)
 
-        # Information ratio vs buy-and-hold
-        benchmark_return = returns.mean() * 252
-        benchmark_vol = returns.std() * np.sqrt(252)
-        excess_return = result.annualized_return - benchmark_return
-        tracking_error = (result.volatility - benchmark_vol) if result.volatility > 0 else 1.0
-        info_ratio = excess_return / abs(tracking_error) if tracking_error != 0 else 0.0
+        # Information ratio vs buy-and-hold: mean active return over the
+        # std of active returns (tracking error), both annualized
+        _, asset_returns, strategy_returns, _ = _strategy_returns(
+            signal, returns, transaction_cost
+        )
+        active = strategy_returns - asset_returns
+        tracking_error = active.std() * np.sqrt(252)
+        info_ratio = (
+            float(active.mean() * 252 / tracking_error)
+            if tracking_error > 0
+            else 0.0
+        )
         info_ratios.append(info_ratio)
 
     # Signal correlations
