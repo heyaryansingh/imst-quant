@@ -134,7 +134,9 @@ def equity_curve_statistics(
     Returns:
         EquityCurveStats with comprehensive metrics.
     """
-    returns_arr = np.array(returns.to_list())
+    returns_arr = returns.cast(pl.Float64).to_numpy()
+    # Null/NaN/inf rows are missing data, not returns; one would poison every metric.
+    returns_arr = returns_arr[np.isfinite(returns_arr)]
     n = len(returns_arr)
 
     if n == 0:
@@ -159,7 +161,9 @@ def equity_curve_statistics(
 
     # CAGR
     years = n / periods_per_year
-    if years > 0 and cum_product[-1] > 0:
+    if cum_product[-1] <= 0:
+        cagr = -1.0  # capital wiped out
+    elif years > 0:
         cagr = float(cum_product[-1] ** (1.0 / years) - 1.0)
     else:
         cagr = 0.0
@@ -294,7 +298,9 @@ def rolling_cagr(
         window_returns = returns_arr[i - window + 1 : i + 1]
         cum_return = float(np.prod(1.0 + window_returns))
         years = window / periods_per_year
-        if cum_return > 0 and years > 0:
+        if cum_return <= 0:
+            cagr_val = -1.0  # window wiped out capital
+        elif years > 0:
             cagr_val = cum_return ** (1.0 / years) - 1.0
         else:
             cagr_val = 0.0
