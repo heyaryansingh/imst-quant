@@ -2097,6 +2097,53 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- impact subcommand ---
+    impact_parser = subparsers.add_parser(
+        "impact",
+        help="Pre-trade market impact: square-root, power-law and Almgren-Chriss cost across horizons",
+    )
+    impact_parser.add_argument(
+        "--shares", type=float, required=True, help="Order size in shares (sign ignored)"
+    )
+    impact_parser.add_argument(
+        "--price", type=float, help="Current price (default: last --price-col value in --data)"
+    )
+    impact_parser.add_argument(
+        "--adv", type=float, help="Average daily volume in shares (default: from --data)"
+    )
+    impact_parser.add_argument(
+        "--volatility", type=float, help="Daily volatility, e.g. 0.02 (default: from --data, else 0.02)"
+    )
+    impact_parser.add_argument(
+        "--data", help="Optional parquet with daily volume/returns/price to derive ADV, vol and price"
+    )
+    impact_parser.add_argument(
+        "--volume-col", default="volume", help="Volume column name (default: volume)"
+    )
+    impact_parser.add_argument(
+        "--returns-col", default="returns", help="Returns column name (default: returns)"
+    )
+    impact_parser.add_argument(
+        "--price-col", default="close", help="Price column name (default: close)"
+    )
+    impact_parser.add_argument(
+        "--lookback", type=int, default=20, help="Trailing rows used for ADV/vol (default: 20)"
+    )
+    impact_parser.add_argument(
+        "--spread-bps", type=float, default=5.0, help="Quoted bid-ask spread in bps (default: 5)"
+    )
+    impact_parser.add_argument(
+        "--horizons",
+        default="0.25,0.5,1,2,5",
+        help="Comma-separated execution horizons in days for Almgren-Chriss (default: 0.25,0.5,1,2,5)",
+    )
+    impact_parser.add_argument(
+        "--risk-aversion", type=float, default=1.0, help="Almgren-Chriss risk aversion (default: 1.0)"
+    )
+    impact_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     # --- bootstrap subcommand ---
     bootstrap_parser = subparsers.add_parser(
         "bootstrap",
@@ -10035,6 +10082,162 @@ def cmd_breakeven(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_impact(args: argparse.Namespace) -> int:
+    """Estimate the market impact cost of an order before trading it.
+
+    ADV, daily volatility and price come from flags, or from the trailing
+    ``--lookback`` rows of ``--data`` when a flag is omitted.
+
+    Args:
+        args: Parsed command-line arguments
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+    import math
+
+    import polars as pl
+
+    from imst_quant.utils.market_impact import (
+        AlmgrenChrissModel,
+        ImpactParameters,
+        NonlinearImpactModel,
+        SquareRootModel,
+    )
+
+    try:
+        horizons = [float(h) for h in args.horizons.split(",") if h.strip()]
+    except ValueError:
+        print(f"Error: --horizons must be comma-separated numbers, got {args.horizons!r}")
+        return 1
+    if not horizons or any(not math.isfinite(h) or h <= 0 for h in horizons):
+        print("Error: --horizons must contain positive values")
+        return 1
+    if not math.isfinite(args.shares) or args.shares == 0:
+        print(f"Error: --shares must be a non-zero number, got {args.shares}")
+        return 1
+    if args.lookback < 2:
+        print(f"Error: --lookback must be at least 2, got {args.lookback}")
+        return 1
+    if args.spread_bps < 0 or args.risk_aversion < 0:
+        print("Error: --spread-bps and --risk-aversion must be non-negative")
+        return 1
+
+    adv, vol, price = args.adv, args.volatility, args.price
+    source = {"adv": "flag", "volatility": "flag", "price": "flag"}
+    if args.data and None in (adv, vol, price):
+        data_path = Path(args.data)
+        if not data_path.exists():
+            print(f"Error: Data file not found: {data_path}")
+            return 1
+        try:
+            df = pl.read_parquet(data_path)
+        except Exception as e:
+            print(f"Error reading data file: {e}")
+            return 1
+        if "date" in df.columns:
+            df = df.sort("date")
+
+        def _tail(col: str) -> "pl.Series":
+            if col not in df.columns:
+                return pl.Series([], dtype=pl.Float64)
+            vals = df[col].cast(pl.Float64).drop_nulls()
+            return vals.filter(vals.is_finite()).tail(args.lookback)
+
+        if adv is None and (v := _tail(args.volume_col)).len() > 0:
+            adv, source["adv"] = float(v.mean()), "data"
+        if vol is None and (r := _tail(args.returns_col)).len() >= 2:
+            vol, source["volatility"] = float(r.std()), "data"
+        if price is None and (p := _tail(args.price_col)).len() > 0:
+            price, source["price"] = float(p[-1]), "data"
+    if vol is None:
+        vol, source["volatility"] = 0.02, "default"
+
+    missing = [n for n, v in (("--adv", adv), ("--price", price)) if v is None]
+    if missing:
+        print(f"Error: {', '.join(missing)} not given and not derivable from --data")
+        return 1
+    for name, value in (("ADV", adv), ("price", price)):
+        if not math.isfinite(value) or value <= 0:
+            print(f"Error: {name} must be positive, got {value}")
+            return 1
+    if not math.isfinite(vol) or vol < 0:
+        print(f"Error: volatility must be non-negative, got {vol}")
+        return 1
+
+    params = ImpactParameters(volatility=vol, daily_volume=adv, spread_bps=args.spread_bps)
+    shares = abs(args.shares)
+    notional = shares * price
+    participation = shares / adv
+    sqrt_est = SquareRootModel(params).estimate_impact(shares, price, adv)
+    power_est = NonlinearImpactModel(params).estimate_impact(shares, price, adv)
+    ac = AlmgrenChrissModel(params)
+    schedule = []
+    for h in horizons:
+        cost = ac.expected_cost(shares, h, adv, price, args.risk_aversion)
+        # Std of price drift over a linear liquidation: sigma * sqrt(T / 3).
+        risk_bps = vol * math.sqrt(h / 3) * 10000
+        schedule.append({
+            "horizon_days": h,
+            "daily_participation": participation / h,
+            "total_cost": cost["total_cost"],
+            "cost_bps": cost["cost_bps"],
+            "timing_risk_bps": risk_bps,
+            "objective_bps": cost["cost_bps"] + args.risk_aversion * risk_bps,
+        })
+    # Impact always falls with a longer horizon; timing risk is what pushes back.
+    best = min(schedule, key=lambda row: row["objective_bps"])
+
+    result = {
+        "shares": shares,
+        "price": price,
+        "notional": notional,
+        "adv": adv,
+        "daily_volatility": vol,
+        "participation_rate": participation,
+        "inputs_source": source,
+        "square_root": {
+            "impact_bps": sqrt_est["impact_bps"],
+            "total_cost": sqrt_est["total_cost"],
+            "total_cost_bps": sqrt_est["total_cost_bps"],
+        },
+        "power_law": {
+            "impact_bps": power_est["impact_bps"],
+            "total_cost": power_est["total_cost"],
+        },
+        "almgren_chriss": schedule,
+        "best_horizon_days": best["horizon_days"],
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    print("\n=== Pre-Trade Market Impact ===\n")
+    print(f"Order:          {shares:,.0f} sh @ {price:,.2f} (${notional:,.0f})")
+    print(f"ADV:            {adv:,.0f} sh [{source['adv']}]")
+    print(f"Daily Vol:      {vol:.2%} [{source['volatility']}]")
+    print(f"Participation:  {participation:.2%} of ADV")
+    print()
+    print(f"Square-root:    {sqrt_est['total_cost_bps']:>8.1f} bps (${sqrt_est['total_cost']:,.0f}, incl. half spread)")
+    print(f"Power-law:      {power_est['impact_bps']:>8.1f} bps (${power_est['total_cost']:,.0f})")
+    print()
+    print(f"Almgren-Chriss schedule (risk aversion {args.risk_aversion:g}):")
+    print(f"{'Horizon (d)':>12}  {'%ADV/day':>9}  {'Cost (bps)':>10}  {'Risk (bps)':>10}  {'Cost ($)':>14}")
+    for row in schedule:
+        mark = "  <- best" if row is best else ""
+        print(
+            f"{row['horizon_days']:>12g}  {row['daily_participation']:>9.1%}  "
+            f"{row['cost_bps']:>10.1f}  {row['timing_risk_bps']:>10.1f}  "
+            f"{row['total_cost']:>14,.0f}{mark}"
+        )
+    if participation > 0.2:
+        print("\nWarning: order exceeds 20% of ADV; expect impact well beyond model estimates.")
+    print()
+    return 0
+
+
 COMMANDS = {
         "ingest": cmd_ingest,
         "process": cmd_process,
@@ -10107,6 +10310,7 @@ COMMANDS = {
         "pbo": cmd_pbo,
         "calendar": cmd_calendar,
         "breakeven": cmd_breakeven,
+        "impact": cmd_impact,
 }
 
 
