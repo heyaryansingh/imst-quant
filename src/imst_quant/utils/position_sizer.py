@@ -207,7 +207,7 @@ def risk_parity_weights(
         target_risk: Target portfolio volatility
 
     Returns:
-        Series of portfolio weights (sums to 1)
+        Series of portfolio weights scaled so ex-ante volatility equals target_risk
     """
     # Calculate covariance matrix
     cov_matrix = returns.cov()
@@ -218,18 +218,16 @@ def risk_parity_weights(
 
     # Iteratively adjust to achieve risk parity
     weights = inv_vol_weights.copy()
-    for _ in range(100):  # Max iterations
-        portfolio_vol = np.sqrt(weights @ cov_matrix @ weights)
-        marginal_risk = cov_matrix @ weights / portfolio_vol
-
-        # Adjust weights to equalize risk contributions
-        target_marginal_risk = marginal_risk.mean()
-        weights *= target_marginal_risk / marginal_risk
+    cov = np.asarray(cov_matrix)
+    for _ in range(500):  # Max iterations
+        # Fixed point w_i * (cov @ w)_i = const is equal risk contribution.
+        # Equalizing marginal risk instead (the old update) converges to
+        # minimum-variance weights, not risk parity.
+        weights = np.sqrt(weights / (cov @ weights))
         weights /= weights.sum()
 
-        # Check convergence
-        risk_contributions = weights * marginal_risk
-        if risk_contributions.std() < 1e-6:
+        risk_contributions = weights * (cov @ weights)
+        if np.ptp(risk_contributions / risk_contributions.sum()) < 1e-8:
             break
 
     # Scale to target risk

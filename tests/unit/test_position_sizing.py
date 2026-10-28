@@ -172,3 +172,23 @@ class TestCalculateOptimalUnits:
             entry_price=50.0, stop_loss=49.0, capital=1000000, risk_pct=0.02, max_capital_pct=1.0
         )
         assert result["risk_amount"] == pytest.approx(1000000 * 0.02, rel=1e-3)
+
+
+def test_position_sizer_risk_parity_equalizes_risk_contributions():
+    import numpy as np
+    import pandas as pd
+
+    from imst_quant.utils.position_sizer import risk_parity_weights
+
+    rng = np.random.default_rng(0)
+    base = rng.normal(0, 0.01, 2000)
+    df = pd.DataFrame({
+        "a": base,
+        "b": 0.5 * base + rng.normal(0, 0.02, 2000),
+        "c": rng.normal(0, 0.03, 2000),
+    })
+    w = risk_parity_weights(df, target_risk=0.01).values
+    cov = df.cov().values
+    rc = w * (cov @ w)
+    np.testing.assert_allclose(rc / rc.sum(), [1 / 3] * 3, atol=1e-6)
+    assert np.isclose(np.sqrt(w @ cov @ w), 0.01)
