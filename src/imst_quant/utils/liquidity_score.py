@@ -207,10 +207,13 @@ class AmihudIlliquidity:
             prices: Daily prices
 
         Returns:
-            Daily illiquidity scores (lower is more liquid)
+            Daily illiquidity scores (lower is more liquid); NaN on days
+            with no dollar volume
         """
         dollar_volume = volumes * prices
-        illiquidity = returns.abs() / (dollar_volume + 1e-10)
+        # No-trade days have no price impact to measure (Amihud excludes them);
+        # dividing by an epsilon instead let one halt day dominate the average.
+        illiquidity = returns.abs() / dollar_volume.where(dollar_volume > 0)
 
         return illiquidity
 
