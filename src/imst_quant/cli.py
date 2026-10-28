@@ -2221,6 +2221,38 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- taildep subcommand ---
+    taildep_parser = subparsers.add_parser(
+        "taildep",
+        help="Pairwise tail dependence: how often assets crash (or rally) "
+             "together beyond what their correlation suggests",
+    )
+    taildep_parser.add_argument(
+        "--features", help="Path to features parquet (default: gold/features.parquet)"
+    )
+    taildep_parser.add_argument(
+        "--quantile", type=float, default=0.95,
+        help="Tail quantile; 0.95 means the worst/best 5%% of days (default: 0.95)",
+    )
+    taildep_parser.add_argument(
+        "--top", type=int, default=10,
+        help="Number of pairs to show, ranked by lower tail dependence (default: 10)",
+    )
+    taildep_parser.add_argument(
+        "--return-col", default="return_1d",
+        help="Column name for returns (default: return_1d)",
+    )
+    taildep_parser.add_argument(
+        "--asset-col",
+        help="Column name for assets (default: asset_id, falling back to ticker)",
+    )
+    taildep_parser.add_argument(
+        "--date-col", default="date", help="Column name for dates (default: date)"
+    )
+    taildep_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     return parser
 
 
@@ -9011,6 +9043,131 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_taildep(args: argparse.Namespace) -> int:
+    """Report pairwise lower/upper tail dependence across assets.
+
+    Lower tail dependence is P(B in its worst tail | A in its worst tail);
+    independent assets score ``1 - quantile``, perfectly co-moving ones 1.
+    ``crash_asymmetry`` = lower - upper: positive pairs fall together more
+    than they rise together, so diversification fails exactly when needed.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import itertools
+    import json as json_module
+
+    import numpy as np
+    import polars as pl
+
+    from imst_quant.config.settings import Settings
+    from imst_quant.utils.tail_risk import tail_dependency
+
+    if not 0.5 < args.quantile < 1.0:
+        print(f"Error: --quantile must be in (0.5, 1.0), got {args.quantile}")
+        return 1
+    if args.top < 1:
+        print(f"Error: --top must be at least 1, got {args.top}")
+        return 1
+
+    features_path = (
+        Path(args.features)
+        if args.features
+        else Path(Settings().data.gold_dir) / "features.parquet"
+    )
+    if not features_path.exists():
+        print(f"Error: Features file not found at {features_path}")
+        return 1
+    try:
+        df = pl.read_parquet(features_path)
+    except Exception as e:
+        print(f"Error reading features file: {e}")
+        return 1
+
+    if args.asset_col:
+        asset_col = args.asset_col
+    elif "asset_id" in df.columns:
+        asset_col = "asset_id"
+    else:
+        asset_col = "ticker"
+    for column in (asset_col, args.return_col, args.date_col):
+        if column not in df.columns:
+            print(f"Error: Column '{column}' not found in features file")
+            print(f"Available columns: {df.columns}")
+            return 1
+
+    wide = (
+        df.select([args.date_col, asset_col, args.return_col])
+        .drop_nulls()
+        .filter(pl.col(args.return_col).is_finite())
+        .unique(subset=[args.date_col, asset_col], keep="last")
+        .pivot(on=asset_col, index=args.date_col, values=args.return_col)
+        .sort(args.date_col)
+        .drop_nulls()
+    )
+    returns = wide.drop(args.date_col)
+    returns.columns = [str(c) for c in returns.columns]
+
+    # Need a handful of tail days per asset for the ratio to mean anything
+    min_obs = int(np.ceil(5 / (1 - args.quantile)))
+    if returns.width < 2:
+        print("Error: Need at least 2 assets with overlapping returns")
+        return 1
+    if returns.height < min_obs:
+        print(
+            f"Error: Need at least {min_obs} overlapping dates for "
+            f"--quantile {args.quantile}, got {returns.height}"
+        )
+        return 1
+
+    pairs = []
+    for a, b in itertools.combinations(returns.columns, 2):
+        lower, upper = tail_dependency(returns[a], returns[b], quantile=args.quantile)
+        corr = float(np.corrcoef(returns[a].to_numpy(), returns[b].to_numpy())[0, 1])
+        pairs.append({
+            "asset_a": a,
+            "asset_b": b,
+            "lower_tail_dep": lower,
+            "upper_tail_dep": upper,
+            "crash_asymmetry": lower - upper,
+            "correlation": corr if np.isfinite(corr) else 0.0,
+        })
+    pairs.sort(key=lambda p: p["lower_tail_dep"], reverse=True)
+
+    payload = {
+        "n_dates": returns.height,
+        "n_assets": returns.width,
+        "quantile": args.quantile,
+        "independence_baseline": 1 - args.quantile,
+        "mean_lower_tail_dep": float(np.mean([p["lower_tail_dep"] for p in pairs])),
+        "mean_upper_tail_dep": float(np.mean([p["upper_tail_dep"] for p in pairs])),
+        "pairs": pairs[: args.top],
+    }
+
+    if args.json:
+        print(json_module.dumps(payload, indent=2))
+        return 0
+
+    print("\n=== Tail Dependence ===\n")
+    print(f"Dates x Assets:      {payload['n_dates']} x {payload['n_assets']}")
+    print(f"Tail:                worst/best {1 - args.quantile:.0%} of days")
+    print(f"Independent pairs:   {payload['independence_baseline']:.2f}")
+    print(f"Mean lower tail dep: {payload['mean_lower_tail_dep']:.2f}")
+    print(f"Mean upper tail dep: {payload['mean_upper_tail_dep']:.2f}")
+    print()
+    print(f"{'Pair':<24}{'Lower':>8}{'Upper':>8}{'Asym':>8}{'Corr':>8}")
+    for p in payload["pairs"]:
+        name = f"{p['asset_a']}/{p['asset_b']}"
+        print(
+            f"{name:<24}{p['lower_tail_dep']:>8.2f}{p['upper_tail_dep']:>8.2f}"
+            f"{p['crash_asymmetry']:>+8.2f}{p['correlation']:>8.2f}"
+        )
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -10420,6 +10577,7 @@ COMMANDS = {
         "breakeven": cmd_breakeven,
         "impact": cmd_impact,
         "compare": cmd_compare,
+        "taildep": cmd_taildep,
 }
 
 
