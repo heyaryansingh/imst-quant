@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 def _participation(trade_size: float, adv: float) -> float:
@@ -345,6 +345,15 @@ class AdaptiveImpactModel:
             Dictionary with impact estimates from multiple models
         """
         participation = _participation(trade_size, adv)
+        # Current volatility overrides the calibrated one for this estimate;
+        # it was documented but ignored, so a vol spike never raised costs.
+        model = self
+        if market_volatility is not None:
+            if not np.isfinite(market_volatility) or market_volatility < 0:
+                raise ValueError(
+                    f"market_volatility must be a non-negative finite number, got {market_volatility}"
+                )
+            model = AdaptiveImpactModel(replace(self.params, volatility=market_volatility))
 
         results = {
             'trade_size': trade_size,
@@ -356,17 +365,17 @@ class AdaptiveImpactModel:
         # Small order (< 5% ADV): use simple square-root
         if participation < 0.05:
             results['recommended_model'] = 'square_root'
-            results['square_root'] = self.sqrt_model.estimate_impact(
+            results['square_root'] = model.sqrt_model.estimate_impact(
                 trade_size, current_price, adv
             )
 
         # Medium order (5-20% ADV): use nonlinear if available
         elif participation < 0.20:
             results['recommended_model'] = 'nonlinear'
-            results['nonlinear'] = self.nonlinear.estimate_impact(
+            results['nonlinear'] = model.nonlinear.estimate_impact(
                 trade_size, current_price, adv
             )
-            results['square_root'] = self.sqrt_model.estimate_impact(
+            results['square_root'] = model.sqrt_model.estimate_impact(
                 trade_size, current_price, adv
             )
 
@@ -377,7 +386,7 @@ class AdaptiveImpactModel:
                 # Default: spread over multiple days based on participation
                 time_horizon = max(1, participation / 0.10)  # ~10% ADV per day
 
-            results['almgren_chriss'] = self.almgren_chriss.expected_cost(
+            results['almgren_chriss'] = model.almgren_chriss.expected_cost(
                 trade_size, time_horizon, adv, current_price
             )
             results['time_horizon_days'] = time_horizon

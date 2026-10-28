@@ -144,3 +144,16 @@ def test_almgren_chriss_sub_hour_horizon_does_not_divide_by_zero():
     model = AlmgrenChrissModel(ImpactParameters())
     cost = model.expected_cost(10_000, 0.01, 1_000_000, 50.0)
     assert np.isfinite(cost["cost_bps"]) and cost["optimal_periods"] == 1
+
+
+def test_adaptive_model_uses_current_market_volatility():
+    model = AdaptiveImpactModel(ImpactParameters(volatility=0.02))
+    calm = model.estimate_impact(10_000, 100.0, 1_000_000)
+    stressed = model.estimate_impact(10_000, 100.0, 1_000_000, market_volatility=0.04)
+
+    assert stressed["square_root"]["impact_bps"] == pytest.approx(
+        2 * calm["square_root"]["impact_bps"]
+    )
+    assert model.params.volatility == 0.02  # override does not leak
+    with pytest.raises(ValueError):
+        model.estimate_impact(10_000, 100.0, 1_000_000, market_volatility=float("nan"))
