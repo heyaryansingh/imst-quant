@@ -108,6 +108,11 @@ class TailAnalysis:
     gain_loss_ratio: float
 
 
+def _finite(returns: pd.Series) -> pd.Series:
+    """Drop NaN and +/-inf; dropna() alone lets inf turn every statistic into NaN."""
+    return returns[np.isfinite(returns.astype(float))]
+
+
 def calculate_moments(returns: pd.Series) -> dict[str, float]:
     """Calculate raw and central moments of returns.
 
@@ -117,6 +122,7 @@ def calculate_moments(returns: pd.Series) -> dict[str, float]:
     Returns:
         Dictionary with moment calculations.
     """
+    returns = _finite(returns)
     n = len(returns)
     mean = returns.mean()
     std = returns.std()
@@ -154,10 +160,11 @@ def analyze_distribution(returns: pd.Series) -> DistributionStats:
         >>> stats = analyze_distribution(returns)
         >>> print(f"Distribution is {'normal' if stats.is_normal else 'non-normal'}")
     """
+    returns = _finite(returns)
     moments = calculate_moments(returns)
 
     # Jarque-Bera test
-    jb_stat, jb_pvalue = scipy_stats.jarque_bera(returns.dropna())
+    jb_stat, jb_pvalue = scipy_stats.jarque_bera(returns)
 
     return DistributionStats(
         mean=moments["mean"],
@@ -187,7 +194,7 @@ def test_normality(
     Returns:
         NormalityTests with results from multiple tests.
     """
-    clean_returns = returns.dropna().values
+    clean_returns = _finite(returns).values
     n = len(clean_returns)
 
     # Jarque-Bera test
@@ -242,7 +249,7 @@ def analyze_tails(returns: pd.Series) -> TailAnalysis:
         >>> print(f"VaR 95%: {tails.var_95:.4f}")
         >>> print(f"Expected Shortfall 95%: {tails.expected_shortfall_95:.4f}")
     """
-    clean_returns = returns.dropna()
+    clean_returns = _finite(returns)
     mean = clean_returns.mean()
     std = clean_returns.std()
 
@@ -331,7 +338,7 @@ def quantile_comparison(
     if quantiles is None:
         quantiles = [0.01, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99]
 
-    clean_returns = returns.dropna()
+    clean_returns = _finite(returns)
     mean = clean_returns.mean()
     std = clean_returns.std()
 
