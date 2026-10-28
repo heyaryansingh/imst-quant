@@ -176,7 +176,7 @@ def _calculate_max_drawdown(returns: np.ndarray) -> float:
         return 0.0
 
     cumulative = np.cumprod(1 + returns)
-    running_max = np.maximum.accumulate(cumulative)
+    running_max = np.maximum(np.maximum.accumulate(cumulative), 1.0)
     drawdown = (running_max - cumulative) / running_max
 
     return float(np.max(drawdown))

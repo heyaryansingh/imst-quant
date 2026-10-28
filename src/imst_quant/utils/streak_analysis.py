@@ -330,7 +330,7 @@ def _calculate_recovery_times(returns: np.ndarray) -> list[int]:
         return []
 
     cumulative = np.cumsum(returns)
-    running_max = np.maximum.accumulate(cumulative)
+    running_max = np.maximum(np.maximum.accumulate(cumulative), 0.0)
 
     recovery_times = []
     in_drawdown = False

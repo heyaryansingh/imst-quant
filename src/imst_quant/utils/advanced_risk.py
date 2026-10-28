@@ -185,7 +185,7 @@ def stress_test(
 
         # Maximum drawdown under stress
         cumulative = (1 + shocked_returns).cumprod()
-        running_max = cumulative.cummax()
+        running_max = cumulative.cummax().clip(lower=1.0)
         drawdown = (cumulative - running_max) / running_max
         max_dd = drawdown.min()
 

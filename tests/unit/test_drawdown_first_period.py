@@ -20,3 +20,11 @@ def test_first_period_loss_period_recovers():
     p = periods[0]
     assert p.start_idx == 0 and p.peak_value == 1.0
     assert p.is_recovered and p.end_idx == 2
+
+
+def test_sibling_max_drawdown_helpers_count_first_period_loss():
+    import numpy as np
+
+    from imst_quant.utils.portfolio_snapshot import _calculate_max_drawdown
+
+    assert _calculate_max_drawdown(np.array([-0.10, 0.05])) == pytest.approx(0.10)

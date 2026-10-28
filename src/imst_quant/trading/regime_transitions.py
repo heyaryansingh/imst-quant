@@ -258,7 +258,7 @@ def regime_performance_stats(
 
         # Max drawdown
         cum_returns = (1 + regime_returns).cumprod()
-        running_max = cum_returns.cummax()
+        running_max = cum_returns.cummax().clip(lower=1.0)
         drawdown = (cum_returns - running_max) / running_max
         max_dd = drawdown.min()
 

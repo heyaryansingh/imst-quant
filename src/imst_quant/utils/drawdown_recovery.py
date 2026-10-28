@@ -135,7 +135,7 @@ def analyze_recovery_periods(
     cumulative = np.cumprod(1 + ret_np)
 
     # Calculate running maximum (peak values)
-    running_max = np.maximum.accumulate(cumulative)
+    running_max = np.maximum(np.maximum.accumulate(cumulative), 1.0)
 
     # Calculate drawdown at each point
     drawdown = (running_max - cumulative) / running_max
@@ -536,7 +536,7 @@ def underwater_analysis(
     cumulative = np.cumprod(1 + ret_np)
 
     # Calculate running maximum
-    running_max = np.maximum.accumulate(cumulative)
+    running_max = np.maximum(np.maximum.accumulate(cumulative), 1.0)
 
     # Calculate drawdown at each point
     drawdown = (running_max - cumulative) / running_max

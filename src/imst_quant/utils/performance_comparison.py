@@ -100,7 +100,7 @@ def compare_assets(
 
         # Max drawdown
         cumulative = np.cumprod(1 + returns_np)
-        running_max = np.maximum.accumulate(cumulative)
+        running_max = np.maximum(np.maximum.accumulate(cumulative), 1.0)
         drawdowns = (cumulative - running_max) / running_max
         max_drawdown = np.min(drawdowns)
 
@@ -184,7 +184,7 @@ def compare_strategies(
 
         # Drawdown
         cumulative = np.cumprod(1 + returns)
-        running_max = np.maximum.accumulate(cumulative)
+        running_max = np.maximum(np.maximum.accumulate(cumulative), 1.0)
         drawdowns = (cumulative - running_max) / running_max
         max_drawdown = np.min(drawdowns)
 

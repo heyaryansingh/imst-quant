@@ -94,7 +94,7 @@ def aggregate_portfolio_metrics(
 
     # Maximum drawdown
     cumulative = (1 + portfolio_df["portfolio_returns"]).cum_prod()
-    running_max = cumulative.cum_max()
+    running_max = cumulative.cum_max().clip(lower_bound=1.0)
     drawdown = (cumulative - running_max) / running_max
     max_drawdown = drawdown.min()
 
