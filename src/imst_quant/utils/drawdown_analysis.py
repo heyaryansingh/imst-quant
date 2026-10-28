@@ -97,8 +97,9 @@ def calculate_drawdown_series(
     # Build cumulative return series (wealth curve starting at 1.0)
     cumulative = (1 + ret_series).cum_prod()
 
-    # Running maximum
-    running_max = cumulative.cum_max()
+    # Running maximum, floored at the starting wealth of 1.0 so a loss in the
+    # very first period counts as a drawdown from initial capital
+    running_max = cumulative.cum_max().clip(lower_bound=1.0)
 
     # Drawdown at each point
     drawdown = (running_max - cumulative) / running_max
