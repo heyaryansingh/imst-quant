@@ -57,8 +57,8 @@ class PortfolioMetrics:
         total_pnl: Total P&L
         total_pnl_pct: Total P&L percentage
         daily_return: Return for today
-        weekly_return: Return for past 7 days
-        monthly_return: Return for past 30 days
+        weekly_return: Return over the past 5 trading periods (~1 week)
+        monthly_return: Return over the past 21 trading periods (~1 month)
         sharpe_ratio: Sharpe ratio (annualized)
         max_drawdown: Maximum drawdown
         var_95: Value at Risk (95% confidence)
@@ -130,7 +130,8 @@ class PortfolioSummary:
             market_value = pos['quantity'] * pos['current']
             cost_basis = pos['quantity'] * pos['entry']
             unrealized_pnl = market_value - cost_basis
-            unrealized_pnl_pct = (unrealized_pnl / cost_basis) * 100 if cost_basis else 0
+            # abs(): a short's cost basis is negative, which flipped the sign of its P&L %
+            unrealized_pnl_pct = (unrealized_pnl / abs(cost_basis)) * 100 if cost_basis else 0
             weight = market_value / total_value if total_value else 0
 
             metrics.append(PositionMetrics(
@@ -159,12 +160,13 @@ class PortfolioSummary:
         # Time-based returns
         daily_return = returns.iloc[-1] if len(returns) > 0 else 0
         weekly_return = (
-            (self.historical_values.iloc[-1] / self.historical_values.iloc[-5] - 1)
-            if len(self.historical_values) >= 5 else 0
+            # 5 trading-day returns need 6 values; iloc[-5] spanned only 4
+            (self.historical_values.iloc[-1] / self.historical_values.iloc[-6] - 1)
+            if len(self.historical_values) >= 6 else 0
         )
         monthly_return = (
-            (self.historical_values.iloc[-1] / self.historical_values.iloc[-20] - 1)
-            if len(self.historical_values) >= 20 else 0
+            (self.historical_values.iloc[-1] / self.historical_values.iloc[-22] - 1)
+            if len(self.historical_values) >= 22 else 0
         )
 
         # Risk metrics
@@ -182,8 +184,9 @@ class PortfolioSummary:
         position_metrics = self.calculate_position_metrics()
         total_value = sum(pm.market_value for pm in position_metrics)
         total_cost = sum(pm.quantity * pm.entry_price for pm in position_metrics)
+        gross_cost = sum(abs(pm.quantity * pm.entry_price) for pm in position_metrics)
         total_pnl = sum(pm.unrealized_pnl for pm in position_metrics)
-        total_pnl_pct = (total_pnl / total_cost * 100) if total_cost else 0
+        total_pnl_pct = (total_pnl / gross_cost * 100) if gross_cost else 0
 
         winning_positions = sum(1 for pm in position_metrics if pm.unrealized_pnl > 0)
         win_rate = (winning_positions / len(position_metrics) * 100) if position_metrics else 0
@@ -226,7 +229,7 @@ class PortfolioSummary:
         if len(aligned_returns[0]) < 2:
             return 1.0
         covariance = np.cov(aligned_returns[0], aligned_returns[1])[0, 1]
-        benchmark_variance = np.var(aligned_returns[1])
+        benchmark_variance = np.var(aligned_returns[1], ddof=1)  # match np.cov's ddof
         return covariance / benchmark_variance if benchmark_variance else 1.0
 
     def generate_summary(self) -> Dict[str, Any]:
