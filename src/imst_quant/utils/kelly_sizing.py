@@ -144,6 +144,11 @@ class KellySizer:
         if "pnl" not in trades.columns:
             raise ValueError("trades DataFrame must have 'pnl' column")
 
+        # Unrecorded (NaN/inf) PnL is neither a win nor a loss; counting it in
+        # the trade total deflates win rate and can zero out a profitable edge.
+        pnl = pd.to_numeric(trades["pnl"], errors="coerce")
+        trades = trades[np.isfinite(pnl)]
+
         if len(trades) == 0:
             logger.warning("no_trades_provided")
             return {

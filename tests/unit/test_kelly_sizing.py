@@ -176,3 +176,11 @@ class TestVarianceAdjustedKelly:
             win_rate=0.5, avg_win=0.0, avg_loss=0.0, win_variance=0.0, loss_variance=0.0
         )
         assert kelly == 0.0
+
+
+def test_size_from_trades_ignores_missing_pnl():
+    clean = pd.DataFrame({"pnl": [10.0, -5.0, 10.0, -5.0]})
+    dirty = pd.DataFrame({"pnl": [10.0, -5.0, None, 10.0, float("inf"), -5.0]})
+    sizer = KellySizer()
+    assert sizer.size_from_trades(dirty) == sizer.size_from_trades(clean)
+    assert sizer.size_from_trades(clean)["full_kelly"] == pytest.approx(0.25)
