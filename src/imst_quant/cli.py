@@ -10057,7 +10057,7 @@ def cmd_rolling(args: argparse.Namespace) -> int:
         "latest_sharpe_percentile": (
             float((sharpe <= sharpe.iloc[-1]).mean()) if len(sharpe) else None
         ),
-        "current_drawdown": float(equity.iloc[-1] / equity.cummax().iloc[-1] - 1),
+        "current_drawdown": float(equity.iloc[-1] / max(equity.cummax().iloc[-1], 1.0) - 1),
     }
 
     if args.json:

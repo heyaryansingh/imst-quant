@@ -100,7 +100,7 @@ def build_equity_curve(
     equity = initial_capital * cum_product
 
     # Running peak
-    peak = np.maximum.accumulate(equity)
+    peak = np.maximum(np.maximum.accumulate(equity), initial_capital)
     drawdown = equity - peak
     drawdown_pct = np.where(peak > 0, drawdown / peak, 0.0)
 
@@ -170,7 +170,7 @@ def equity_curve_statistics(
 
     # Max drawdown
     equity = initial_capital * cum_product
-    peak = np.maximum.accumulate(equity)
+    peak = np.maximum(np.maximum.accumulate(equity), initial_capital)
     dd_pct = np.where(peak > 0, (equity - peak) / peak, 0.0)
     max_drawdown = float(np.min(dd_pct))
     peak_value = float(np.max(peak))

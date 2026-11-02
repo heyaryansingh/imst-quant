@@ -43,7 +43,8 @@ def drawdown_series(returns: Vector) -> np.ndarray:
     """
     arr = _validate_returns(returns, min_obs=2)
     equity = np.cumprod(1.0 + arr)
-    peak = np.maximum.accumulate(equity)
+    # Floor at starting capital (1.0) so a first-period loss is a drawdown.
+    peak = np.maximum(np.maximum.accumulate(equity), 1.0)
     return 1.0 - equity / peak
 
 

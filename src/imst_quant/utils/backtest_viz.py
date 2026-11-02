@@ -49,7 +49,7 @@ def prepare_equity_data(
 
     df = df.with_columns([
         (pl.col("cum_returns") * initial_capital).alias("equity"),
-        pl.col("cum_returns").cum_max().alias("running_max"),
+        pl.max_horizontal(pl.col("cum_returns").cum_max(), pl.lit(1.0)).alias("running_max"),
     ])
 
     # Calculate drawdown

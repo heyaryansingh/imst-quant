@@ -24,3 +24,12 @@ def test_missing_returns_are_skipped():
         assert stats.num_periods == 2
         assert math.isclose(stats.total_return, clean.total_return)
         assert math.isfinite(stats.sharpe_ratio)
+
+
+def test_first_period_loss_counts_in_max_drawdown():
+    import pytest
+    import polars as pl
+    from imst_quant.utils.equity_curve import build_equity_curve
+
+    curve = build_equity_curve(pl.Series([-0.10, 0.05]), initial_capital=100.0)
+    assert curve["drawdown_pct"].min() == pytest.approx(-0.10)
