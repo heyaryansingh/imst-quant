@@ -16,10 +16,10 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 import numpy as np
+import pandas as pd
 import polars as pl
 
 from imst_quant.utils.cointegration import (
-    calculate_hedge_ratio,
     calculate_spread,
     calculate_zscore,
     test_cointegration,
@@ -121,57 +121,42 @@ def find_trading_pairs(
             if len(y_clean) < 30:  # Need minimum data
                 continue
 
-            # Test cointegration
+            # cointegration works on pandas Series; passing polars Series
+            # raised AttributeError on every pair, which the old blanket
+            # except swallowed, so this function always returned [].
+            y_pd = pd.Series(y_clean)
+            x_pd = pd.Series(x_clean)
             try:
-                result = test_cointegration(
-                    pl.Series("y", y_clean),
-                    pl.Series("x", x_clean)
-                )
-
-                if result.p_value > max_pvalue:
-                    continue
-
-                # Calculate metrics
-                hedge_ratio = calculate_hedge_ratio(
-                    pl.Series("y", y_clean),
-                    pl.Series("x", x_clean)
-                )
-                spread = calculate_spread(
-                    pl.Series("y", y_clean),
-                    pl.Series("x", x_clean),
-                    hedge_ratio
-                )
-                zscore = calculate_zscore(spread)
-                current_zscore = float(zscore[-1])
-
-                # Calculate half-life
-                half_life = _calculate_half_life(spread)
-
-                # Generate signal
-                signal = _generate_signal(current_zscore)
-
-                # Calculate quality score
-                score = _calculate_pair_score(
-                    result.p_value,
-                    half_life,
-                    abs(current_zscore),
-                    corr
-                )
-
-                recommendations.append(
-                    PairRecommendation(
-                        asset1=asset1,
-                        asset2=asset2,
-                        score=score,
-                        hedge_ratio=hedge_ratio,
-                        current_zscore=current_zscore,
-                        half_life=half_life,
-                        p_value=result.p_value,
-                        signal=signal,
-                    )
-                )
-            except Exception:
+                result = test_cointegration(y_pd, x_pd)
+            except (ValueError, np.linalg.LinAlgError):
                 continue
+            if result.p_value > max_pvalue:
+                continue
+
+            hedge_ratio = result.hedge_ratio
+            spread = calculate_spread(y_pd, x_pd, hedge_ratio)
+            current_zscore = float(calculate_zscore(spread).iloc[-1])
+            half_life = _calculate_half_life(pl.Series(spread.to_numpy()))
+            signal = _generate_signal(current_zscore)
+            score = _calculate_pair_score(
+                result.p_value,
+                half_life,
+                abs(current_zscore),
+                corr
+            )
+
+            recommendations.append(
+                PairRecommendation(
+                    asset1=asset1,
+                    asset2=asset2,
+                    score=score,
+                    hedge_ratio=hedge_ratio,
+                    current_zscore=current_zscore,
+                    half_life=half_life,
+                    p_value=result.p_value,
+                    signal=signal,
+                )
+            )
 
     # Sort by score and return top pairs
     recommendations.sort(key=lambda x: x.score, reverse=True)
