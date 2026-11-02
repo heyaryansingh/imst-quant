@@ -175,13 +175,15 @@ def test_holding_period_splits_short_and_long_term():
     assert summary.realized_losses == pytest.approx(-100.0)
 
 
-def test_exactly_one_year_counts_as_long_term():
+def test_exactly_one_year_is_short_term_one_day_more_is_long_term():
+    # IRS: long term requires holding *more than* one year
     tracker = TaxLotTracker()
-    tracker.buy("AAPL", 1, 100.0, "2023-01-01")
+    tracker.buy("AAPL", 2, 100.0, "2023-01-01")
     sale = tracker.sell("AAPL", 1, 110.0, "2024-01-01")[0]
 
     assert sale.holding_days == 365
-    assert sale.is_long_term
+    assert not sale.is_long_term
+    assert tracker.sell("AAPL", 1, 110.0, "2024-01-02")[0].is_long_term
 
 
 def test_one_day_short_of_a_year_is_short_term():

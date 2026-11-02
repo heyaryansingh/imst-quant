@@ -32,7 +32,8 @@ from typing import Dict, List, Optional, Sequence, Union
 
 import polars as pl
 
-# Holding period at which a US long-term capital gain begins.
+# Nominal US long-term holding period; the actual test is calendar-based
+# (held more than one year), see LotSale.is_long_term.
 LONG_TERM_DAYS = 365
 
 MATCHING_METHODS = ("fifo", "lifo", "hifo", "lofo")
@@ -131,8 +132,17 @@ class LotSale:
 
     @property
     def is_long_term(self) -> bool:
-        """Whether the holding period qualifies as long term."""
-        return self.holding_days >= LONG_TERM_DAYS
+        """Whether the holding period qualifies as long term.
+
+        US rule: held more than one year, so a sale on the one-year
+        anniversary is still short term, and leap years count.
+        """
+        acq = self.acquired
+        try:
+            anniversary = acq.replace(year=acq.year + 1)
+        except ValueError:  # bought Feb 29
+            anniversary = acq.replace(year=acq.year + 1, day=28)
+        return self.disposed > anniversary
 
 
 @dataclass
@@ -144,7 +154,7 @@ class RealizedSummary:
         total_cost_basis: Cost basis of all shares sold.
         realized_pnl: Total realized gain or loss.
         short_term_pnl: Realized gain or loss held under one year.
-        long_term_pnl: Realized gain or loss held one year or more.
+        long_term_pnl: Realized gain or loss held more than one year.
         realized_gains: Sum of the positive lot results.
         realized_losses: Sum of the negative lot results, as a negative number.
         sale_count: Number of lot disposals.
