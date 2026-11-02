@@ -1901,6 +1901,37 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- sentiment-strength subcommand ---
+    sstrength_parser = subparsers.add_parser(
+        "sentiment-strength",
+        help="Rank assets by sentiment signal strength (consistency, momentum, conviction) with direction",
+    )
+    sstrength_parser.add_argument(
+        "--data", required=True,
+        help="Sentiment parquet with date and asset_id columns (e.g. sentiment pipeline output)",
+    )
+    sstrength_parser.add_argument(
+        "--polarity-col", default="sentiment_index",
+        help="Sentiment polarity column, roughly in [-1, 1] (default: sentiment_index)",
+    )
+    sstrength_parser.add_argument(
+        "--volume-col", default="post_count", help="Post volume column (default: post_count)"
+    )
+    sstrength_parser.add_argument(
+        "--subjectivity-col", default="subjectivity",
+        help="Subjectivity column in [0, 1]; filled with neutral 0.5 if absent (default: subjectivity)",
+    )
+    sstrength_parser.add_argument(
+        "--min-volume", type=int, default=10,
+        help="Post volume where volume quality reaches 0.5 (default: 10)",
+    )
+    sstrength_parser.add_argument(
+        "--top", type=int, default=20, help="Show the N strongest assets (default: 20)"
+    )
+    sstrength_parser.add_argument(
+        "--json", action="store_true", help="Output results as JSON"
+    )
+
     # --- decay subcommand ---
     decay_parser = subparsers.add_parser(
         "decay",
@@ -9601,6 +9632,108 @@ def cmd_decay(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sentiment_strength(args: argparse.Namespace) -> int:
+    """Rank assets by sentiment signal strength and report its direction.
+
+    Strength alone is direction-free (strong bearish and strong bullish both
+    score high), so each asset also gets a bullish/bearish/neutral label from
+    the sign of its long-window mean polarity.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+
+    import pandas as pd
+
+    from imst_quant.utils.sentiment_strength import SentimentStrengthAnalyzer
+
+    if args.top < 1:
+        print(f"Error: --top must be at least 1, got {args.top}")
+        return 1
+    if args.min_volume < 0:
+        print(f"Error: --min-volume must be non-negative, got {args.min_volume}")
+        return 1
+
+    data_path = Path(args.data)
+    if not data_path.exists():
+        print(f"Error: Data file not found: {data_path}")
+        return 1
+    try:
+        raw = pd.read_parquet(data_path)
+    except Exception as e:
+        print(f"Error reading data file: {e}")
+        return 1
+
+    missing = [
+        c for c in ("date", "asset_id", args.polarity_col, args.volume_col)
+        if c not in raw.columns
+    ]
+    if missing:
+        print(f"Error: Missing columns {missing}")
+        print(f"Available columns: {list(raw.columns)}")
+        return 1
+
+    has_subjectivity = args.subjectivity_col in raw.columns
+    df = pd.DataFrame({
+        "date": raw["date"],
+        "asset_id": raw["asset_id"],
+        "polarity": pd.to_numeric(raw[args.polarity_col], errors="coerce"),
+        "volume": pd.to_numeric(raw[args.volume_col], errors="coerce"),
+        "subjectivity": (
+            pd.to_numeric(raw[args.subjectivity_col], errors="coerce")
+            if has_subjectivity else 0.5
+        ),
+    }).dropna()
+
+    analyzer = SentimentStrengthAnalyzer(min_volume=args.min_volume)
+    rows, skipped = [], []
+    for asset, group in df.groupby("asset_id"):
+        if len(group) < analyzer.long_window:
+            skipped.append(str(asset))
+            continue
+        metrics = analyzer.analyze_sentiment_data(group, asset)
+        long_mean = float(group.sort_values("date")["polarity"].tail(analyzer.long_window).mean())
+        direction = "bullish" if long_mean > 0.01 else "bearish" if long_mean < -0.01 else "neutral"
+        rows.append({"asset_id": str(asset), "direction": direction,
+                     "mean_polarity": round(long_mean, 4), **metrics})
+
+    if not rows:
+        print(f"Error: No asset has at least {analyzer.long_window} sentiment observations")
+        return 1
+
+    rows.sort(key=lambda r: r["strength_score"], reverse=True)
+    shown = rows[: args.top]
+
+    if args.json:
+        payload = {
+            "n_assets": len(rows),
+            "subjectivity_available": has_subjectivity,
+            "assets": shown,
+            "skipped_assets": sorted(skipped),
+        }
+        print(json_module.dumps(payload, indent=2))
+        return 0
+
+    print(f"\nSentiment strength ({len(rows)} assets, top {len(shown)})")
+    print("=" * 72)
+    print(f"{'Asset':<10}{'Dir':<9}{'Score':>7}{'Polar':>8}{'Cons':>7}{'Mom':>7}{'Stab':>7}{'Conv':>7}{'Vol':>7}")
+    for r in shown:
+        print(
+            f"{r['asset_id']:<10}{r['direction']:<9}{r['strength_score']:>7.1f}"
+            f"{r['mean_polarity']:>+8.3f}{r['consistency']:>7.2f}{r['momentum']:>+7.2f}"
+            f"{r['stability']:>7.2f}{r['conviction']:>7.2f}{r['volume_quality']:>7.2f}"
+        )
+    if not has_subjectivity:
+        print(f"\nNote: no '{args.subjectivity_col}' column; conviction assumes neutral subjectivity 0.5")
+    if skipped:
+        print(f"Skipped (< {analyzer.long_window} obs): {', '.join(sorted(skipped))}")
+    return 0
+
+
 def cmd_leadlag(args: argparse.Namespace) -> int:
     """Report the Granger lead-lag relationship between sentiment and returns.
 
@@ -10566,6 +10699,7 @@ COMMANDS = {
         "barriers": cmd_barriers,
         "cfvar": cmd_cfvar,
         "decay": cmd_decay,
+        "sentiment-strength": cmd_sentiment_strength,
         "leadlag": cmd_leadlag,
         "consistency": cmd_consistency,
         "recovery": cmd_recovery,
