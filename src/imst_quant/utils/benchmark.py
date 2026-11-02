@@ -98,13 +98,18 @@ class BenchmarkAnalyzer:
         self.strategy_returns = self.strategy_returns[:min_len]
         self.benchmark_returns = self.benchmark_returns[:min_len]
 
+        # Drop pairs where either side is missing so the series stay aligned.
+        ok = np.isfinite(self.strategy_returns) & np.isfinite(self.benchmark_returns)
+        self.strategy_returns = self.strategy_returns[ok]
+        self.benchmark_returns = self.benchmark_returns[ok]
+
         # Calculate key metrics on init
         self._calculate_regression()
 
     def _to_numpy(self, data) -> np.ndarray:
         """Convert input to numpy array."""
         if isinstance(data, pl.Series):
-            return data.drop_nulls().to_numpy()
+            return data.cast(pl.Float64).to_numpy()
         elif isinstance(data, list):
             return np.array(data)
         return np.asarray(data)
