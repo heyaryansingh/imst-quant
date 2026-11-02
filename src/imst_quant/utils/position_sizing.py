@@ -108,6 +108,9 @@ def kelly_criterion_size(
 
     # Kelly formula: f = (p * b - q) / b
     # where p = win rate, q = lose rate, b = avg_win / avg_loss
+    if avg_win <= 0:
+        return 0.0  # no edge; b=0 would divide by zero
+
     lose_rate = 1 - win_rate
     b = avg_win / avg_loss if avg_loss > 0 else 1.0
 
@@ -273,7 +276,15 @@ def calculate_position_sizes(
         # Vectorized ATR-based sizing
         risk_amount = capital * risk_per_trade
         stop_distance = df[atr_col] * atr_multiplier
-        units = (risk_amount / stop_distance).fill_nan(0).fill_null(0)
+        # Non-positive stop distance -> 0 units (matches atr_based_size), not inf
+        units = (
+            pl.select(
+                pl.when(stop_distance > 0).then(risk_amount / stop_distance).otherwise(0.0)
+            )
+            .to_series()
+            .fill_nan(0)
+            .fill_null(0)
+        )
 
         # Cap at capital limit
         dollar_size = units * df[entry_col]
