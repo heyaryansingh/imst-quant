@@ -438,6 +438,11 @@ def compare_venues(
         })
 
     df = pd.DataFrame(results)
+    if df.empty:
+        return pd.DataFrame(columns=[
+            'venue', 'sample_size', 'avg_slippage_bps', 'avg_fill_time',
+            'total_cost_bps', 'quality_score'
+        ])
     df = df.sort_values('quality_score', ascending=False)
 
     return df
