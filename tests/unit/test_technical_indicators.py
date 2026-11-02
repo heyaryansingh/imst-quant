@@ -113,3 +113,10 @@ class TestWarmupAndRange:
         stoch_k = stochastic_oscillator(rising, k_period=3)["stoch_k"].to_list()[-1]
         will_r = williams_r(rising, period=3)["williams_r"].to_list()[-1]
         assert will_r == pytest.approx(stoch_k - 100)
+
+
+def test_cci_uses_mean_absolute_deviation(rising):
+    # Typical price rises by 1 per bar; a 3-bar window [x-1, x, x+1] has
+    # mean absolute deviation 2/3, so CCI = 1 / (0.015 * 2/3) = 100 exactly.
+    # Rolling std (1.0) would have reported 66.7.
+    assert _settled(cci(rising, period=3), "cci") == pytest.approx([100.0] * 8)

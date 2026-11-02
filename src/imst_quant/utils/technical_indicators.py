@@ -564,9 +564,13 @@ def cci(
         pl.col("_tp").rolling_mean(window_size=period).alias("_tp_sma")
     )
 
-    # Mean deviation (approximation using std for efficiency)
+    # Mean absolute deviation of typical price around its window mean.
+    # Standard deviation is not a substitute: for normal data it runs ~1.25x
+    # the MAD, shrinking CCI so the +/-100 thresholds fire far less often.
     df = df.with_columns(
-        pl.col("_tp").rolling_std(window_size=period).alias("_mad")
+        pl.col("_tp")
+        .rolling_map(lambda w: (w - w.mean()).abs().mean(), window_size=period)
+        .alias("_mad")
     )
 
     # CCI = (TP - SMA) / (0.015 * MAD)
