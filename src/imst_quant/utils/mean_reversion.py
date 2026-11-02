@@ -100,12 +100,10 @@ def _to_numpy(series: SeriesLike) -> np.ndarray:
         Numpy array of float64 values.
     """
     if isinstance(series, pl.Series):
-        return series.drop_nulls().to_numpy().astype(np.float64)
-    elif isinstance(series, np.ndarray):
-        return series[~np.isnan(series)].astype(np.float64)
-    else:
-        arr = np.array(series, dtype=np.float64)
-        return arr[~np.isnan(arr)]
+        series = series.cast(pl.Float64).to_numpy()  # nulls -> NaN
+    arr = np.asarray(series, dtype=np.float64)
+    # Drop NaN and inf alike; polars NaN is not a null and inf poisons every moment
+    return arr[np.isfinite(arr)]
 
 
 def hurst_exponent(
