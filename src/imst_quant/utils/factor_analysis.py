@@ -119,8 +119,9 @@ def estimate_factor_exposures(
         XtX_inv = np.linalg.inv(X.T @ X)
         betas = XtX_inv @ X.T @ y
     except np.linalg.LinAlgError:
-        # Handle singular matrix
-        betas = np.linalg.lstsq(X, y, rcond=None)[0]
+        # Handle singular matrix (pinv so SE/t-stat code below still has XtX_inv)
+        XtX_inv = np.linalg.pinv(X.T @ X)
+        betas = XtX_inv @ X.T @ y
 
     # Calculate residuals and statistics
     y_pred = X @ betas
