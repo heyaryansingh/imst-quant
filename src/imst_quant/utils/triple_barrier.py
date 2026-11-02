@@ -70,7 +70,9 @@ def triple_barrier_labels(
     Args:
         prices: Price series.
         events: Indices at which positions are opened. Default: every bar
-            that has a valid volatility estimate and room before the end.
+            that has a valid volatility estimate. Events whose horizon runs
+            past the end of the data are dropped unless a horizontal barrier
+            is touched first.
         pt_mult: Profit-taking barrier width in volatility units (default 2).
         sl_mult: Stop-loss barrier width in volatility units (default 2).
         max_holding: Vertical barrier in bars (default 10).
@@ -127,8 +129,7 @@ def triple_barrier_labels(
         lower = arr[t] * (1.0 - sl_mult * vol[t])
         end = min(t + max_holding, arr.size - 1)
 
-        label = 0
-        touch = end
+        label = None
         for j in range(t + 1, end + 1):
             if arr[j] >= upper:
                 label, touch = 1, j
@@ -136,6 +137,13 @@ def triple_barrier_labels(
             if arr[j] <= lower:
                 label, touch = -1, j
                 break
+        if label is None:
+            if t + max_holding > arr.size - 1:
+                # Data ran out before the vertical barrier: the outcome is
+                # unknown, and labeling it 0 would bias the tail toward
+                # "expired" with a truncated return.
+                continue
+            label, touch = 0, end
 
         event_indices.append(t)
         labels.append(label)

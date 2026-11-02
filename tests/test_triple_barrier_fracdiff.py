@@ -196,3 +196,20 @@ class TestMemoryVsStationarity:
         # d=0 is perfectly correlated with itself; memory falls as d rises
         assert corrs[0] == pytest.approx(1.0)
         assert corrs[0] > corrs[1] > corrs[2]
+
+
+def test_truncated_horizon_not_labeled_vertical():
+    # Flat prices never touch a horizontal barrier. Events within
+    # max_holding of the end have an unknown outcome and must be dropped,
+    # not labeled 0 with a shortened holding period.
+    prices = np.full(20, 100.0)
+    result = triple_barrier_labels(prices, max_holding=5, volatility=np.full(20, 0.02))
+    assert result["event_indices"].max() == 14
+    assert np.all(result["touch_indices"] - result["event_indices"] == 5)
+
+
+def test_truncated_horizon_kept_when_barrier_touched():
+    prices = np.array([100.0] * 10 + [110.0])
+    result = triple_barrier_labels(prices, max_holding=5, volatility=np.full(11, 0.02))
+    assert 9 in result["event_indices"]
+    assert result["labels"][list(result["event_indices"]).index(9)] == 1
