@@ -120,3 +120,12 @@ def test_cci_uses_mean_absolute_deviation(rising):
     # mean absolute deviation 2/3, so CCI = 1 / (0.015 * 2/3) = 100 exactly.
     # Rolling std (1.0) would have reported 66.7.
     assert _settled(cci(rising, period=3), "cci") == pytest.approx([100.0] * 8)
+
+
+def test_atr_uses_wilder_smoothing():
+    # True ranges 1 then 15 with window 14: Wilder gives 1 + (15 - 1)/14 = 2.0.
+    # The old span-based EMA (alpha 2/15) gave 2.87.
+    from imst_quant.utils.technical_indicators import atr
+
+    df = pl.DataFrame({"high": [101.0, 115.0], "low": [100.0, 100.0], "close": [100.0, 100.0]})
+    assert atr(df, window=14)["atr"].to_list() == pytest.approx([1.0, 2.0])

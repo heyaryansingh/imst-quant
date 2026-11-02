@@ -223,9 +223,11 @@ def atr(
         pl.max_horizontal(["_hl", "_hpc", "_lpc"]).alias("true_range")
     )
 
-    # Average true range using EMA for smoothing
+    # Wilder smoothing (alpha = 1/window), as in rsi(). An EMA with
+    # span=window (alpha = 2/(window+1)) nearly doubles the reaction speed
+    # and is not the ATR that stop/ADX thresholds are calibrated on.
     df = df.with_columns(
-        pl.col("true_range").ewm_mean(span=window, adjust=False).alias("atr")
+        pl.col("true_range").ewm_mean(alpha=1.0 / window, adjust=False).alias("atr")
     )
 
     return df.drop(["_hl", "_hpc", "_lpc"])
@@ -286,10 +288,10 @@ def adx(
         .alias("_minus_dm"),
     ])
 
-    # Smooth DM values
+    # Smooth DM values (Wilder, matching atr)
     df = df.with_columns([
-        pl.col("_plus_dm").ewm_mean(span=window, adjust=False).alias("_plus_dm_smooth"),
-        pl.col("_minus_dm").ewm_mean(span=window, adjust=False).alias("_minus_dm_smooth"),
+        pl.col("_plus_dm").ewm_mean(alpha=1.0 / window, adjust=False).alias("_plus_dm_smooth"),
+        pl.col("_minus_dm").ewm_mean(alpha=1.0 / window, adjust=False).alias("_minus_dm_smooth"),
     ])
 
     # Calculate +DI and -DI
@@ -310,7 +312,7 @@ def adx(
 
     # ADX is smoothed DX
     df = df.with_columns(
-        pl.col("_dx").ewm_mean(span=window, adjust=False).alias("adx")
+        pl.col("_dx").ewm_mean(alpha=1.0 / window, adjust=False).alias("adx")
     )
 
     return df.drop([
