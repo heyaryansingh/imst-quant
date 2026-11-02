@@ -160,7 +160,10 @@ class FactorAttribution:
         """
         self.portfolio_returns = portfolio_returns
         self.factor_returns = factor_returns
-        self.risk_free_rate = risk_free_rate or pd.Series(0, index=portfolio_returns.index)
+        self.risk_free_rate = (
+            risk_free_rate if risk_free_rate is not None
+            else pd.Series(0, index=portfolio_returns.index)
+        )
 
     def run_regression(self) -> Tuple[pd.Series, float, float]:
         """Run factor regression.
