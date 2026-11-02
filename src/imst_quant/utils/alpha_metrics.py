@@ -157,15 +157,13 @@ class AlphaMetrics:
         sector_excess = sector_returns.sub(benchmark_total, axis=0)
         allocation = (weight_diff * sector_excess).sum(axis=1).mean()
 
-        # Selection effect: w_b * (r_p - r_s)
-        # Approximated by active returns weighted by benchmark
-        selection = ((portfolio_weights - benchmark_weights) * sector_returns).sum(axis=1).mean()
-
         # Interaction effect
         interaction = (weight_diff * (sector_returns.sub(sector_returns.mean(), axis=0))).sum(axis=1).mean()
 
-        # Total alpha
-        total = allocation + selection + interaction
+        # Total alpha is the active return; selection is what allocation and
+        # interaction leave over (no portfolio sector returns are available).
+        total = (weight_diff * sector_returns).sum(axis=1).mean()
+        selection = total - allocation - interaction
 
         return AlphaDecomposition(
             total_alpha=total,
