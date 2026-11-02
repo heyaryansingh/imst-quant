@@ -160,7 +160,7 @@ class SignalStrengthAnalyzer:
         # Calculate % of days moving in dominant direction
         positive_days = (returns > 0).sum()
         negative_days = (returns < 0).sum()
-        total_days = len(returns) - 1  # Exclude first NaN
+        total_days = returns.drop_nulls().len()  # Exclude leading null
 
         if total_days == 0:
             return 50.0
