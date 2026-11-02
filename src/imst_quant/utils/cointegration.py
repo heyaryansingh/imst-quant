@@ -266,8 +266,10 @@ def calculate_half_life(spread: pd.Series) -> float:
     y = y.loc[common_idx].values
     x = x.loc[common_idx].values
 
-    # OLS: delta_spread = theta * spread_{t-1}
-    theta = (x @ y) / (x @ x) if (x @ x) > 0 else 0
+    # OLS with intercept: delta_spread = c + theta * spread_{t-1}
+    # (spread has nonzero mean; no-intercept fit is biased toward unit root)
+    xc = x - x.mean() if len(x) else x
+    theta = (xc @ y) / (xc @ xc) if (xc @ xc) > 0 else 0
 
     phi = 1 + theta
 
@@ -498,7 +500,7 @@ def rolling_hedge_ratio(
         if len(y_window) < 2:
             return np.nan
         cov = np.cov(y_window, x_window)[0, 1]
-        var_x = np.var(x_window)
+        var_x = np.var(x_window, ddof=1)  # match np.cov's ddof=1
         return cov / var_x if var_x > 0 else np.nan
 
     hedge_ratios = []
