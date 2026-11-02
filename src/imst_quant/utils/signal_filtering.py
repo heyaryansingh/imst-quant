@@ -335,9 +335,7 @@ def calculate_signal_decay(
     # Apply exponential decay using cumulative product
     df = df.with_columns(
         [
-            pl.col(signal_col)
-            .cum_prod()
-            .pow(pl.lit(decay_factor))
+            (pl.col(signal_col) * pl.lit(decay_factor).pow(pl.int_range(pl.len())))
             .alias("signal_decayed"),
         ]
     )
