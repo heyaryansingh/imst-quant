@@ -134,13 +134,13 @@ class PortfolioStressTester:
             scenario.volatility_multiplier
         )
 
-        results['stressed_var_95'] = np.percentile(stressed_returns.sum(axis=1), 5)
-        results['stressed_cvar_95'] = stressed_returns.sum(axis=1)[
-            stressed_returns.sum(axis=1) <= results['stressed_var_95']
-        ].mean()
+        weights = self.positions / self.positions.sum()
+        port = (stressed_returns * weights).sum(axis=1)
+        results['stressed_var_95'] = np.percentile(port, 5)
+        results['stressed_cvar_95'] = port[port <= results['stressed_var_95']].mean()
 
         # Maximum drawdown under stress
-        cumulative = (1 + stressed_returns.sum(axis=1)).cumprod()
+        cumulative = (1 + port).cumprod()
         running_max = cumulative.expanding().max()
         drawdown = (cumulative - running_max) / running_max
         results['max_drawdown_stressed'] = drawdown.min()
