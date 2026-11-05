@@ -269,15 +269,15 @@ def add_rsi(
         >>> df = add_rsi(df, period=6)
         >>> print(df["rsi"])
     """
-    delta = df.select(pl.col(price_col).diff().alias("delta"))["delta"]
-
-    gain = delta.clip_min(0)
-    loss = (-delta).clip_min(0)
-
-    avg_gain = gain.ewm_mean(span=period, adjust=False)
-    avg_loss = loss.ewm_mean(span=period, adjust=False)
-
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-
+    if period < 1:
+        raise ValueError(f"period must be at least 1, got {period}")
+    delta = pl.col(price_col).diff()
+    # Wilder smoothing (alpha = 1/period), the standard RSI definition
+    avg_gain = delta.clip(lower_bound=0).ewm_mean(alpha=1.0 / period, adjust=False)
+    avg_loss = (-delta).clip(lower_bound=0).ewm_mean(alpha=1.0 / period, adjust=False)
+    rsi = (
+        pl.when(avg_loss == 0)
+        .then(pl.when(avg_gain > 0).then(100.0).otherwise(50.0))  # all gains / flat
+        .otherwise(100 - 100 / (1 + avg_gain / avg_loss))
+    )
     return df.with_columns(rsi.alias("rsi"))

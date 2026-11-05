@@ -131,10 +131,17 @@ def calculate_timeframe_signal(
 
         # Simple RSI approximation
         delta = df["close"].diff()
-        gain = delta.clip_min(0).rolling_mean(window_size=lookback)
-        loss = (-delta).clip_min(0).rolling_mean(window_size=lookback)
-        rs = gain / loss.replace(0, 1)  # Avoid division by zero
-        rsi = 100 - (100 / (1 + rs))
+        gain = delta.clip(lower_bound=0).rolling_mean(window_size=lookback)
+        loss = (-delta).clip(lower_bound=0).rolling_mean(window_size=lookback)
+        # No losses: RSI is 100 if price rose, 50 if flat (dividing by a fake loss of 1 was wrong)
+        rsi = (
+            pl.select(
+                pl.when(loss == 0)
+                .then(pl.when(gain > 0).then(100.0).otherwise(50.0))
+                .otherwise(100 - 100 / (1 + gain / loss))
+            )
+            .to_series()
+        )
 
         df = df.with_columns([
             roc.alias("roc"),
