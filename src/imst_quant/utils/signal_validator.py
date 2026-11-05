@@ -44,8 +44,10 @@ def validate_signal_quality(
     sharpe = (strategy_returns.mean() / strategy_returns.std() * np.sqrt(252)) if strategy_returns.std() > 0 else 0
 
     # Hit rate (only for non-zero signals)
-    non_zero_signals = aligned[aligned["signal"].shift(1) != 0]
-    signal_returns = non_zero_signals["signal"].shift(1) * non_zero_signals["returns"]
+    # Filter the already-aligned strategy returns; re-shifting a filtered frame
+    # paired each return with the previous *active* signal, not the prior bar's.
+    position = aligned["signal"].shift(1).loc[strategy_returns.index]
+    signal_returns = strategy_returns[position != 0]
     hit_rate = (signal_returns > 0).sum() / len(signal_returns) if len(signal_returns) > 0 else 0
 
     # Turnover (number of signal changes per year)
