@@ -165,6 +165,9 @@ def apply_scenario(
     Returns:
         ScenarioResult with portfolio impact and per-asset contributions.
     """
+    if not weights:
+        raise ValueError("weights must contain at least one asset")
+
     asset_contributions: Dict[str, float] = {}
     portfolio_impact = 0.0
 
@@ -176,7 +179,8 @@ def apply_scenario(
 
     worst_asset = min(asset_contributions, key=asset_contributions.get)  # type: ignore[arg-type]
     best_asset = max(asset_contributions, key=asset_contributions.get)  # type: ignore[arg-type]
-    max_loss = min(asset_contributions.values())
+    # A portfolio where every contribution is a gain has no loss, not a positive "loss"
+    max_loss = min(0.0, min(asset_contributions.values()))
 
     return ScenarioResult(
         scenario_name=scenario.name,
@@ -201,6 +205,9 @@ def run_scenario_analysis(
     Returns:
         ScenarioAnalysisReport with all results, worst case, and expected loss.
     """
+    if not scenarios:
+        raise ValueError("scenarios must contain at least one scenario")
+
     results = [apply_scenario(weights, s) for s in scenarios]
 
     worst_case = min(results, key=lambda r: r.portfolio_impact)
@@ -320,10 +327,14 @@ def custom_stress_test(
     Returns:
         ScenarioResult under the stressed conditions.
     """
+    if not correlation_multiplier > 0:
+        raise ValueError(f"correlation_multiplier must be positive, got {correlation_multiplier}")
+
     stressed_shocks = {}
     for asset, shock in base_shocks.items():
         if shock < 0:
-            stressed_shocks[asset] = shock * correlation_multiplier
+            # An asset cannot lose more than 100% of its value
+            stressed_shocks[asset] = max(-1.0, shock * correlation_multiplier)
         else:
             # Positive shocks (hedges) may be reduced under stress
             stressed_shocks[asset] = shock / correlation_multiplier
