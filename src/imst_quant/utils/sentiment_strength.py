@@ -61,6 +61,8 @@ class SentimentStrengthAnalyzer:
             - volume_quality: Volume-based quality score (0-1)
         """
         df_asset = df[df["asset_id"] == asset_id].copy()
+        # One NaN/inf polarity turns the momentum slope (and the score) into NaN
+        df_asset = df_asset[np.isfinite(pd.to_numeric(df_asset["polarity"], errors="coerce"))]
 
         if len(df_asset) < self.long_window:
             logger.warning(
