@@ -2235,6 +2235,23 @@ Examples:
     )
     drift_parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
+    # --- sigvalidate subcommand ---
+    sigval_parser = subparsers.add_parser(
+        "sigvalidate",
+        help="Signal quality gate: Sharpe, hit rate, turnover vs thresholds plus long/short/flat mix",
+    )
+    sigval_parser.add_argument(
+        "--data", required=True, help="Parquet file with signal (-1/0/1) and per-bar return columns"
+    )
+    sigval_parser.add_argument("--signal-col", default="signal", help="Signal column (default: signal)")
+    sigval_parser.add_argument("--returns-col", default="returns", help="Returns column (default: returns)")
+    sigval_parser.add_argument("--min-sharpe", type=float, default=1.0, help="Minimum Sharpe (default: 1.0)")
+    sigval_parser.add_argument("--min-hit-rate", type=float, default=0.52, help="Minimum hit rate (default: 0.52)")
+    sigval_parser.add_argument(
+        "--max-turnover", type=float, default=2.0, help="Maximum annual signal changes (default: 2.0)"
+    )
+    sigval_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
     # --- pbo subcommand ---
     pbo_parser = subparsers.add_parser(
         "pbo",
@@ -9330,6 +9347,86 @@ def cmd_drift(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sigvalidate(args: argparse.Namespace) -> int:
+    """Gate a trading signal on Sharpe, hit rate and turnover thresholds.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 if the signal passes, 2 if it fails a check, 1 on bad input).
+    """
+    import json as json_module
+    import math
+
+    import numpy as np
+    import pandas as pd
+
+    from imst_quant.utils.signal_validator import check_signal_consistency, validate_signal_quality
+
+    path = Path(args.data)
+    if not path.exists():
+        print(f"Error: Data file not found: {path}")
+        return 1
+    try:
+        df = pd.read_parquet(path)
+    except Exception as e:
+        print(f"Error reading data file: {e}")
+        return 1
+    missing = [c for c in (args.signal_col, args.returns_col) if c not in df.columns]
+    if missing:
+        print(f"Error: Missing columns {missing}. Available columns: {list(df.columns)}")
+        return 1
+
+    signal = pd.to_numeric(df[args.signal_col], errors="coerce")
+    returns = pd.to_numeric(df[args.returns_col], errors="coerce").replace([np.inf, -np.inf], np.nan)
+    ok = signal.notna() & returns.notna()
+    if ok.sum() < 3:
+        print(f"Error: need at least 3 rows with finite signal and returns, got {int(ok.sum())}")
+        return 1
+    if not signal[ok].isin([-1, 0, 1]).all():
+        print("Error: signal values must be -1, 0 or 1")
+        return 1
+    signal, returns = signal[ok].reset_index(drop=True), returns[ok].reset_index(drop=True)
+
+    result = validate_signal_quality(
+        signal, returns,
+        min_sharpe=args.min_sharpe, min_hit_rate=args.min_hit_rate, max_turnover=args.max_turnover,
+    )
+    consistency = check_signal_consistency(signal, window=min(20, len(signal)))
+    # Constant signals have undefined autocorrelation; keep JSON valid
+    consistency = {k: (v if math.isfinite(v) else None) for k, v in consistency.items()}
+    checks = {k: bool(v) for k, v in result["checks"].items()}
+    passed = all(checks.values())
+
+    if args.json:
+        payload = {
+            "passed": passed,
+            "n_observations": len(signal),
+            "sharpe": result["sharpe"],
+            "hit_rate": result["hit_rate"],
+            "turnover": result["turnover"],
+            "checks": checks,
+            "thresholds": result["thresholds"],
+            "consistency": consistency,
+        }
+        print(json_module.dumps(payload, indent=2))
+        return 0 if passed else 2
+
+    mark = {True: "PASS", False: "FAIL"}
+    print("\n=== Signal Validation ===\n")
+    print(f"Observations: {len(signal)}")
+    print(f"Sharpe:       {result['sharpe']:>8.2f}  (min {args.min_sharpe:.2f})  {mark[checks['sharpe_check']]}")
+    print(f"Hit rate:     {result['hit_rate']:>8.1%}  (min {args.min_hit_rate:.1%})  {mark[checks['hit_rate_check']]}")
+    print(f"Turnover:     {result['turnover']:>8.2f}  (max {args.max_turnover:.2f})  {mark[checks['turnover_check']]}")
+    print(
+        f"Long/Short/Flat: {consistency['pct_long']:.1%} / "
+        f"{consistency['pct_short']:.1%} / {consistency['pct_flat']:.1%}"
+    )
+    print(f"\nVerdict: {'PASS' if passed else 'FAIL'}\n")
+    return 0 if passed else 2
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -10844,6 +10941,7 @@ COMMANDS = {
         "compare": cmd_compare,
         "taildep": cmd_taildep,
         "drift": cmd_drift,
+        "sigvalidate": cmd_sigvalidate,
 }
 
 
