@@ -24,3 +24,11 @@ def test_momentum_rsi_no_losses_is_100():
     df = pl.DataFrame({"close": [100.0 + i for i in range(30)]})
     out = calculate_timeframe_signal(df, "momentum", lookback=5)
     assert out["rsi"].to_list()[-1] == 100.0
+
+
+def test_rolling_zscore_flat_window_is_zero():
+    from imst_quant.utils.rolling_windows import add_rolling_zscore
+
+    out = add_rolling_zscore(pl.DataFrame({"p": [1.0, 1, 1, 2]}), "p", window=3)["p_zscore3"].to_list()
+    assert out[2] == 0.0
+    assert out[3] == pytest.approx((2 - 4 / 3) / pl.Series([1.0, 1, 2]).std())

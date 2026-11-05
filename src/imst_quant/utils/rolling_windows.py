@@ -212,7 +212,11 @@ def add_rolling_zscore(
     ])
 
     result = result.with_columns(
-        ((pl.col(col) - pl.col("_roll_mean")) / pl.col("_roll_std")).alias(col_name)
+        # A flat window has no dispersion: z-score 0, not NaN/inf
+        pl.when(pl.col("_roll_std") == 0)
+        .then(0.0)
+        .otherwise((pl.col(col) - pl.col("_roll_mean")) / pl.col("_roll_std"))
+        .alias(col_name)
     )
 
     return result.drop(["_roll_mean", "_roll_std"])
