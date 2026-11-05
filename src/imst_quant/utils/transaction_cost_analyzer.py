@@ -95,12 +95,16 @@ class TransactionCostAnalyzer:
             notional, participation_rate, execution_price
         )
 
-        # Timing cost (delay cost)
-        timing_cost = abs(execution_price - decision_price) * volume
+        # Timing cost (delay cost), signed by side: paying up on a buy or
+        # selling lower is a cost; price improvement is negative cost.
+        if side not in ('buy', 'sell'):
+            raise ValueError(f"side must be 'buy' or 'sell', got {side!r}")
+        direction = 1.0 if side == 'buy' else -1.0
+        timing_cost = direction * (execution_price - decision_price) * volume
 
-        # Slippage (difference from mid-price)
-        # Assuming execution_price includes slippage
-        slippage = abs(execution_price - decision_price) * volume - timing_cost
+        # ponytail: slippage vs mid needs a mid quote we don't have; it is
+        # folded into timing_cost, so report 0 rather than double-count.
+        slippage = 0.0
 
         # Opportunity cost (for partial fills)
         # Simplified - assumes full fill for now
