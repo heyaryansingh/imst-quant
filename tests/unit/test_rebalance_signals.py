@@ -93,6 +93,11 @@ class TestVolatilityAdjustedThreshold:
         )
         assert adjusted < 0.05
 
+    def test_nan_volatility_returns_base(self):
+        nan = float("nan")
+        assert volatility_adjusted_threshold(0.05, nan, 0.20) == 0.05
+        assert volatility_adjusted_threshold(0.05, 0.10, nan) == 0.05
+
     def test_zero_long_term_vol_returns_base(self):
         adjusted = volatility_adjusted_threshold(
             base_threshold=0.05, recent_volatility=0.10, long_term_volatility=0.0

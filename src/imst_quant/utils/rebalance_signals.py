@@ -203,6 +203,9 @@ def volatility_adjusted_threshold(
     Returns:
         Adjusted threshold.
     """
+    # NaN fails every comparison: max(0.5, min(nan, 2.0)) silently halved the threshold
+    if not (np.isfinite(recent_volatility) and np.isfinite(long_term_volatility)):
+        return base_threshold
     if long_term_volatility <= 0:
         return base_threshold
 
