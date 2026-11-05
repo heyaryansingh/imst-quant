@@ -217,8 +217,10 @@ def calculate_trade_stats(
 
     avg_win_loss_ratio = avg_win / avg_loss if avg_loss > 0 else 0.0
 
-    largest_win = trades[pnl_col].max() or 0.0
-    largest_loss = abs(trades[pnl_col].min() or 0.0)
+    # Largest win/loss come from winners/losers only: an all-losing book has
+    # no win (not a "largest win" of -30), and vice versa.
+    largest_win = winning_trades_df[pnl_col].max() if winning_trades > 0 else 0.0
+    largest_loss = abs(losing_trades_df[pnl_col].min()) if losing_trades > 0 else 0.0
     avg_trade = trades[pnl_col].mean() or 0.0
 
     avg_holding_period = 0.0
@@ -297,7 +299,14 @@ def generate_summary_report(
     # Calculate CAGR
     n_periods = len(ret_series)
     years = n_periods / periods_per_year if periods_per_year > 0 else 1
-    cagr = (final_capital / initial_capital) ** (1 / years) - 1 if years > 0 else 0.0
+    growth = final_capital / initial_capital if initial_capital else 0.0
+    if years <= 0:
+        cagr = 0.0
+    elif growth <= 0:
+        # Wiped out: a negative base to a fractional power is complex in Python.
+        cagr = -1.0
+    else:
+        cagr = growth ** (1 / years) - 1
 
     # Calculate trade statistics if trades provided
     trade_stats = None
