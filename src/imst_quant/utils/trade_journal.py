@@ -431,12 +431,10 @@ class TradeJournal:
             if gross_loss > 0:
                 stats.profit_factor = gross_profit / gross_loss
 
-            # Expectancy
-            if stats.win_rate > 0:
-                stats.expectancy = (
-                    stats.win_rate * stats.avg_winner
-                    + (1 - stats.win_rate) * stats.avg_loser
-                )
+            # Expectancy = P(win)*avg_win + P(loss)*avg_loss + P(even)*0, which
+            # is just mean PnL. The old win_rate-gated form reported 0 for an
+            # all-losing journal and weighted breakevens as losers.
+            stats.expectancy = stats.avg_pnl
 
         # R-multiple stats
         r_multiples = [t.r_multiple for t in trades if t.r_multiple is not None]
