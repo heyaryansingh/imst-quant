@@ -2204,6 +2204,37 @@ Examples:
         "--json", action="store_true", help="Output results as JSON"
     )
 
+    # --- drift subcommand ---
+    drift_parser = subparsers.add_parser(
+        "drift",
+        help="Weight drift vs targets: rebalance trigger, trade orders and cost estimate",
+    )
+    drift_parser.add_argument(
+        "--portfolio", required=True,
+        help="Parquet file with symbol, current weight and target weight columns",
+    )
+    drift_parser.add_argument("--symbol-col", default="symbol", help="Symbol column (default: symbol)")
+    drift_parser.add_argument("--weight-col", default="weight", help="Current weight column (default: weight)")
+    drift_parser.add_argument(
+        "--target-col", default="target_weight", help="Target weight column (default: target_weight)"
+    )
+    drift_parser.add_argument(
+        "--value", type=float, default=100_000.0, help="Portfolio value in dollars (default: 100000)"
+    )
+    drift_parser.add_argument(
+        "--abs-threshold", type=float, default=0.05, help="Absolute drift trigger (default: 0.05)"
+    )
+    drift_parser.add_argument(
+        "--rel-threshold", type=float, default=0.25, help="Relative drift trigger (default: 0.25)"
+    )
+    drift_parser.add_argument(
+        "--cost-bps", type=float, default=10.0, help="Transaction cost in bps (default: 10)"
+    )
+    drift_parser.add_argument(
+        "--min-trade", type=float, default=100.0, help="Skip orders below this dollar size (default: 100)"
+    )
+    drift_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
     # --- pbo subcommand ---
     pbo_parser = subparsers.add_parser(
         "pbo",
@@ -9199,6 +9230,106 @@ def cmd_taildep(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_drift(args: argparse.Namespace) -> int:
+    """Report weight drift vs targets, the rebalance trigger and the orders to fix it.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 for success, 1 for invalid input or missing data).
+    """
+    import json as json_module
+    import math
+    from dataclasses import asdict
+
+    import polars as pl
+
+    from imst_quant.utils.rebalance_signals import rebalance_summary
+
+    path = Path(args.portfolio)
+    if not path.exists():
+        print(f"Error: Portfolio file not found: {path}")
+        return 1
+    try:
+        df = pl.read_parquet(path)
+    except Exception as e:
+        print(f"Error reading portfolio file: {e}")
+        return 1
+
+    cols = (args.symbol_col, args.weight_col, args.target_col)
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        print(f"Error: Missing columns {missing}. Available columns: {df.columns}")
+        return 1
+    if not (math.isfinite(args.value) and args.value > 0):
+        print(f"Error: --value must be positive, got {args.value}")
+        return 1
+    if not (args.min_trade >= 0 and args.cost_bps >= 0):
+        print("Error: --min-trade and --cost-bps must be non-negative")
+        return 1
+    if not (args.abs_threshold > 0 and args.rel_threshold > 0):
+        print("Error: thresholds must be positive")
+        return 1
+
+    current: dict = {}
+    target: dict = {}
+    for sym, w, t in df.select(cols).iter_rows():
+        w = 0.0 if w is None else float(w)
+        t = 0.0 if t is None else float(t)
+        if sym is None or not (math.isfinite(w) and math.isfinite(t)):
+            # A NaN weight would silently pass every threshold comparison
+            print(f"Error: non-finite or missing value for symbol {sym!r}")
+            return 1
+        sym = str(sym)
+        current[sym] = current.get(sym, 0.0) + w
+        target[sym] = target.get(sym, 0.0) + t
+    if not current:
+        print("Error: portfolio file has no rows")
+        return 1
+
+    summary = rebalance_summary(
+        current,
+        target,
+        portfolio_value=args.value,
+        abs_threshold=args.abs_threshold,
+        rel_threshold=args.rel_threshold,
+        transaction_cost_bps=args.cost_bps,
+        min_trade_size=args.min_trade,
+    )
+    target_sum = sum(target.values())
+
+    if args.json:
+        payload = asdict(summary)
+        for d in payload["drift_metrics"]:
+            if not math.isfinite(d["relative_drift"]):
+                d["relative_drift"] = None  # target 0: relative drift undefined
+        payload["target_weight_sum"] = target_sum
+        print(json_module.dumps(payload, indent=2))
+        return 0
+
+    print("\n=== Rebalance Drift ===\n")
+    print(f"{'Symbol':<10}{'Current':>10}{'Target':>10}{'Drift':>10}{'Rel':>10}")
+    for d in sorted(summary.drift_metrics, key=lambda d: -abs(d.absolute_drift)):
+        rel = f"{d.relative_drift:>+10.1%}" if math.isfinite(d.relative_drift) else f"{'exit':>10}"
+        print(
+            f"{d.asset:<10}{d.current_weight:>10.2%}{d.target_weight:>10.2%}"
+            f"{d.absolute_drift:>+10.2%}{rel}"
+        )
+    print(f"\nMax abs drift:  {summary.max_absolute_drift:.2%}")
+    print(f"Turnover:       {summary.total_turnover:.2%}")
+    print(f"Signal:         {'REBALANCE' if summary.trigger else 'hold'} ({summary.reason})")
+    if abs(target_sum - 1.0) > 0.01:
+        print(f"Warning: target weights sum to {target_sum:.2%}, not 100%")
+    if summary.orders:
+        print("\nOrders:")
+        for o in summary.orders:
+            print(f"  {o.side:<5}{o.asset:<10}${o.dollar_amount:>14,.2f}")
+        print(f"\nEstimated cost: ${summary.estimated_cost:,.2f}")
+    print()
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -10712,6 +10843,7 @@ COMMANDS = {
         "impact": cmd_impact,
         "compare": cmd_compare,
         "taildep": cmd_taildep,
+        "drift": cmd_drift,
 }
 
 
