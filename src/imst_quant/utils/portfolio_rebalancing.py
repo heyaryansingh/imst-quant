@@ -69,6 +69,11 @@ class PortfolioRebalancer:
         self.last_rebalance: Optional[datetime] = None
         self.rebalance_history: List[Dict] = []
 
+    def _universe(self, positions: Dict[str, float]) -> List[str]:
+        """Target symbols plus any held symbol (target 0) so dropped names get sold."""
+        extra = [s for s in positions if s not in self.target_weights and positions[s]]
+        return list(self.target_weights) + extra
+
     def calculate_current_weights(
         self,
         positions: Dict[str, float],
@@ -84,12 +89,12 @@ class PortfolioRebalancer:
             Dictionary of current weights
         """
         values = {symbol: positions.get(symbol, 0.0) * prices.get(symbol, 0.0)
-                  for symbol in self.target_weights.keys()}
+                  for symbol in self._universe(positions)}
 
         total_value = sum(values.values())
 
         if total_value == 0:
-            return {symbol: 0.0 for symbol in self.target_weights.keys()}
+            return {symbol: 0.0 for symbol in self._universe(positions)}
 
         return {symbol: value / total_value for symbol, value in values.items()}
 
@@ -106,8 +111,8 @@ class PortfolioRebalancer:
             Dictionary of drift amounts
         """
         return {
-            symbol: current_weights.get(symbol, 0.0) - self.target_weights[symbol]
-            for symbol in self.target_weights.keys()
+            symbol: current_weights.get(symbol, 0.0) - self.target_weights.get(symbol, 0.0)
+            for symbol in set(self.target_weights) | set(current_weights)
         }
 
     def needs_rebalance_threshold(
@@ -165,9 +170,9 @@ class PortfolioRebalancer:
         current_weights = self.calculate_current_weights(positions, prices)
         trades = []
 
-        for symbol in self.target_weights.keys():
+        for symbol in self._universe(positions):
             current_weight = current_weights.get(symbol, 0.0)
-            target_weight = self.target_weights[symbol]
+            target_weight = self.target_weights.get(symbol, 0.0)
 
             current_value = positions.get(symbol, 0.0) * prices.get(symbol, 0.0)
             target_value = total_value * target_weight
@@ -249,7 +254,7 @@ class PortfolioRebalancer:
             return None
 
         # Calculate total portfolio value
-        total_value = sum(positions.get(s, 0.0) * prices.get(s, 0.0) for s in self.target_weights.keys())
+        total_value = sum(positions.get(s, 0.0) * prices.get(s, 0.0) for s in self._universe(positions))
 
         # Calculate required trades
         trades = self.calculate_rebalance_trades(positions, prices, total_value, timestamp)
