@@ -101,3 +101,12 @@ def test_winsorize_clips_extreme_values():
     assert result["returns"].max() < df["returns"].max()
     # middle values are untouched
     assert result["returns"][2] == pytest.approx(0.01)
+
+
+def test_standard_scaler_constant_and_single_row_columns_scale_to_zero():
+    from imst_quant.utils.feature_scaling import StandardScaler
+
+    const = StandardScaler().fit_transform(pl.DataFrame({"a": [2.0, 2.0, 2.0]}), ["a"])
+    assert const["a"].to_list() == [0.0, 0.0, 0.0]
+    single = StandardScaler().fit_transform(pl.DataFrame({"a": [2.0]}), ["a"])
+    assert single["a"].to_list() == [0.0]

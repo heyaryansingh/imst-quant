@@ -68,9 +68,13 @@ class StandardScaler:
             if col not in self.mean_ or col not in self.std_:
                 raise ValueError(f"Column '{col}' not fitted. Call fit() first.")
 
-            result = result.with_columns(
-                ((pl.col(col) - self.mean_[col]) / self.std_[col]).alias(col)
-            )
+            # Constant column (std 0) or single row (std None): no spread to scale by
+            if not self.std_[col]:
+                result = result.with_columns(pl.lit(0.0).alias(col))
+            else:
+                result = result.with_columns(
+                    ((pl.col(col) - self.mean_[col]) / self.std_[col]).alias(col)
+                )
 
         return result
 
