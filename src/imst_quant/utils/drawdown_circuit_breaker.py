@@ -14,6 +14,7 @@ Example:
     >>> print(action)  # CircuitAction.REDUCE
 """
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -147,7 +148,7 @@ class DrawdownCircuitBreaker:
         Returns:
             The recommended CircuitAction.
         """
-        dd = abs(current_drawdown)
+        dd = self._validate(current_drawdown)
 
         if dd >= self.halt_threshold:
             return CircuitAction.HALT
@@ -171,7 +172,7 @@ class DrawdownCircuitBreaker:
         Returns:
             CircuitState with the current recommendation.
         """
-        dd = abs(current_drawdown)
+        dd = self._validate(current_drawdown)
         self._peak_drawdown = max(self._peak_drawdown, dd)
 
         # Handle cooldown after halt
@@ -184,6 +185,9 @@ class DrawdownCircuitBreaker:
             if dd <= self.recovery_threshold:
                 self._is_halted = False
                 self._peak_drawdown = dd
+                # The reset event below already announces NORMAL; without this the
+                # transition check would log a second "Returned to normal" event.
+                self._last_action = CircuitAction.NORMAL
                 self._record_event(
                     CircuitAction.NORMAL,
                     dd,
@@ -221,6 +225,14 @@ class DrawdownCircuitBreaker:
         }
 
         return self._build_state(action, dd, position_scale=scale_map[action])
+
+    @staticmethod
+    def _validate(current_drawdown: float) -> float:
+        # NaN fails every threshold comparison, which silently meant NORMAL
+        # (full size) on bad data -- a risk control must not fail open.
+        if not math.isfinite(current_drawdown):
+            raise ValueError(f"current_drawdown must be finite, got {current_drawdown!r}")
+        return abs(current_drawdown)
 
     def reset(self) -> None:
         """Reset the circuit breaker to initial state."""
