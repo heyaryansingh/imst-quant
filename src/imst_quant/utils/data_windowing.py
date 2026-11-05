@@ -349,7 +349,8 @@ def create_time_based_folds(
         # Apply gap if specified
         if gap is not None:
             train_end_date = train_df[datetime_col].max()
-            val_df = df.filter(pl.col(datetime_col) >= train_end_date + gap)
+            # Strictly after: ">=" put the last training row in validation when gap=0
+            val_df = df.filter(pl.col(datetime_col) > train_end_date + gap)
             val_df = val_df.slice(0, val_end_idx - val_start_idx)
         else:
             val_df = df.slice(val_start_idx, val_end_idx - val_start_idx)
