@@ -406,10 +406,16 @@ def obv(
         >>> result = obv(df)
     """
     # Determine direction: +volume if close > prev close, -volume if lower
+    # Bars with a null/NaN/inf close or volume add nothing, and the next bar
+    # compares against the last good close. Otherwise one NaN volume turns
+    # every later OBV value into NaN, and polars ranks a NaN close above any
+    # price, booking a phantom up-bar then a phantom down-bar.
+    valid = (pl.col(close_col).is_finite() & pl.col(volume_col).is_finite()).fill_null(False)
+    prev = pl.when(valid).then(pl.col(close_col)).forward_fill().shift(1)
     df = df.with_columns(
-        pl.when(pl.col(close_col) > pl.col(close_col).shift(1))
+        pl.when(valid & (pl.col(close_col) > prev))
         .then(pl.col(volume_col))
-        .when(pl.col(close_col) < pl.col(close_col).shift(1))
+        .when(valid & (pl.col(close_col) < prev))
         .then(-pl.col(volume_col))
         .otherwise(0)
         .alias("_obv_change")
@@ -461,14 +467,21 @@ def vwap(
     )
 
     # Cumulative sums for VWAP calculation
+    # Skip bars with a null/NaN/inf price or volume: a single NaN would
+    # otherwise poison both running sums for the rest of the series.
+    valid = (pl.col("_typical").is_finite() & pl.col(volume_col).is_finite()).fill_null(False)
     df = df.with_columns([
-        (pl.col("_typical") * pl.col(volume_col)).cum_sum().alias("_tpv_sum"),
-        pl.col(volume_col).cum_sum().alias("_vol_sum"),
+        pl.when(valid).then(pl.col("_typical") * pl.col(volume_col)).otherwise(0.0)
+        .cum_sum().alias("_tpv_sum"),
+        pl.when(valid).then(pl.col(volume_col)).otherwise(0.0).cum_sum().alias("_vol_sum"),
     ])
 
-    # VWAP = cumulative (typical * volume) / cumulative volume
+    # VWAP = cumulative (typical * volume) / cumulative volume; undefined
+    # (null) until some volume has traded.
     df = df.with_columns(
-        (pl.col("_tpv_sum") / pl.col("_vol_sum")).alias("vwap")
+        pl.when(pl.col("_vol_sum") > 0)
+        .then(pl.col("_tpv_sum") / pl.col("_vol_sum"))
+        .alias("vwap")
     )
 
     return df.drop(["_typical", "_tpv_sum", "_vol_sum"])
