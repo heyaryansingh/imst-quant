@@ -133,6 +133,57 @@ def percent_trailing_stop(
     return df.drop("_raw_stop").with_columns(pl.Series("trailing_stop", ratcheted))
 
 
+def chandelier_exit(
+    df: pl.DataFrame,
+    period: int = 22,
+    multiplier: float = 3.0,
+    high_col: str = "high",
+    low_col: str = "low",
+    close_col: str = "close",
+) -> pl.DataFrame:
+    """Chandelier exit stops (LeBeau): hang the stop off the extreme of the window.
+
+    ``long_stop = highest_high(period) - multiplier * ATR(period)`` and
+    ``short_stop = lowest_low(period) + multiplier * ATR(period)``, with Wilder
+    ATR. Levels are known at each bar's close and apply to the next bar.
+    The first ``period - 1`` rows are null (window not full yet).
+
+    Args:
+        df: OHLC DataFrame, oldest first.
+        period: Look-back for the highest high / lowest low and ATR (>= 1).
+        multiplier: ATR multiple (> 0).
+        high_col, low_col, close_col: Column names.
+
+    Returns:
+        DataFrame with added ``atr``, ``long_stop`` and ``short_stop`` columns.
+
+    Example:
+        >>> df = pl.DataFrame({"high": [11.0, 12, 13], "low": [9.0, 10, 11],
+        ...                    "close": [10.0, 11, 12]})
+        >>> out = chandelier_exit(df, period=2, multiplier=1.0)
+        >>> out["long_stop"].to_list()[0] is None
+        True
+    """
+    if period < 1:
+        raise ValueError(f"period must be >= 1, got {period}")
+    if not multiplier > 0:
+        raise ValueError(f"multiplier must be > 0, got {multiplier}")
+
+    from imst_quant.utils.technical_indicators import atr
+
+    out = atr(df, high_col=high_col, low_col=low_col, close_col=close_col, window=period)
+    out = out.drop("true_range")
+    full = pl.int_range(pl.len()) >= period - 1
+    return out.with_columns(
+        pl.when(full)
+        .then(pl.col(high_col).rolling_max(window_size=period) - multiplier * pl.col("atr"))
+        .alias("long_stop"),
+        pl.when(full)
+        .then(pl.col(low_col).rolling_min(window_size=period) + multiplier * pl.col("atr"))
+        .alias("short_stop"),
+    )
+
+
 def check_stop_triggered(
     df: pl.DataFrame,
     price_col: str = "close",

@@ -2268,6 +2268,19 @@ Examples:
     )
     stopsweep_parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
+    # --- chandelier subcommand ---
+    chandelier_parser = subparsers.add_parser(
+        "chandelier",
+        help="Chandelier exit stops (highest high / lowest low -/+ k*ATR): current levels, distance, exit flags",
+    )
+    chandelier_parser.add_argument("--data", required=True, help="Parquet file with high/low/close columns")
+    chandelier_parser.add_argument("--high-col", default="high", help="High column (default: high)")
+    chandelier_parser.add_argument("--low-col", default="low", help="Low column (default: low)")
+    chandelier_parser.add_argument("--close-col", default="close", help="Close column (default: close)")
+    chandelier_parser.add_argument("--period", type=int, default=22, help="Look-back bars (default: 22)")
+    chandelier_parser.add_argument("--mult", type=float, default=3.0, help="ATR multiple (default: 3.0)")
+    chandelier_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
     # --- pbo subcommand ---
     pbo_parser = subparsers.add_parser(
         "pbo",
@@ -9517,6 +9530,91 @@ def cmd_stopsweep(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_chandelier(args: argparse.Namespace) -> int:
+    """Report current chandelier exit stop levels for long and short positions.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.trading.trailing_stop import chandelier_exit
+
+    path = Path(args.data)
+    if not path.exists():
+        print(f"Error: Data file not found: {path}")
+        return 1
+    try:
+        df = pl.read_parquet(path)
+    except Exception as e:
+        print(f"Error reading data file: {e}")
+        return 1
+    cols = [args.high_col, args.low_col, args.close_col]
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        print(f"Error: Missing columns {missing}. Available columns: {df.columns}")
+        return 1
+    if args.period < 1:
+        print("Error: --period must be >= 1")
+        return 1
+    if not args.mult > 0:
+        print("Error: --mult must be > 0")
+        return 1
+
+    # Drop bars with any null/NaN/inf/non-positive price; one bad bar would
+    # poison the Wilder ATR for every bar after it.
+    df = df.select([pl.col(c).cast(pl.Float64, strict=False) for c in cols])
+    df = df.filter(pl.all_horizontal([pl.col(c).is_finite() & (pl.col(c) > 0) for c in cols]))
+    if df.height < args.period:
+        print(f"Error: need at least {args.period} clean bars, got {df.height}")
+        return 1
+
+    out = chandelier_exit(
+        df, period=args.period, multiplier=args.mult,
+        high_col=args.high_col, low_col=args.low_col, close_col=args.close_col,
+    )
+    close = out[args.close_col]
+    long_hits = int((close <= out["long_stop"]).fill_null(False).sum())
+    short_hits = int((close >= out["short_stop"]).fill_null(False).sum())
+    last = out.row(-1, named=True)
+    c, ls, ss = last[args.close_col], last["long_stop"], last["short_stop"]
+    result = {
+        "n_bars": out.height,
+        "period": args.period,
+        "multiplier": args.mult,
+        "close": c,
+        "atr": last["atr"],
+        "long_stop": ls,
+        "short_stop": ss,
+        "long_distance_pct": (c - ls) / c,
+        "short_distance_pct": (ss - c) / c,
+        "long_exit": c <= ls,
+        "short_exit": c >= ss,
+        "long_exit_bars": long_hits,
+        "short_exit_bars": short_hits,
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    print("\n=== Chandelier Exit ===\n")
+    print(f"Bars: {out.height}   Period: {args.period}   Multiplier: {args.mult}   ATR: {last['atr']:.4f}")
+    print(f"Close: {c:.4f}\n")
+    print(f"{'Side':<6} {'Stop':>12} {'Distance':>10} {'Exit now':>9} {'Exit bars':>10}")
+    print(f"{'Long':<6} {ls:>12.4f} {result['long_distance_pct']:>+10.2%} "
+          f"{'YES' if result['long_exit'] else 'no':>9} {long_hits:>10d}")
+    print(f"{'Short':<6} {ss:>12.4f} {result['short_distance_pct']:>+10.2%} "
+          f"{'YES' if result['short_exit'] else 'no':>9} {short_hits:>10d}")
+    print()
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -11033,6 +11131,7 @@ COMMANDS = {
         "drift": cmd_drift,
         "sigvalidate": cmd_sigvalidate,
         "stopsweep": cmd_stopsweep,
+        "chandelier": cmd_chandelier,
 }
 
 
