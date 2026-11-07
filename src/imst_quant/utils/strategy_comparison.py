@@ -4,6 +4,7 @@ This module provides tools to compare different trading strategies based on thei
 backtest results, performance metrics, and risk-adjusted returns.
 """
 
+import math
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -11,6 +12,19 @@ import pandas as pd
 import structlog
 
 logger = structlog.get_logger()
+
+
+def _is_finite_number(value) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def _secondary_key(metric: str, value: float) -> float:
+    # Drawdowns come in both sign conventions (-0.12 or 0.12); magnitude is
+    # what matters, so a smaller |drawdown| always sorts first when minimizing.
+    return abs(value) if "drawdown" in metric.lower() else value
 
 
 def compare_strategies(
@@ -93,8 +107,8 @@ def rank_strategies(
         if metric in metrics
     ]
 
-    # Filter out None values
-    rankings = [(name, value) for name, value in rankings if value is not None]
+    # Drop None/NaN/inf: NaN breaks sort ordering silently
+    rankings = [(name, value) for name, value in rankings if _is_finite_number(value)]
 
     rankings.sort(key=lambda x: x[1], reverse=not ascending)
 
@@ -122,12 +136,17 @@ def calculate_relative_performance(
 
     Returns:
         Dictionary mapping strategy names to their relative performance
-        (strategy_metric / benchmark_metric - 1).
+        (strategy_metric - benchmark_metric) / |benchmark_metric|, so a strategy
+        beating a negative benchmark still reads as positive.
 
     Example:
         >>> results = {'LSTM': {'total_return': 0.25}, 'Benchmark': {'total_return': 0.15}}
         >>> calculate_relative_performance(results, 'Benchmark', 'total_return')
         {'LSTM': 0.6667, 'Benchmark': 0.0}
+        >>> # Negative benchmark: beating it is still positive relative performance
+        >>> calculate_relative_performance(
+        ...     {'A': {'total_return': 0.05}, 'B': {'total_return': -0.10}}, 'B')
+        {'A': 1.5, 'B': 0.0}
     """
     if benchmark_strategy not in strategy_results:
         raise ValueError(f"Benchmark strategy '{benchmark_strategy}' not found")
@@ -138,7 +157,7 @@ def calculate_relative_performance(
             f"Metric '{metric}' not found in benchmark strategy '{benchmark_strategy}'"
         )
 
-    if benchmark_value == 0:
+    if not _is_finite_number(benchmark_value) or benchmark_value == 0:
         logger.warning(
             "benchmark_value_zero",
             metric=metric,
@@ -149,8 +168,8 @@ def calculate_relative_performance(
     relative_perf = {}
     for name, metrics in strategy_results.items():
         value = metrics.get(metric)
-        if value is not None:
-            relative_perf[name] = (value / benchmark_value) - 1
+        if _is_finite_number(value):
+            relative_perf[name] = (value - benchmark_value) / abs(benchmark_value)
 
     logger.info(
         "relative_performance_calculated",
@@ -175,6 +194,8 @@ def find_best_strategy(
         primary_metric: Primary metric to optimize (e.g., 'sharpe').
         secondary_metric: Optional tiebreaker metric (e.g., 'max_drawdown').
         secondary_ascending: Direction for secondary metric (True for minimize).
+            Drawdown metrics are compared by magnitude, so either sign
+            convention picks the shallower drawdown when minimizing.
 
     Returns:
         Name of the best strategy.
@@ -194,7 +215,7 @@ def find_best_strategy(
     valid_strategies = {
         name: metrics
         for name, metrics in strategy_results.items()
-        if primary_metric in metrics
+        if _is_finite_number(metrics.get(primary_metric))
     }
 
     if not valid_strategies:
@@ -220,12 +241,12 @@ def find_best_strategy(
         top_performers_with_secondary = [
             (name, metrics)
             for name, metrics in top_performers
-            if secondary_metric in metrics
+            if _is_finite_number(metrics.get(secondary_metric))
         ]
 
         if top_performers_with_secondary:
             top_performers_with_secondary.sort(
-                key=lambda x: x[1][secondary_metric],
+                key=lambda x: _secondary_key(secondary_metric, x[1][secondary_metric]),
                 reverse=not secondary_ascending,
             )
             best = top_performers_with_secondary[0][0]
