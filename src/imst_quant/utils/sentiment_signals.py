@@ -327,13 +327,16 @@ def calculate_sentiment_divergence(
             > pl.col(sentiment_col).rolling_mean(window_size=window).shift(1)
         )
         .then(1)
-        .otherwise(-1)
+        .when(pl.col(sentiment_col).rolling_mean(window_size=window).is_not_null()
+              & pl.col(sentiment_col).rolling_mean(window_size=window).shift(1).is_not_null())
+        .then(-1)
         .alias("sentiment_direction"),
         pl.when(
             pl.col(price_returns_col).rolling_sum(window_size=window) > 0
         )
         .then(1)
-        .otherwise(-1)
+        .when(pl.col(price_returns_col).rolling_sum(window_size=window).is_not_null())
+        .then(-1)
         .alias("price_direction"),
     )
 
