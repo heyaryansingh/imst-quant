@@ -192,15 +192,18 @@ def score_signal_quality(
         weight_value = 1.0 / len(signal_cols)
         weights = {col: weight_value for col in signal_cols}
 
-    # Normalize weights to sum to 1
-    total_weight = sum(weights.values())
-    normalized_weights = {k: v / total_weight for k, v in weights.items()}
+    # Normalize over columns actually present; a weight for a missing column
+    # used to stay in the denominator and silently shrink every score.
+    present = {k: v for k, v in weights.items() if k in df.columns}
+    total_weight = sum(present.values())
+    if not present or total_weight <= 0:
+        raise ValueError("weights must include at least one present column with positive total")
+    normalized_weights = {k: v / total_weight for k, v in present.items()}
 
     # Calculate weighted score
     weighted_score = pl.lit(0.0)
     for col, weight in normalized_weights.items():
-        if col in df.columns:
-            weighted_score = weighted_score + (df[col] * weight)
+        weighted_score = weighted_score + (df[col] * weight)
 
     df = df.with_columns(weighted_score.alias("weighted_signal_score"))
 
@@ -292,30 +295,35 @@ def calculate_signal_win_rate(
     # Calculate future returns
     future_returns = df[returns_col].shift(-lookahead)
 
-    # Determine if signal was correct
-    # Bullish signal (1) correct if future return > 0
-    # Bearish signal (-1) correct if future return < 0
-    signal_outcome = pl.when(df[signal_col] == 0).then(0).otherwise(
-        pl.when(
-            ((df[signal_col] > 0) & (future_returns > 0))
-            | ((df[signal_col] < 0) & (future_returns < 0))
-        )
+    # Bullish (1) correct if future return > 0, bearish (-1) if < 0.
+    # Rows without a future return (last `lookahead` rows) are unknown (null),
+    # not losses.
+    sig = df[signal_col]
+    signal_outcome = (
+        pl.when(future_returns.is_null()).then(None)
+        .when(sig == 0).then(0)
+        .when(((sig > 0) & (future_returns > 0)) | ((sig < 0) & (future_returns < 0)))
         .then(1)
         .otherwise(-1)
     )
 
-    df = df.with_columns([
-        signal_outcome.alias("signal_outcome"),
-        (signal_outcome == 1).alias("signal_hit"),
-    ])
+    df = df.with_columns(signal_outcome.alias("signal_outcome"))
+    df = df.with_columns((pl.col("signal_outcome") == 1).alias("signal_hit"))
 
-    # Calculate rolling win rate (only for non-zero signals)
+    # Rolling win rate over the last 20 resolved non-zero signals; neutral
+    # rows used to count as misses and dilute the rate.
     win_rate_window = 20
-    df = df.with_columns(
-        pl.when(pl.col(signal_col) != 0)
-        .then(pl.col("signal_hit").cast(pl.Float64).rolling_mean(window_size=win_rate_window))
-        .otherwise(None)
-        .alias("rolling_win_rate")
+    resolved = (pl.col(signal_col) != 0) & pl.col("signal_outcome").is_not_null()
+    idx = df.with_row_index("_row").filter(resolved).select(
+        "_row",
+        pl.col("signal_hit").cast(pl.Float64)
+        .rolling_mean(window_size=win_rate_window)
+        .alias("rolling_win_rate"),
+    )
+    df = (
+        df.with_row_index("_row")
+        .join(idx, on="_row", how="left")
+        .drop("_row")
     )
 
     return df
