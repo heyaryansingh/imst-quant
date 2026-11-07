@@ -2281,6 +2281,19 @@ Examples:
     chandelier_parser.add_argument("--mult", type=float, default=3.0, help="ATR multiple (default: 3.0)")
     chandelier_parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
+    # --- supertrend subcommand ---
+    supertrend_parser = subparsers.add_parser(
+        "supertrend",
+        help="Supertrend trend filter (ratcheting ATR band): current trend, line, distance, flips",
+    )
+    supertrend_parser.add_argument("--data", required=True, help="Parquet file with high/low/close columns")
+    supertrend_parser.add_argument("--high-col", default="high", help="High column (default: high)")
+    supertrend_parser.add_argument("--low-col", default="low", help="Low column (default: low)")
+    supertrend_parser.add_argument("--close-col", default="close", help="Close column (default: close)")
+    supertrend_parser.add_argument("--period", type=int, default=10, help="ATR look-back bars (default: 10)")
+    supertrend_parser.add_argument("--mult", type=float, default=3.0, help="ATR multiple (default: 3.0)")
+    supertrend_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
     # --- pbo subcommand ---
     pbo_parser = subparsers.add_parser(
         "pbo",
@@ -9615,6 +9628,91 @@ def cmd_chandelier(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_supertrend(args: argparse.Namespace) -> int:
+    """Report the current Supertrend trend, line level and flip history.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.utils.technical_indicators import supertrend
+
+    path = Path(args.data)
+    if not path.exists():
+        print(f"Error: Data file not found: {path}")
+        return 1
+    try:
+        df = pl.read_parquet(path)
+    except Exception as e:
+        print(f"Error reading data file: {e}")
+        return 1
+    cols = [args.high_col, args.low_col, args.close_col]
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        print(f"Error: Missing columns {missing}. Available columns: {df.columns}")
+        return 1
+    if args.period < 1:
+        print("Error: --period must be >= 1")
+        return 1
+    if not args.mult > 0:
+        print("Error: --mult must be > 0")
+        return 1
+
+    # One null/NaN bar would poison the Wilder ATR and every band after it.
+    df = df.select([pl.col(c).cast(pl.Float64, strict=False) for c in cols])
+    df = df.filter(pl.all_horizontal([pl.col(c).is_finite() & (pl.col(c) > 0) for c in cols]))
+    if df.height < args.period:
+        print(f"Error: need at least {args.period} clean bars, got {df.height}")
+        return 1
+
+    out = supertrend(
+        df, period=args.period, multiplier=args.mult,
+        high_col=args.high_col, low_col=args.low_col, close_col=args.close_col,
+    )
+    dirs = out["st_direction"].drop_nulls().to_list()
+    flips = sum(1 for a, b in zip(dirs, dirs[1:]) if a != b)
+    bars_in_trend = 1
+    for prev in reversed(dirs[:-1]):
+        if prev != dirs[-1]:
+            break
+        bars_in_trend += 1
+    last = out.row(-1, named=True)
+    c, line, d = last[args.close_col], last["supertrend"], last["st_direction"]
+    result = {
+        "n_bars": out.height,
+        "period": args.period,
+        "multiplier": args.mult,
+        "close": c,
+        "atr": last["atr"],
+        "supertrend": line,
+        "trend": "up" if d == 1 else "down",
+        "distance_pct": (c - line) / c,
+        "bars_in_trend": bars_in_trend,
+        "flipped_this_bar": len(dirs) > 1 and dirs[-2] != d,
+        "flips": flips,
+        "pct_bars_up": sum(1 for x in dirs if x == 1) / len(dirs),
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    print("\n=== Supertrend ===\n")
+    print(f"Bars: {out.height}   Period: {args.period}   Multiplier: {args.mult}   ATR: {last['atr']:.4f}")
+    print(f"Close: {c:.4f}   Supertrend: {line:.4f}   Distance: {result['distance_pct']:+.2%}")
+    flag = "  (flipped this bar)" if result["flipped_this_bar"] else ""
+    print(f"Trend: {result['trend'].upper()} for {bars_in_trend} bars{flag}")
+    print(f"Flips: {flips}   Time in uptrend: {result['pct_bars_up']:.1%}")
+    print()
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -11132,6 +11230,7 @@ COMMANDS = {
         "sigvalidate": cmd_sigvalidate,
         "stopsweep": cmd_stopsweep,
         "chandelier": cmd_chandelier,
+        "supertrend": cmd_supertrend,
 }
 
 

@@ -735,3 +735,74 @@ def detect_rsi_divergence(
         "_price_pct_from_min", "_rsi_pct_from_min",
         "_price_pct_from_max", "_rsi_pct_from_max"
     ])
+
+
+def supertrend(
+    df: pl.DataFrame,
+    high_col: str = "high",
+    low_col: str = "low",
+    close_col: str = "close",
+    period: int = 10,
+    multiplier: float = 3.0,
+) -> pl.DataFrame:
+    """Supertrend: ATR band around the bar midpoint that ratchets with the trend.
+
+    Basic bands are ``(high + low) / 2 -/+ multiplier * ATR(period)`` (Wilder
+    ATR). The lower band may only rise while the prior close holds above it,
+    and the upper band may only fall while the prior close holds below it.
+    The trend flips up when the close breaks above the upper band and down
+    when it breaks below the lower band. The first ``period - 1`` rows are
+    null; the trend starts up on the first full bar.
+
+    Args:
+        df: OHLC DataFrame, oldest first, no null/NaN prices.
+        high_col, low_col, close_col: Column names.
+        period: ATR look-back (>= 1).
+        multiplier: ATR multiple (> 0).
+
+    Returns:
+        DataFrame with added ``atr``, ``supertrend`` (the active band) and
+        ``st_direction`` (1 uptrend, -1 downtrend) columns.
+
+    Example:
+        >>> df = pl.DataFrame({"high": [11.0, 12, 13], "low": [9.0, 10, 11],
+        ...                    "close": [10.0, 11, 12]})
+        >>> supertrend(df, period=2, multiplier=1.0)["st_direction"].to_list()
+        [None, 1, 1]
+    """
+    if period < 1:
+        raise ValueError(f"period must be >= 1, got {period}")
+    if not multiplier > 0:
+        raise ValueError(f"multiplier must be > 0, got {multiplier}")
+
+    out = atr(df, high_col=high_col, low_col=low_col, close_col=close_col, window=period)
+    out = out.drop("true_range")
+    hl2 = ((out[high_col] + out[low_col]) / 2).to_list()
+    atr_v = out["atr"].to_list()
+    close = out[close_col].to_list()
+
+    n = out.height
+    line: list = [None] * n
+    direction: list = [None] * n
+    upper = lower = None
+    for i in range(period - 1, n):
+        bu = hl2[i] + multiplier * atr_v[i]
+        bl = hl2[i] - multiplier * atr_v[i]
+        if upper is None:
+            upper, lower, d = bu, bl, 1
+        else:
+            prev_close = close[i - 1]
+            upper = bu if (bu < upper or prev_close > upper) else upper
+            lower = bl if (bl > lower or prev_close < lower) else lower
+            d = direction[i - 1]
+            if d == 1 and close[i] < lower:
+                d = -1
+            elif d == -1 and close[i] > upper:
+                d = 1
+        direction[i] = d
+        line[i] = lower if d == 1 else upper
+
+    return out.with_columns(
+        pl.Series("supertrend", line, dtype=pl.Float64),
+        pl.Series("st_direction", direction, dtype=pl.Int8),
+    )
