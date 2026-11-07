@@ -806,3 +806,83 @@ def supertrend(
         pl.Series("supertrend", line, dtype=pl.Float64),
         pl.Series("st_direction", direction, dtype=pl.Int8),
     )
+
+
+def keltner_channels(
+    df: pl.DataFrame,
+    high_col: str = "high",
+    low_col: str = "low",
+    close_col: str = "close",
+    window: int = 20,
+    multiplier: float = 1.5,
+) -> pl.DataFrame:
+    """Keltner channels: EMA(close) -/+ multiplier * Wilder ATR.
+
+    The first ``window - 1`` rows are null so the EMA and ATR have warmed up.
+
+    Args:
+        df: OHLC DataFrame, oldest first.
+        high_col, low_col, close_col: Column names.
+        window: EMA span and ATR period (>= 1).
+        multiplier: ATR multiple (> 0).
+
+    Returns:
+        DataFrame with added ``kc_middle``, ``kc_upper`` and ``kc_lower``.
+    """
+    if window < 1:
+        raise ValueError(f"window must be >= 1, got {window}")
+    if not multiplier > 0:
+        raise ValueError(f"multiplier must be > 0, got {multiplier}")
+
+    out = atr(df, high_col=high_col, low_col=low_col, close_col=close_col, window=window)
+    full = pl.int_range(pl.len()) >= window - 1
+    mid = pl.col(close_col).ewm_mean(span=window, adjust=False)
+    out = out.with_columns(pl.when(full).then(mid).alias("kc_middle"))
+    return out.with_columns(
+        (pl.col("kc_middle") + multiplier * pl.col("atr")).alias("kc_upper"),
+        (pl.col("kc_middle") - multiplier * pl.col("atr")).alias("kc_lower"),
+    ).drop(["true_range", "atr"])
+
+
+def bollinger_squeeze(
+    df: pl.DataFrame,
+    high_col: str = "high",
+    low_col: str = "low",
+    close_col: str = "close",
+    window: int = 20,
+    bb_std: float = 2.0,
+    kc_mult: float = 1.5,
+) -> pl.DataFrame:
+    """Volatility squeeze: Bollinger Bands fully inside the Keltner channel.
+
+    A squeeze marks unusually compressed volatility; the bar where it ends
+    ("fires") often precedes a directional move. Direction is read from the
+    close versus the Keltner midline.
+
+    Args:
+        df: OHLC DataFrame, oldest first.
+        high_col, low_col, close_col: Column names.
+        window: Shared look-back for both band sets (>= 2).
+        bb_std: Bollinger standard-deviation multiple (> 0).
+        kc_mult: Keltner ATR multiple (> 0).
+
+    Returns:
+        DataFrame with Bollinger and Keltner columns plus ``squeeze_on``
+        (bool, null during warm-up) and ``squeeze_fired`` (True on the first
+        bar after a squeeze ends).
+    """
+    if window < 2:
+        raise ValueError(f"window must be >= 2, got {window}")
+    if not bb_std > 0:
+        raise ValueError(f"bb_std must be > 0, got {bb_std}")
+
+    out = bollinger_bands(df, price_col=close_col, window=window, num_std=bb_std)
+    out = keltner_channels(
+        out, high_col=high_col, low_col=low_col, close_col=close_col,
+        window=window, multiplier=kc_mult,
+    )
+    on = (pl.col("bb_upper") < pl.col("kc_upper")) & (pl.col("bb_lower") > pl.col("kc_lower"))
+    out = out.with_columns(on.alias("squeeze_on"))
+    return out.with_columns(
+        (pl.col("squeeze_on").shift(1) & ~pl.col("squeeze_on")).fill_null(False).alias("squeeze_fired")
+    )

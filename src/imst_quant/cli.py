@@ -2294,6 +2294,20 @@ Examples:
     supertrend_parser.add_argument("--mult", type=float, default=3.0, help="ATR multiple (default: 3.0)")
     supertrend_parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
+    # --- squeeze subcommand ---
+    squeeze_parser = subparsers.add_parser(
+        "squeeze",
+        help="Volatility squeeze (Bollinger inside Keltner): on/fired now, bars compressed, breakout direction",
+    )
+    squeeze_parser.add_argument("--data", required=True, help="Parquet file with high/low/close columns")
+    squeeze_parser.add_argument("--high-col", default="high", help="High column (default: high)")
+    squeeze_parser.add_argument("--low-col", default="low", help="Low column (default: low)")
+    squeeze_parser.add_argument("--close-col", default="close", help="Close column (default: close)")
+    squeeze_parser.add_argument("--window", type=int, default=20, help="Look-back bars (default: 20)")
+    squeeze_parser.add_argument("--bb-std", type=float, default=2.0, help="Bollinger std multiple (default: 2.0)")
+    squeeze_parser.add_argument("--kc-mult", type=float, default=1.5, help="Keltner ATR multiple (default: 1.5)")
+    squeeze_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
     # --- pbo subcommand ---
     pbo_parser = subparsers.add_parser(
         "pbo",
@@ -9713,6 +9727,95 @@ def cmd_supertrend(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_squeeze(args: argparse.Namespace) -> int:
+    """Report the Bollinger/Keltner volatility squeeze state.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.utils.technical_indicators import bollinger_squeeze
+
+    path = Path(args.data)
+    if not path.exists():
+        print(f"Error: Data file not found: {path}")
+        return 1
+    try:
+        df = pl.read_parquet(path)
+    except Exception as e:
+        print(f"Error reading data file: {e}")
+        return 1
+    cols = [args.high_col, args.low_col, args.close_col]
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        print(f"Error: Missing columns {missing}. Available columns: {df.columns}")
+        return 1
+    if args.window < 2:
+        print("Error: --window must be >= 2")
+        return 1
+    if not (args.bb_std > 0 and args.kc_mult > 0):
+        print("Error: --bb-std and --kc-mult must be > 0")
+        return 1
+
+    # One null/NaN bar would poison the EMA/ATR for every bar after it.
+    df = df.select([pl.col(c).cast(pl.Float64, strict=False) for c in cols])
+    df = df.filter(pl.all_horizontal([pl.col(c).is_finite() & (pl.col(c) > 0) for c in cols]))
+    if df.height < args.window:
+        print(f"Error: need at least {args.window} clean bars, got {df.height}")
+        return 1
+
+    out = bollinger_squeeze(
+        df, high_col=args.high_col, low_col=args.low_col, close_col=args.close_col,
+        window=args.window, bb_std=args.bb_std, kc_mult=args.kc_mult,
+    )
+    flags = out["squeeze_on"].drop_nulls().to_list()
+    if not flags:
+        print("Error: not enough bars to evaluate the squeeze")
+        return 1
+    run = 0
+    for f in reversed(flags):
+        if f != flags[-1]:
+            break
+        run += 1
+    episodes = sum(1 for a, b in zip([False] + flags, flags) if b and not a)
+    last = out.row(-1, named=True)
+    c, mid = last[args.close_col], last["kc_middle"]
+    result = {
+        "n_bars": out.height,
+        "window": args.window,
+        "squeeze_on": flags[-1],
+        "squeeze_fired": last["squeeze_fired"],
+        "bars_in_state": run,
+        "squeeze_episodes": episodes,
+        "pct_bars_squeezed": sum(flags) / len(flags),
+        "bb_width": last["bb_width"],
+        "close": c,
+        "kc_middle": mid,
+        "bias": "up" if c > mid else "down" if c < mid else "flat",
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    state = "ON" if result["squeeze_on"] else "off"
+    print("\n" + "=== Volatility Squeeze ===" + "\n")
+    print(f"Bars: {out.height}   Window: {args.window}   BB std: {args.bb_std}   KC mult: {args.kc_mult}")
+    print(f"Squeeze: {state} for {run} bars   Episodes: {episodes}   Time squeezed: {result['pct_bars_squeezed']:.1%}")
+    if result["squeeze_fired"]:
+        print(f"FIRED this bar, bias {result['bias'].upper()} (close {c:.4f} vs midline {mid:.4f})")
+    else:
+        print(f"Bias: {result['bias']} (close {c:.4f} vs midline {mid:.4f})")
+    print()
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -11231,6 +11334,7 @@ COMMANDS = {
         "stopsweep": cmd_stopsweep,
         "chandelier": cmd_chandelier,
         "supertrend": cmd_supertrend,
+        "squeeze": cmd_squeeze,
 }
 
 
