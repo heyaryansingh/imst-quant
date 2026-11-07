@@ -2252,6 +2252,22 @@ Examples:
     )
     sigval_parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
+    # --- stopsweep subcommand ---
+    stopsweep_parser = subparsers.add_parser(
+        "stopsweep",
+        help="Sweep trailing-stop distances on a price series vs buy-and-hold (return, drawdown, stops)",
+    )
+    stopsweep_parser.add_argument("--data", required=True, help="Parquet file with a close price column")
+    stopsweep_parser.add_argument("--price-col", default="close", help="Price column (default: close)")
+    stopsweep_parser.add_argument(
+        "--pcts", default="0.03,0.05,0.08,0.10,0.15,0.20",
+        help="Comma-separated trailing distances as fractions (default: 0.03,...,0.20)",
+    )
+    stopsweep_parser.add_argument(
+        "--cooldown", type=int, default=5, help="Flat bars after a stop before re-entry (default: 5)"
+    )
+    stopsweep_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
     # --- pbo subcommand ---
     pbo_parser = subparsers.add_parser(
         "pbo",
@@ -9427,6 +9443,80 @@ def cmd_sigvalidate(args: argparse.Namespace) -> int:
     return 0 if passed else 2
 
 
+def cmd_stopsweep(args: argparse.Namespace) -> int:
+    """Compare long-only trailing stops of several distances against buy-and-hold.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    import numpy as np
+    import pandas as pd
+
+    from imst_quant.trading.trailing_stop import simulate_trailing_stop
+
+    path = Path(args.data)
+    if not path.exists():
+        print(f"Error: Data file not found: {path}")
+        return 1
+    try:
+        df = pd.read_parquet(path)
+    except Exception as e:
+        print(f"Error reading data file: {e}")
+        return 1
+    if args.price_col not in df.columns:
+        print(f"Error: Missing column '{args.price_col}'. Available columns: {list(df.columns)}")
+        return 1
+    try:
+        pcts = sorted({float(x) for x in args.pcts.split(",") if x.strip()})
+    except ValueError:
+        print(f"Error: --pcts must be comma-separated numbers, got {args.pcts!r}")
+        return 1
+    if not pcts or any(not 0 < p < 1 for p in pcts):
+        print("Error: every --pcts value must be between 0 and 1")
+        return 1
+    if args.cooldown < 0:
+        print("Error: --cooldown must be >= 0")
+        return 1
+
+    prices = pd.to_numeric(df[args.price_col], errors="coerce").replace([np.inf, -np.inf], np.nan)
+    prices = prices[prices > 0].tolist()
+    if len(prices) < 2:
+        print(f"Error: need at least 2 positive finite prices, got {len(prices)}")
+        return 1
+
+    rows = [{"pct": p, **simulate_trailing_stop(prices, p, args.cooldown)} for p in pcts]
+    for r in rows:
+        r["n_stops"] = int(r["n_stops"])
+    best = max(rows, key=lambda r: r["total_return"])
+    buy_hold = rows[0]["buy_hold_return"]
+
+    if args.json:
+        print(json_module.dumps({
+            "n_prices": len(prices),
+            "cooldown": args.cooldown,
+            "buy_hold_return": buy_hold,
+            "results": [{k: v for k, v in r.items() if k != "buy_hold_return"} for r in rows],
+            "best_pct": best["pct"],
+        }, indent=2))
+        return 0
+
+    print("\n=== Trailing Stop Sweep ===\n")
+    print(f"Prices: {len(prices)}   Cooldown: {args.cooldown} bars   Buy & hold: {buy_hold:+.2%}\n")
+    print(f"{'Stop':>6} {'Return':>9} {'vs B&H':>9} {'MaxDD':>8} {'Stops':>6} {'InMkt':>6}")
+    for r in rows:
+        print(
+            f"{r['pct']:>6.1%} {r['total_return']:>+9.2%} {r['total_return'] - buy_hold:>+9.2%} "
+            f"{r['max_drawdown']:>8.2%} {r['n_stops']:>6d} {r['time_in_market']:>6.0%}"
+        )
+    print(f"\nBest: {best['pct']:.1%} trailing stop ({best['total_return']:+.2%})\n")
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -10942,6 +11032,7 @@ COMMANDS = {
         "taildep": cmd_taildep,
         "drift": cmd_drift,
         "sigvalidate": cmd_sigvalidate,
+        "stopsweep": cmd_stopsweep,
 }
 
 

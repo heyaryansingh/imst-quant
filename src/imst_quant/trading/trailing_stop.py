@@ -171,3 +171,63 @@ def check_stop_triggered(
         .otherwise(False)
         .alias("stop_triggered")
     )
+
+
+def simulate_trailing_stop(
+    prices: list[float],
+    pct: float,
+    cooldown: int = 5,
+) -> dict[str, float]:
+    """Simulate a long-only percent trailing stop with re-entry after a cooldown.
+
+    Starts long at the first price. The stop trails the highest close since
+    entry by ``pct``; a close at or below it exits at that close. After
+    ``cooldown`` flat bars the position re-enters at the close.
+
+    Args:
+        prices: Close prices (positive, finite), oldest first.
+        pct: Trailing distance as a fraction (0 < pct < 1).
+        cooldown: Flat bars after a stop-out before re-entering (>= 0).
+
+    Returns:
+        Dict with total_return, buy_hold_return, max_drawdown (of the strategy
+        equity, <= 0), n_stops and time_in_market (fraction of bar-to-bar
+        returns held).
+    """
+    if not 0 < pct < 1:
+        raise ValueError(f"pct must be between 0 and 1, got {pct}")
+    if cooldown < 0:
+        raise ValueError(f"cooldown must be >= 0, got {cooldown}")
+    if len(prices) < 2:
+        raise ValueError("need at least 2 prices")
+    if any(not (p > 0) or p == float("inf") for p in prices):
+        raise ValueError("prices must be positive and finite")
+
+    equity = peak_equity = 1.0
+    max_dd = 0.0
+    in_pos, high, flat_left = True, prices[0], 0
+    n_stops = held = 0
+
+    for prev, price in zip(prices, prices[1:]):
+        if in_pos:
+            equity *= price / prev
+            held += 1
+            high = max(high, price)
+            if price <= high * (1 - pct):
+                in_pos, flat_left = False, cooldown
+                n_stops += 1
+        elif flat_left > 0:
+            flat_left -= 1
+        if not in_pos and flat_left == 0:
+            # Re-enter at this close; next bar's move is held.
+            in_pos, high = True, price
+        peak_equity = max(peak_equity, equity)
+        max_dd = min(max_dd, equity / peak_equity - 1)
+
+    return {
+        "total_return": equity - 1,
+        "buy_hold_return": prices[-1] / prices[0] - 1,
+        "max_drawdown": max_dd,
+        "n_stops": float(n_stops),
+        "time_in_market": held / (len(prices) - 1),
+    }
