@@ -213,17 +213,17 @@ class TimeSeriesAggregator:
                 col_name = f'{self.price_col}_{tf}_{feat}'
 
                 if feat == 'mean':
-                    result[col_name] = self.data[self.price_col].resample(tf).mean().reindex(result.index, method='ffill')
+                    result[col_name] = self.data[self.price_col].resample(tf).mean().shift(1).reindex(result.index, method='ffill')
                 elif feat == 'std':
-                    result[col_name] = self.data[self.price_col].resample(tf).std().reindex(result.index, method='ffill')
+                    result[col_name] = self.data[self.price_col].resample(tf).std().shift(1).reindex(result.index, method='ffill')
                 elif feat == 'min':
-                    result[col_name] = self.data[self.price_col].resample(tf).min().reindex(result.index, method='ffill')
+                    result[col_name] = self.data[self.price_col].resample(tf).min().shift(1).reindex(result.index, method='ffill')
                 elif feat == 'max':
-                    result[col_name] = self.data[self.price_col].resample(tf).max().reindex(result.index, method='ffill')
+                    result[col_name] = self.data[self.price_col].resample(tf).max().shift(1).reindex(result.index, method='ffill')
                 elif feat == 'sum':
-                    result[col_name] = self.data[self.price_col].resample(tf).sum().reindex(result.index, method='ffill')
+                    result[col_name] = self.data[self.price_col].resample(tf).sum().shift(1).reindex(result.index, method='ffill')
                 elif feat == 'count':
-                    result[col_name] = self.data[self.price_col].resample(tf).count().reindex(result.index, method='ffill')
+                    result[col_name] = self.data[self.price_col].resample(tf).count().shift(1).reindex(result.index, method='ffill')
 
         return result
 
@@ -401,7 +401,8 @@ def compute_time_weighted_average(
     time_diffs = data.index.to_series().diff().dt.total_seconds().fillna(0)
 
     # Weight each price by time duration
-    weighted_values = data[value_col] * time_diffs
+    # price held over the interval ending at t is the previous price
+    weighted_values = data[value_col].shift(1) * time_diffs
 
     # Aggregate by frequency
     twap = (
