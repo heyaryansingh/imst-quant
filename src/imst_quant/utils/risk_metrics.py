@@ -27,6 +27,18 @@ import numpy as np
 import polars as pl
 
 
+
+def _clean_returns(returns: Union[pl.Series, pl.DataFrame], return_col: str) -> pl.Series:
+    """Pick the return series and drop null/NaN/inf periods.
+
+    Polars sums, products and std propagate NaN, and ranks NaN above every
+    threshold, so a single missing period otherwise turns Sharpe, drawdown,
+    Omega etc. into NaN (or books it as a gain).
+    """
+    ret_series = returns[return_col] if isinstance(returns, pl.DataFrame) else returns
+    ret_series = ret_series.cast(pl.Float64, strict=False).drop_nulls()
+    return ret_series.filter(ret_series.is_finite())
+
 def downside_deviation(returns, target: float = 0.0) -> float:
     """Calculate downside deviation: RMS shortfall below ``target``.
 
@@ -85,10 +97,7 @@ def sharpe_ratio(
         >>> sharpe = sharpe_ratio(returns, risk_free_rate=0.0001)
         >>> print(f"Sharpe Ratio: {sharpe:.4f}")
     """
-    if isinstance(returns, pl.DataFrame):
-        ret_series = returns[return_col]
-    else:
-        ret_series = returns
+    ret_series = _clean_returns(returns, return_col)
 
     excess_returns = ret_series - risk_free_rate
     mean_excess = excess_returns.mean()
@@ -125,10 +134,7 @@ def sortino_ratio(
         >>> sortino = sortino_ratio(returns, risk_free_rate=0.0001)
         >>> print(f"Sortino Ratio: {sortino:.4f}")
     """
-    if isinstance(returns, pl.DataFrame):
-        ret_series = returns[return_col]
-    else:
-        ret_series = returns
+    ret_series = _clean_returns(returns, return_col)
 
     excess_returns = ret_series - risk_free_rate
     mean_excess = excess_returns.mean()
@@ -166,10 +172,7 @@ def max_drawdown(
         >>> mdd = max_drawdown(returns)
         >>> print(f"Max Drawdown: {mdd:.2%}")
     """
-    if isinstance(returns, pl.DataFrame):
-        ret_series = returns[return_col]
-    else:
-        ret_series = returns
+    ret_series = _clean_returns(returns, return_col)
 
     # Calculate cumulative returns (equity curve)
     cumulative = (1 + ret_series).cum_prod()
@@ -208,10 +211,7 @@ def value_at_risk(
         >>> var = value_at_risk(returns, confidence_level=0.95)
         >>> print(f"95% VaR: {var:.2%}")
     """
-    if isinstance(returns, pl.DataFrame):
-        ret_series = returns[return_col]
-    else:
-        ret_series = returns
+    ret_series = _clean_returns(returns, return_col)
 
     # VaR is the (1 - confidence) quantile of returns
     alpha = 1 - confidence_level
@@ -243,10 +243,7 @@ def calmar_ratio(
         >>> calmar = calmar_ratio(returns)
         >>> print(f"Calmar Ratio: {calmar:.4f}")
     """
-    if isinstance(returns, pl.DataFrame):
-        ret_series = returns[return_col]
-    else:
-        ret_series = returns
+    ret_series = _clean_returns(returns, return_col)
 
     # Annualized return
     mean_return = ret_series.mean()
@@ -292,14 +289,8 @@ def calculate_all_metrics(
         >>> for name, value in metrics.items():
         ...     print(f"{name}: {value:.4f}")
     """
-    if isinstance(returns, pl.DataFrame):
-        ret_series = returns[return_col]
-    else:
-        ret_series = returns
+    ret_series = _clean_returns(returns, return_col)
 
-    # Missing periods (null/NaN) would otherwise poison every metric
-    ret_series = ret_series.drop_nulls()
-    ret_series = ret_series.filter(ret_series.is_not_nan())
 
     # Calculate cumulative return
     total_return = float((1 + ret_series).product() - 1)
@@ -417,10 +408,7 @@ def calculate_omega_ratio(
         >>> omega = calculate_omega_ratio(returns, threshold=0.0)
         >>> print(f"Omega Ratio: {omega:.4f}")
     """
-    if isinstance(returns, pl.DataFrame):
-        ret_series = returns[return_col]
-    else:
-        ret_series = returns
+    ret_series = _clean_returns(returns, return_col)
 
     gains = ret_series.filter(ret_series > threshold) - threshold
     losses = threshold - ret_series.filter(ret_series <= threshold)
@@ -461,10 +449,7 @@ def calculate_tail_ratio(
         >>> tail = calculate_tail_ratio(returns)
         >>> print(f"Tail Ratio: {tail:.4f}")
     """
-    if isinstance(returns, pl.DataFrame):
-        ret_series = returns[return_col]
-    else:
-        ret_series = returns
+    ret_series = _clean_returns(returns, return_col)
 
     lower_threshold = ret_series.quantile(lower_percentile / 100.0, interpolation="linear")
     upper_threshold = ret_series.quantile(upper_percentile / 100.0, interpolation="linear")
@@ -504,10 +489,7 @@ def gain_to_pain_ratio(
         >>> gpr = gain_to_pain_ratio(returns)
         >>> print(f"Gain to Pain Ratio: {gpr:.4f}")
     """
-    if isinstance(returns, pl.DataFrame):
-        ret_series = returns[return_col]
-    else:
-        ret_series = returns
+    ret_series = _clean_returns(returns, return_col)
 
     losses = ret_series.filter(ret_series < 0)
     total_pain = abs(losses.sum()) if losses.len() > 0 else 0.0
@@ -545,10 +527,7 @@ def burke_ratio(
         >>> burke = burke_ratio(returns)
         >>> print(f"Burke Ratio: {burke:.4f}")
     """
-    if isinstance(returns, pl.DataFrame):
-        ret_series = returns[return_col]
-    else:
-        ret_series = returns
+    ret_series = _clean_returns(returns, return_col)
 
     excess_returns = ret_series - risk_free_rate
     mean_excess = excess_returns.mean()
