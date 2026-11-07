@@ -2308,6 +2308,19 @@ Examples:
     squeeze_parser.add_argument("--kc-mult", type=float, default=1.5, help="Keltner ATR multiple (default: 1.5)")
     squeeze_parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
+    # --- psar subcommand ---
+    psar_parser = subparsers.add_parser(
+        "psar",
+        help="Parabolic SAR stop-and-reverse: current trend, SAR stop, distance, acceleration, flips",
+    )
+    psar_parser.add_argument("--data", required=True, help="Parquet file with high/low/close columns")
+    psar_parser.add_argument("--high-col", default="high", help="High column (default: high)")
+    psar_parser.add_argument("--low-col", default="low", help="Low column (default: low)")
+    psar_parser.add_argument("--close-col", default="close", help="Close column (default: close)")
+    psar_parser.add_argument("--step", type=float, default=0.02, help="Acceleration step (default: 0.02)")
+    psar_parser.add_argument("--max-step", type=float, default=0.2, help="Acceleration cap (default: 0.2)")
+    psar_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
     # --- pbo subcommand ---
     pbo_parser = subparsers.add_parser(
         "pbo",
@@ -9816,6 +9829,86 @@ def cmd_squeeze(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_psar(args: argparse.Namespace) -> int:
+    """Report the current Parabolic SAR trend, stop level and flip history.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.utils.technical_indicators import parabolic_sar
+
+    path = Path(args.data)
+    if not path.exists():
+        print(f"Error: Data file not found: {path}")
+        return 1
+    try:
+        df = pl.read_parquet(path)
+    except Exception as e:
+        print(f"Error reading data file: {e}")
+        return 1
+    cols = [args.high_col, args.low_col, args.close_col]
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        print(f"Error: Missing columns {missing}. Available columns: {df.columns}")
+        return 1
+    if not (args.step > 0 and args.max_step >= args.step):
+        print("Error: need --step > 0 and --max-step >= --step")
+        return 1
+
+    # A NaN high/low would compare false everywhere and freeze the SAR.
+    df = df.select([pl.col(c).cast(pl.Float64, strict=False) for c in cols])
+    df = df.filter(pl.all_horizontal([pl.col(c).is_finite() & (pl.col(c) > 0) for c in cols]))
+    if df.height < 2:
+        print(f"Error: need at least 2 clean bars, got {df.height}")
+        return 1
+
+    out = parabolic_sar(
+        df, high_col=args.high_col, low_col=args.low_col,
+        step=args.step, max_step=args.max_step,
+    )
+    dirs = out["psar_direction"].drop_nulls().to_list()
+    flips = sum(1 for a, b in zip(dirs, dirs[1:]) if a != b)
+    bars_in_trend = 1
+    for prev in reversed(dirs[:-1]):
+        if prev != dirs[-1]:
+            break
+        bars_in_trend += 1
+    last = out.row(-1, named=True)
+    c, sar, d = last[args.close_col], last["psar"], last["psar_direction"]
+    result = {
+        "n_bars": out.height,
+        "step": args.step,
+        "max_step": args.max_step,
+        "close": c,
+        "psar": sar,
+        "trend": "up" if d == 1 else "down",
+        "distance_pct": (c - sar) / c,
+        "acceleration": last["psar_af"],
+        "bars_in_trend": bars_in_trend,
+        "flipped_this_bar": len(dirs) > 1 and dirs[-2] != d,
+        "flips": flips,
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    print("\n" + "=== Parabolic SAR ===" + "\n")
+    print(f"Bars: {out.height}   Step: {args.step}   Max step: {args.max_step}")
+    print(f"Close: {c:.4f}   SAR: {sar:.4f}   Distance: {result['distance_pct']:+.2%}   AF: {last['psar_af']:.2f}")
+    flag = "  (reversed this bar)" if result["flipped_this_bar"] else ""
+    print(f"Trend: {result['trend'].upper()} for {bars_in_trend} bars{flag}   Flips: {flips}")
+    print()
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -11335,6 +11428,7 @@ COMMANDS = {
         "chandelier": cmd_chandelier,
         "supertrend": cmd_supertrend,
         "squeeze": cmd_squeeze,
+        "psar": cmd_psar,
 }
 
 

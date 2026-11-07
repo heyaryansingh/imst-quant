@@ -899,3 +899,69 @@ def bollinger_squeeze(
     return out.with_columns(
         (pl.col("squeeze_on").shift(1) & ~pl.col("squeeze_on")).fill_null(False).alias("squeeze_fired")
     )
+
+
+def parabolic_sar(
+    df: pl.DataFrame,
+    high_col: str = "high",
+    low_col: str = "low",
+    step: float = 0.02,
+    max_step: float = 0.2,
+) -> pl.DataFrame:
+    """Wilder's Parabolic SAR (stop and reverse).
+
+    The SAR trails price and accelerates toward the extreme point (EP) by an
+    acceleration factor that grows by ``step`` on each new extreme, capped at
+    ``max_step``. It never moves inside the prior two bars' range; when price
+    crosses it the trend reverses and the SAR jumps to the old EP. The trend
+    starts up on the first bar (SAR = first low), whose row is null.
+
+    Args:
+        df: OHLC DataFrame, oldest first, no null/NaN prices.
+        high_col, low_col: Column names.
+        step: Acceleration factor start and increment (> 0).
+        max_step: Acceleration factor cap (>= step).
+
+    Returns:
+        DataFrame with added ``psar``, ``psar_direction`` (1 up, -1 down) and
+        ``psar_af`` columns. The SAR on each row is the stop for that bar.
+
+    Example:
+        >>> df = pl.DataFrame({"high": [10.0, 11, 12], "low": [9.0, 10, 11]})
+        >>> parabolic_sar(df)["psar_direction"].to_list()
+        [None, 1, 1]
+    """
+    if not step > 0:
+        raise ValueError(f"step must be > 0, got {step}")
+    if not max_step >= step:
+        raise ValueError(f"max_step must be >= step, got {max_step}")
+
+    high = df[high_col].to_list()
+    low = df[low_col].to_list()
+    n = df.height
+    sar_out: list = [None] * n
+    dir_out: list = [None] * n
+    af_out: list = [None] * n
+    if n:
+        up, sar, ep, af = True, low[0], high[0], step
+    for i in range(1, n):
+        sar = sar + af * (ep - sar)
+        if up:
+            sar = min(sar, low[i - 1], low[i - 2] if i >= 2 else low[i - 1])
+            if low[i] < sar:
+                up, sar, ep, af = False, ep, low[i], step
+            elif high[i] > ep:
+                ep, af = high[i], min(af + step, max_step)
+        else:
+            sar = max(sar, high[i - 1], high[i - 2] if i >= 2 else high[i - 1])
+            if high[i] > sar:
+                up, sar, ep, af = True, ep, high[i], step
+            elif low[i] < ep:
+                ep, af = low[i], min(af + step, max_step)
+        sar_out[i], dir_out[i], af_out[i] = sar, 1 if up else -1, af
+
+    return df.with_columns(
+        pl.Series("psar", sar_out, dtype=pl.Float64),
+        pl.Series("psar_direction", dir_out, dtype=pl.Int8),
+        pl.Series("psar_af", af_out, dtype=pl.Float64),
+    )
