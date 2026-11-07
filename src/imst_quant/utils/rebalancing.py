@@ -188,7 +188,7 @@ def optimize_rebalancing_frequency(
     maximizes risk-adjusted returns after transaction costs.
 
     Args:
-        returns_df: DataFrame with historical returns [date, symbol, returns].
+        returns_df: Long-format daily returns [date, symbol, returns].
         target_weights: Dictionary mapping symbols to target weights.
         cost_bps_per_rebalance: Transaction cost per rebalancing event in bps.
         return_col: Column name for returns.
@@ -207,51 +207,66 @@ def optimize_rebalancing_frequency(
     """
     if test_frequencies is None:
         test_frequencies = [1, 5, 10, 20, 60, 120]
+    if not target_weights:
+        raise ValueError("target_weights must not be empty")
+    if any(f < 1 for f in test_frequencies):
+        raise ValueError("test_frequencies must be >= 1 day")
+
+    symbols = list(target_weights)
+    wide = (
+        returns_df.filter(pl.col("symbol").is_in(symbols))
+        .pivot(on="symbol", index="date", values=return_col, aggregate_function="first")
+        .sort("date")
+    )
+    missing = [s for s in symbols if s not in wide.columns]
+    if missing:
+        raise ValueError(f"No returns for target symbols: {missing}")
+    # ponytail: missing returns treated as 0 (flat) for that day
+    rets = wide.select(symbols).fill_null(0.0).fill_nan(0.0).to_numpy()
+    if len(rets) < 2:
+        raise ValueError("need at least 2 dates of returns")
+
+    target = np.array([target_weights[s] for s in symbols], dtype=float)
+    target = target / target.sum()
+    cost = cost_bps_per_rebalance / 10000.0
+    # Constant-mix (daily rebalanced, cost-free) portfolio is the benchmark
+    # that tracking error is measured against.
+    benchmark = rets @ target
 
     results = []
-
     for freq in test_frequencies:
-        # This is a simplified simulation placeholder
-        # In production, would need full backtesting with actual rebalancing
-        # For now, approximate using tracking error model
+        w = target.copy()
+        port = np.empty(len(rets))
+        turnover = 0.0
+        for t, r in enumerate(rets):
+            gross = float(w @ r)
+            w = w * (1 + r) / (1 + gross) if gross > -1 else target.copy()
+            port[t] = gross
+            if (t + 1) % freq == 0:
+                trade = float(np.abs(w - target).sum())
+                turnover += trade
+                port[t] -= trade * cost
+                w = target.copy()
 
-        # Tracking error increases with time between rebalances
-        # Simplified model: TE ~ sqrt(freq) * base_volatility
-        base_te = 0.001  # 10 bps per day
-        tracking_error = base_te * np.sqrt(freq)
-
-        # Annual rebalancing cost
-        rebalances_per_year = 252 / freq
-        annual_cost = (cost_bps_per_rebalance / 10000.0) * rebalances_per_year
-
-        # Assume base return of 10% annually
-        base_return = 0.10
-        expected_return = base_return - annual_cost
-
-        # Sharpe approximation
-        volatility = 0.15  # Assume 15% annual vol
-        sharpe = expected_return / volatility
-
+        years = len(rets) / 252
+        vol = float(port.std(ddof=1) * np.sqrt(252))
+        ann_ret = float(port.mean() * 252)
         results.append({
             "frequency_days": freq,
-            "expected_return": expected_return,
-            "tracking_error": tracking_error * np.sqrt(252),  # Annualized
-            "sharpe_ratio": sharpe,
-            "annual_rebalancing_cost": annual_cost,
+            "expected_return": ann_ret,
+            "tracking_error": float((port - benchmark).std(ddof=1) * np.sqrt(252)),
+            "sharpe_ratio": ann_ret / vol if vol > 0 else 0.0,
+            "annual_rebalancing_cost": turnover * cost / years,
         })
 
-    # Find frequency with best Sharpe ratio
-    results_df = pl.DataFrame(results)
-    best_idx = results_df["sharpe_ratio"].arg_max()
-    best_result = results_df.row(best_idx, named=True)
-
-    return {
-        "optimal_frequency_days": best_result["frequency_days"],
-        "expected_return": best_result["expected_return"],
-        "tracking_error": best_result["tracking_error"],
-        "sharpe_ratio": best_result["sharpe_ratio"],
-        "annual_rebalancing_cost": best_result["annual_rebalancing_cost"],
-    }
+    best_result = max(results, key=lambda r: r["sharpe_ratio"])
+    return dict(
+        optimal_frequency_days=best_result["frequency_days"],
+        expected_return=best_result["expected_return"],
+        tracking_error=best_result["tracking_error"],
+        sharpe_ratio=best_result["sharpe_ratio"],
+        annual_rebalancing_cost=best_result["annual_rebalancing_cost"],
+    )
 
 
 def rebalancing_cost_benefit(
