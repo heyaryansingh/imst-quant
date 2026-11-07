@@ -517,9 +517,12 @@ def simulate_execution_scenario(
         fills = simulator.process_tick("ASSET", price, volume, timestamp)
         fills_list.extend(fills)
 
-        # Update position
-        if order.status == OrderStatus.FILLED:
-            current_position = target_position
+        # Update position from actual fills; cancel unfilled remainder
+        current_position += sum(
+            f.quantity if f.side == OrderSide.BUY else -f.quantity for f in fills
+        )
+        if order.status == OrderStatus.PARTIAL:
+            order.status = OrderStatus.CANCELLED
 
     # Get results
     fills_df = simulator.get_fills_df()
