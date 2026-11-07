@@ -175,8 +175,13 @@ def stress_test(
     results = {}
 
     for scenario_name, shock in scenarios.items():
-        # Apply shock to each return
-        shocked_returns = returns + shock
+        # One-time shock as the first period, then the historical path.
+        # Adding it to every period compounded e.g. a -30% crash into -30%
+        # per day (~-100% for every scenario).
+        shocked_returns = pd.concat(
+            [pd.Series([shock], dtype=float), returns.dropna().reset_index(drop=True)],
+            ignore_index=True,
+        )
 
         # Calculate metrics under stress
         total_return = (1 + shocked_returns).prod() - 1
