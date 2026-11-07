@@ -76,8 +76,12 @@ def sentiment_to_signal(
     if config is None:
         config = SentimentSignalConfig()
 
+    # Polars sorts NaN above every number, so a NaN score would pass the
+    # bullish threshold; missing/non-finite sentiment must mean hold.
     result = df.with_columns(
-        pl.when(pl.col(sentiment_col) >= config.bullish_threshold)
+        pl.when(~pl.col(sentiment_col).cast(pl.Float64).is_finite().fill_null(False))
+        .then(0)
+        .when(pl.col(sentiment_col) >= config.bullish_threshold)
         .then(1)
         .when(pl.col(sentiment_col) <= config.bearish_threshold)
         .then(-1)
@@ -89,7 +93,10 @@ def sentiment_to_signal(
     # Filter by confidence if provided
     if confidence_col and confidence_col in df.columns:
         result = result.with_columns(
-            pl.when(pl.col(confidence_col) < config.min_confidence)
+            pl.when(
+                ~(pl.col(confidence_col).cast(pl.Float64) >= config.min_confidence).fill_null(False)
+                | pl.col(confidence_col).cast(pl.Float64).is_nan()
+            )
             .then(0)
             .otherwise(pl.col("sentiment_signal"))
             .alias("sentiment_signal")
