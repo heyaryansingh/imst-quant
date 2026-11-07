@@ -24,6 +24,15 @@ from typing import Dict, List, Optional
 import polars as pl
 
 
+
+def _hold_if_not_finite(col: str):
+    """Start a when-chain that forces 0 (hold) on null/NaN/inf inputs.
+
+    Polars orders NaN above every number, so ``NaN > threshold`` is True and a
+    missing model output or bad price would otherwise become a long signal.
+    """
+    return pl.when(~pl.col(col).cast(pl.Float64).is_finite().fill_null(False)).then(0)
+
 def prediction_to_signal(
     df: pl.DataFrame,
     prob_col: str = "prob_up",
@@ -56,7 +65,8 @@ def prediction_to_signal(
         >>> result["signal"].to_list()  # [1, -1, 0]
     """
     return df.with_columns(
-        pl.when(pl.col(prob_col) > threshold)
+        _hold_if_not_finite(prob_col)
+        .when(pl.col(prob_col) > threshold)
         .then(1)
         .when(pl.col(prob_col) < (1 - threshold))
         .then(-1)
@@ -96,7 +106,8 @@ def momentum_signal(
     )
 
     return df.with_columns(
-        pl.when(pl.col("momentum") > threshold)
+        _hold_if_not_finite("momentum")
+        .when(pl.col("momentum") > threshold)
         .then(1)
         .when(pl.col("momentum") < -threshold)
         .then(-1)
@@ -268,7 +279,8 @@ def composite_signal(
     df = df.with_columns(weighted_sum.alias("composite_score"))
 
     return df.with_columns(
-        pl.when(pl.col("composite_score") > threshold)
+        _hold_if_not_finite("composite_score")
+        .when(pl.col("composite_score") > threshold)
         .then(1)
         .when(pl.col("composite_score") < -threshold)
         .then(-1)
@@ -662,7 +674,8 @@ def roc_signal(
     )
 
     return df.with_columns(
-        pl.when(pl.col("roc") > threshold)
+        _hold_if_not_finite("roc")
+        .when(pl.col("roc") > threshold)
         .then(1)
         .when(pl.col("roc") < -threshold)
         .then(-1)
