@@ -98,11 +98,13 @@ def calculate_position_correlation_matrix(
 
     # Calculate correlation matrix
     if method == "pearson":
-        corr_matrix = np.corrcoef(returns_subset, rowvar=False)
+        corr_matrix = np.corrcoef(returns_subset[valid_rows], rowvar=False)
     elif method == "spearman":
         from scipy.stats import spearmanr
 
         corr_matrix, _ = spearmanr(returns_subset, axis=0, nan_policy="omit")
+        if np.ndim(corr_matrix) == 0:  # scipy returns a scalar for 2 assets
+            corr_matrix = np.array([[1.0, corr_matrix], [corr_matrix, 1.0]])
     elif method == "kendall":
         # Kendall's tau (more expensive)
         n_assets = len(asset_columns)
