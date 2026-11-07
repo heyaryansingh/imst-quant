@@ -240,9 +240,12 @@ def analyze_multi_timeframe(
         # Calculate signal
         tf_df = calculate_timeframe_signal(tf_df, method=method, lookback=lookback)
 
-        # Keep only date and signal
+        # Keep only date and signal. group_by_dynamic labels a bar by its
+        # window start but the bar holds the window's last close, so stamp it
+        # at the window end; otherwise the asof join below hands every row
+        # inside the window a signal built from future prices.
         tf_df = tf_df.select([
-            pl.col(date_col),
+            pl.col(date_col).dt.offset_by(f"{tf_minutes}m"),
             pl.col("signal").alias(f"tf_{tf_minutes}_signal"),
         ])
 
