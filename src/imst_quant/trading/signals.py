@@ -337,9 +337,13 @@ def breakout_signal(
         ((pl.col("channel_low") - pl.col(price_col)) / pl.col("channel_low")).alias("_down_break"),
     ])
 
-    # Generate signals
+    # Generate signals. A NaN close or a NaN high/low inside the window makes
+    # the break NaN, which polars ranks above the threshold: hold instead.
     df = df.with_columns(
-        pl.when(pl.col("_up_break") > breakout_threshold)
+        _hold_if_not_finite("_up_break")
+        .when(~pl.col("_down_break").is_finite().fill_null(False))
+        .then(0)
+        .when(pl.col("_up_break") > breakout_threshold)
         .then(1)
         .when(pl.col("_down_break") > breakout_threshold)
         .then(-1)
