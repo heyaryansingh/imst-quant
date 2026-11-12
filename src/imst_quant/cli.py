@@ -2400,6 +2400,21 @@ Examples:
     chop_parser.add_argument("--trending", type=float, default=38.2, help="Trending below this (default: 38.2)")
     chop_parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
+    # --- confluence subcommand ---
+    conf_parser = subparsers.add_parser(
+        "confluence",
+        help="Multi-indicator vote: MACD/Aroon/Vortex/Supertrend trend, RSI, MFI/CMF flow, chop-gated",
+    )
+    conf_parser.add_argument("--data", required=True, help="Parquet file with high/low/close[/volume] columns")
+    conf_parser.add_argument("--high-col", default="high", help="High column (default: high)")
+    conf_parser.add_argument("--low-col", default="low", help="Low column (default: low)")
+    conf_parser.add_argument("--close-col", default="close", help="Close column (default: close)")
+    conf_parser.add_argument("--volume-col", default="volume",
+                             help="Volume column; volume votes are skipped if it is absent (default: volume)")
+    conf_parser.add_argument("--threshold", type=float, default=0.3,
+                             help="|score| at or above this reads bullish/bearish (default: 0.3)")
+    conf_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
     # --- ichimoku subcommand ---
     ichimoku_parser = subparsers.add_parser(
         "ichimoku",
@@ -10516,7 +10531,58 @@ def cmd_chop(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_confluence(args: argparse.Namespace) -> int:
+    """Report a chop-gated multi-indicator vote on the latest bar.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.utils.technical_indicators import indicator_confluence
+
+    if not 0 < args.threshold <= 1:
+        print("Error: --threshold must be in (0, 1]")
+        return 1
+    try:
+        has_volume = args.volume_col in pl.read_parquet_schema(args.data)
+    except Exception:
+        has_volume = False  # _load_clean_ohlc reports the missing/unreadable file
+    cols = [args.high_col, args.low_col, args.close_col] + ([args.volume_col] if has_volume else [])
+    df = _load_clean_ohlc(args, cols, 35)  # MACD(12, 26, 9) needs 26 + 9 bars
+    if df is None:
+        return 1
+    names = ["high", "low", "close", "volume"][: len(cols)]
+    df = df.select([pl.col(c).alias(n) for c, n in zip(cols, names)])
+
+    res = indicator_confluence(df)
+    score = res["score"]
+    bias = "bullish" if score >= args.threshold else "bearish" if score <= -args.threshold else "neutral"
+    result = {"n_bars": df.height, "bias": bias, **res}
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    print("\n=== Indicator Confluence ===\n")
+    chop = "n/a" if res["chop"] is None else f"{res['chop']:.1f}"
+    print(f"Bars: {df.height}   Choppiness: {chop}{' (CHOPPY: trend votes halved)' if res['choppy'] else ''}")
+    label = {1: "BULL", -1: "BEAR", 0: "flat", None: "n/a"}
+    print("   ".join(f"{k}: {label[v]}" for k, v in res["votes"].items()))
+    print(f"Score: {score:+.2f} from {res['n_votes']} indicators   Bias: {bias.upper()}")
+    if not has_volume:
+        print(f"(no '{args.volume_col}' column: MFI/CMF skipped)")
+    print()
+    return 0
+
+
 def main() -> int:
+
     """Main CLI entry point for IMST-Quant.
 
     Parses command-line arguments and dispatches to the appropriate
@@ -12043,6 +12109,7 @@ COMMANDS = {
         "ichimoku": cmd_ichimoku,
         "cmf": cmd_cmf,
         "chop": cmd_chop,
+        "confluence": cmd_confluence,
 }
 
 

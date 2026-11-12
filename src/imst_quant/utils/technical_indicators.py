@@ -1275,3 +1275,71 @@ def choppiness_index(
         100 * (tr.rolling_sum(window_size=period) / rng).log10() / np.log10(period)
     )
     return df.with_columns(chop.cast(pl.Float64).alias("chop"))
+
+
+def indicator_confluence(df: pl.DataFrame, chop_threshold: float = 61.8) -> dict:
+    """Combine trend, momentum and money-flow indicators into one vote on the last bar.
+
+    Votes (each +1 bullish, -1 bearish, 0 neutral):
+
+    - trend: MACD histogram sign, Aroon oscillator sign, Vortex VI+ vs VI-,
+      Supertrend direction. Weighted 0.5 when the Choppiness Index (14) is
+      above ``chop_threshold`` (trend signals whipsaw in sideways markets).
+    - momentum (contrarian): RSI(14) >= 70 bearish, <= 30 bullish.
+    - volume (only if a ``volume`` column exists): MFI(14) >= 80 bearish /
+      <= 20 bullish, and CMF(20) beyond +/-0.05.
+
+    An indicator still warming up (null on the last bar) is left out of both
+    the numerator and the weight total.
+
+    Args:
+        df: OHLC(V) DataFrame with ``high``, ``low``, ``close`` (and optionally
+            ``volume``) columns, oldest first, no null/NaN values.
+        chop_threshold: Choppiness level above which trend votes are halved.
+
+    Returns:
+        Dict with ``score`` (weighted mean vote, -1..1, 0 when nothing voted),
+        ``votes`` (name -> vote, None if unavailable), ``chop`` (last value or
+        None), ``choppy`` (bool) and ``n_votes`` (indicators that voted).
+
+    Example:
+        >>> n = 60
+        >>> df = pl.DataFrame({"high": [10.5 + i for i in range(n)],
+        ...                    "low": [9.5 + i for i in range(n)],
+        ...                    "close": [10.4 + i for i in range(n)]})
+        >>> res = indicator_confluence(df)
+        >>> res["votes"]["supertrend"], res["choppy"]
+        (1, False)
+    """
+    def last(frame: pl.DataFrame, col: str):
+        v = frame[col][-1]
+        return None if v is None or not np.isfinite(v) else float(v)
+
+    def sign(v, dead: float = 0.0):
+        return None if v is None else (v > dead) - (v < -dead)
+
+    chop = last(choppiness_index(df), "chop")
+    choppy = chop is not None and chop > chop_threshold
+    trend_w = 0.5 if choppy else 1.0
+
+    r = last(rsi(df), "rsi")
+    st = last(supertrend(df), "st_direction")
+    votes = {
+        "macd": sign(last(macd(df), "macd_histogram")),
+        "aroon": sign(last(aroon(df), "aroon_osc")),
+        "vortex": sign(last(vortex(df), "vi_diff")),
+        "supertrend": None if st is None else int(st),
+        "rsi": None if r is None else (r <= 30) - (r >= 70),
+    }
+    weights = {k: trend_w for k in ("macd", "aroon", "vortex", "supertrend")}
+    weights["rsi"] = 1.0
+    if "volume" in df.columns:
+        m = last(money_flow_index(df), "mfi")
+        votes["mfi"] = None if m is None else (m <= 20) - (m >= 80)
+        votes["cmf"] = sign(last(chaikin_money_flow(df), "cmf"), 0.05)
+        weights["mfi"] = weights["cmf"] = 1.0
+
+    cast = {k: v for k, v in votes.items() if v is not None}
+    total = sum(weights[k] for k in cast)
+    score = sum(weights[k] * v for k, v in cast.items()) / total if total else 0.0
+    return {"score": score, "votes": votes, "chop": chop, "choppy": choppy, "n_votes": len(cast)}
