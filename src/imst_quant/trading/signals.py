@@ -25,13 +25,14 @@ import polars as pl
 
 
 
-def _hold_if_not_finite(col: str):
+def _hold_if_not_finite(*cols: str):
     """Start a when-chain that forces 0 (hold) on null/NaN/inf inputs.
 
     Polars orders NaN above every number, so ``NaN > threshold`` is True and a
     missing model output or bad price would otherwise become a long signal.
     """
-    return pl.when(~pl.col(col).cast(pl.Float64).is_finite().fill_null(False)).then(0)
+    finite = [pl.col(c).cast(pl.Float64).is_finite().fill_null(False) for c in cols]
+    return pl.when(~pl.all_horizontal(finite)).then(0)
 
 def prediction_to_signal(
     df: pl.DataFrame,
@@ -177,7 +178,8 @@ def mean_reversion_signal(
 
     # Generate signals
     df = df.with_columns(
-        pl.when(pl.col("rsi") < oversold)
+        _hold_if_not_finite("rsi")
+        .when(pl.col("rsi") < oversold)
         .then(1)  # Buy when oversold
         .when(pl.col("rsi") > overbought)
         .then(-1)  # Sell when overbought
@@ -632,7 +634,8 @@ def bollinger_band_signal(
 
     # Generate signals
     df = df.with_columns(
-        pl.when(pl.col("bb_percent") < 5)  # Near lower band
+        _hold_if_not_finite("bb_percent")
+        .when(pl.col("bb_percent") < 5)  # Near lower band
         .then(1)
         .when(pl.col("bb_percent") > 95)  # Near upper band
         .then(-1)
@@ -756,7 +759,8 @@ def stochastic_signal(
     ])
 
     df = df.with_columns(
-        pl.when(
+        _hold_if_not_finite("stoch_k", "stoch_d")
+        .when(
             (pl.col("stoch_k") < oversold)
             | ((pl.col("stoch_k") > pl.col("stoch_d")) & (pl.col("_prev_k") <= pl.col("_prev_d")))
         )
@@ -937,7 +941,8 @@ def bollinger_bands_signal(
 
     # Generate contrarian signals
     df = df.with_columns(
-        pl.when(pl.col(price_col) <= pl.col("bb_lower"))
+        _hold_if_not_finite(price_col, "bb_lower", "bb_upper")
+        .when(pl.col(price_col) <= pl.col("bb_lower"))
         .then(1)  # Oversold - buy signal
         .when(pl.col(price_col) >= pl.col("bb_upper"))
         .then(-1)  # Overbought - sell signal
@@ -1010,7 +1015,8 @@ def rsi_signal(
 
     # Generate contrarian signals
     df = df.with_columns(
-        pl.when(pl.col("rsi") <= oversold)
+        _hold_if_not_finite("rsi")
+        .when(pl.col("rsi") <= oversold)
         .then(1)  # Oversold - buy signal
         .when(pl.col("rsi") >= overbought)
         .then(-1)  # Overbought - sell signal
