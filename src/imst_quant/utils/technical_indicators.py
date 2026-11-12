@@ -1095,3 +1095,47 @@ def vortex(
         ((lo - h.shift(1)).abs().rolling_sum(window_size=period) / tr_sum).alias("vi_minus"),
     )
     return out.with_columns((pl.col("vi_plus") - pl.col("vi_minus")).alias("vi_diff"))
+
+
+def money_flow_index(
+    df: pl.DataFrame,
+    high_col: str = "high",
+    low_col: str = "low",
+    close_col: str = "close",
+    volume_col: str = "volume",
+    period: int = 14,
+) -> pl.DataFrame:
+    """Money Flow Index: a volume-weighted RSI on typical price.
+
+    Typical price ``tp = (high + low + close) / 3``; raw flow ``tp * volume``
+    counts as positive when ``tp`` rose versus the prior bar and negative when
+    it fell (unchanged bars count as neither).
+    ``MFI = 100 * pos_sum / (pos_sum + neg_sum)`` over ``period`` bars.
+
+    Args:
+        df: OHLCV DataFrame, oldest first, no null/NaN values.
+        high_col, low_col, close_col, volume_col: Column names.
+        period: Summation window (>= 1).
+
+    Returns:
+        DataFrame with added ``mfi`` (0..100); the first ``period`` rows are
+        null. A window with no flow at all (flat price or zero volume) reads 50.
+
+    Example:
+        >>> df = pl.DataFrame({"high": [2.0, 3, 4], "low": [1.0, 2, 3],
+        ...                    "close": [1.5, 2.5, 3.5], "volume": [10.0, 10, 10]})
+        >>> money_flow_index(df, period=2)["mfi"].to_list()
+        [None, None, 100.0]
+    """
+    if period < 1:
+        raise ValueError(f"period must be >= 1, got {period}")
+
+    tp = (pl.col(high_col) + pl.col(low_col) + pl.col(close_col)) / 3
+    flow = tp * pl.col(volume_col)
+    chg = tp - tp.shift(1)
+    pos = pl.when(chg > 0).then(flow).otherwise(0.0).rolling_sum(window_size=period)
+    neg = pl.when(chg < 0).then(flow).otherwise(0.0).rolling_sum(window_size=period)
+    # Row 0 has no prior bar; mask it so the window starts at row `period`.
+    valid = chg.is_not_null().cast(pl.Int32).rolling_sum(window_size=period) == period
+    mfi = pl.when(~valid).then(None).when(pos + neg == 0).then(50.0).otherwise(100 * pos / (pos + neg))
+    return df.with_columns(mfi.cast(pl.Float64).alias("mfi"))

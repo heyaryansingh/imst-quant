@@ -2356,6 +2356,21 @@ Examples:
     vortex_parser.add_argument("--period", type=int, default=14, help="Summation window (default: 14)")
     vortex_parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
+    # --- mfi subcommand ---
+    mfi_parser = subparsers.add_parser(
+        "mfi",
+        help="Money Flow Index: volume-weighted RSI, overbought/oversold zone, change, time at extremes",
+    )
+    mfi_parser.add_argument("--data", required=True, help="Parquet file with high/low/close/volume columns")
+    mfi_parser.add_argument("--high-col", default="high", help="High column (default: high)")
+    mfi_parser.add_argument("--low-col", default="low", help="Low column (default: low)")
+    mfi_parser.add_argument("--close-col", default="close", help="Close column (default: close)")
+    mfi_parser.add_argument("--volume-col", default="volume", help="Volume column (default: volume)")
+    mfi_parser.add_argument("--period", type=int, default=14, help="Summation window (default: 14)")
+    mfi_parser.add_argument("--overbought", type=float, default=80.0, help="Overbought level (default: 80)")
+    mfi_parser.add_argument("--oversold", type=float, default=20.0, help="Oversold level (default: 20)")
+    mfi_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
     # --- pbo subcommand ---
     pbo_parser = subparsers.add_parser(
         "pbo",
@@ -10153,6 +10168,73 @@ def cmd_vortex(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mfi(args: argparse.Namespace) -> int:
+    """Report the Money Flow Index, its zone, recent change and time spent at extremes.
+
+    Zero-volume bars are dropped with other unclean rows (they carry no flow).
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    from imst_quant.utils.technical_indicators import money_flow_index
+
+    if args.period < 1:
+        print("Error: --period must be >= 1")
+        return 1
+    if not 50 <= args.overbought <= 100 or not 0 <= args.oversold <= 50:
+        print("Error: need 50 <= --overbought <= 100 and 0 <= --oversold <= 50")
+        return 1
+    cols = [args.high_col, args.low_col, args.close_col, args.volume_col]
+    df = _load_clean_ohlc(args, cols, args.period + 1)
+    if df is None:
+        return 1
+
+    out = money_flow_index(
+        df, high_col=args.high_col, low_col=args.low_col, close_col=args.close_col,
+        volume_col=args.volume_col, period=args.period,
+    )
+    vals = out["mfi"].drop_nulls().to_list()
+    now = vals[-1]
+
+    def zone(v: float) -> str:
+        return "overbought" if v >= args.overbought else "oversold" if v <= args.oversold else "neutral"
+
+    z = zone(now)
+    streak = 0
+    for v in reversed(vals):
+        if zone(v) != z:
+            break
+        streak += 1
+    lookback = min(args.period, len(vals) - 1)
+    result = {
+        "n_bars": out.height,
+        "period": args.period,
+        "mfi": now,
+        "zone": z,
+        "bars_in_zone": streak,
+        "mfi_change": now - vals[-1 - lookback],
+        "pct_overbought": sum(v >= args.overbought for v in vals) / len(vals),
+        "pct_oversold": sum(v <= args.oversold for v in vals) / len(vals),
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    print("\n=== Money Flow Index ===\n")
+    print(f"Bars: {out.height}   Period: {args.period}   Bands: {args.oversold:g}/{args.overbought:g}")
+    print(f"MFI: {now:.1f}   Zone: {z.upper()} ({streak} bars)   "
+          f"Change over {lookback} bars: {result['mfi_change']:+.1f}")
+    print(f"Time overbought: {result['pct_overbought']:.0%}   Time oversold: {result['pct_oversold']:.0%}")
+    print()
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -11676,6 +11758,7 @@ COMMANDS = {
         "donchian": cmd_donchian,
         "aroon": cmd_aroon,
         "vortex": cmd_vortex,
+        "mfi": cmd_mfi,
 }
 
 
