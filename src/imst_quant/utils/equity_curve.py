@@ -94,9 +94,14 @@ def build_equity_curve(
     """
     n = len(returns)
     returns_list = returns.to_list()
+    arr = returns.cast(pl.Float64).to_numpy()
+    # Null/NaN/inf is missing data: hold equity flat for that period instead of
+    # crashing (None) or turning every later row NaN.
+    arr = np.where(np.isfinite(arr), arr, 0.0)
 
-    # Compute cumulative product of (1 + r)
-    cum_product = np.cumprod([1.0 + r for r in returns_list])
+    # Compound (1 + r), floored at 0: a loss beyond -100% wipes the account out
+    # for good rather than letting a later negative return flip equity positive.
+    cum_product = np.cumprod(np.maximum(1.0 + arr, 0.0))
     equity = initial_capital * cum_product
 
     # Running peak
@@ -155,7 +160,7 @@ def equity_curve_statistics(
         )
 
     # Cumulative return
-    cum_product = np.cumprod(1.0 + returns_arr)
+    cum_product = np.cumprod(np.maximum(1.0 + returns_arr, 0.0))  # wiped out stays wiped out
     total_return = float(cum_product[-1] - 1.0)
     final_value = initial_capital * cum_product[-1]
 
