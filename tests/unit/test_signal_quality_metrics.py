@@ -154,3 +154,18 @@ class TestSignalDecay:
 
         assert decay[4] == max(decay.values())
         assert decay[4] > decay[1]
+
+
+def test_ic_drops_inf_and_constant_input_is_zero_without_warning():
+    import warnings
+
+    import numpy as np
+
+    from imst_quant.utils.signal_quality_metrics import calculate_information_coefficient
+
+    sig = np.array([1.0, 2.0, 3.0, np.inf, 4.0])
+    ret = np.array([0.1, 0.2, 0.3, 0.4, -np.inf])
+    assert calculate_information_coefficient(sig, ret, method="pearson") == pytest.approx(1.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert calculate_information_coefficient([1.0, 1.0, 1.0], [0.1, 0.2, 0.3]) == 0.0

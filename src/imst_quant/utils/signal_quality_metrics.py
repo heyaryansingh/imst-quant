@@ -47,12 +47,15 @@ def calculate_information_coefficient(
         >>> ic = calculate_information_coefficient(signals, forward_returns)
         >>> print(f"Signal IC: {ic:.4f}")
     """
-    # Remove NaN values
-    mask = ~(np.isnan(signals) | np.isnan(forward_returns))
+    signals = np.asarray(signals, dtype=float)
+    forward_returns = np.asarray(forward_returns, dtype=float)
+    # Drop NaN and +/-inf pairs (inf makes pearson NaN and skews nothing useful).
+    mask = np.isfinite(signals) & np.isfinite(forward_returns)
     signals_clean = signals[mask]
     returns_clean = forward_returns[mask]
 
-    if len(signals_clean) < 2:
+    # Constant input has no defined correlation; answer 0 without scipy's warning.
+    if len(signals_clean) < 2 or np.ptp(signals_clean) == 0 or np.ptp(returns_clean) == 0:
         return 0.0
 
     if method == "spearman":
@@ -186,7 +189,8 @@ def calculate_signal_metrics(
     signal_std = float(np.std(signals, ddof=1)) if len(signals) > 1 else 0.0
 
     # Signal autocorrelation
-    if len(signals) > 1:
+    # Constant lagged series have no defined correlation; skip corrcoef's 0/0 warning.
+    if len(signals) > 2 and np.ptp(signals[:-1]) > 0 and np.ptp(signals[1:]) > 0:
         signal_autocorr = float(np.corrcoef(signals[:-1], signals[1:])[0, 1])
         if np.isnan(signal_autocorr):
             signal_autocorr = 0.0
