@@ -2333,6 +2333,17 @@ Examples:
     donchian_parser.add_argument("--window", type=int, default=20, help="Look-back bars (default: 20)")
     donchian_parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
+    # --- aroon subcommand ---
+    aroon_parser = subparsers.add_parser(
+        "aroon",
+        help="Aroon trend age: up/down/oscillator, trend regime, bars since period high/low, crossovers",
+    )
+    aroon_parser.add_argument("--data", required=True, help="Parquet file with high/low columns")
+    aroon_parser.add_argument("--high-col", default="high", help="High column (default: high)")
+    aroon_parser.add_argument("--low-col", default="low", help="Low column (default: low)")
+    aroon_parser.add_argument("--period", type=int, default=25, help="Look-back bars (default: 25)")
+    aroon_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
     # --- pbo subcommand ---
     pbo_parser = subparsers.add_parser(
         "pbo",
@@ -10011,6 +10022,63 @@ def cmd_donchian(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_aroon(args: argparse.Namespace) -> int:
+    """Report Aroon up/down, the oscillator, trend regime and recent crossovers.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    from imst_quant.utils.technical_indicators import aroon
+
+    if args.period < 1:
+        print("Error: --period must be >= 1")
+        return 1
+    df = _load_clean_ohlc(args, [args.high_col, args.low_col], args.period + 1)
+    if df is None:
+        return 1
+
+    out = aroon(df, high_col=args.high_col, low_col=args.low_col, period=args.period)
+    last = out.row(-1, named=True)
+    up, down, osc = last["aroon_up"], last["aroon_down"], last["aroon_osc"]
+    if up >= 70 and down <= 30:
+        regime = "strong_up"
+    elif down >= 70 and up <= 30:
+        regime = "strong_down"
+    else:
+        regime = "consolidation"
+    signs = [(o > 0) - (o < 0) for o in out["aroon_osc"].drop_nulls().to_list()]
+    nonzero = [s for s in signs if s]
+    crosses = sum(1 for a, b in zip(nonzero, nonzero[1:]) if a != b)
+    result = {
+        "n_bars": out.height,
+        "period": args.period,
+        "aroon_up": up,
+        "aroon_down": down,
+        "oscillator": osc,
+        "regime": regime,
+        "bars_since_high": round(args.period * (1 - up / 100)),
+        "bars_since_low": round(args.period * (1 - down / 100)),
+        "crossovers": crosses,
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    print("\n" + "=== Aroon ===" + "\n")
+    print(f"Bars: {out.height}   Period: {args.period}")
+    print(f"Aroon Up: {up:.1f}   Aroon Down: {down:.1f}   Oscillator: {osc:+.1f}")
+    print(f"Regime: {regime.replace('_', ' ').upper()}   "
+          f"Bars since high/low: {result['bars_since_high']}/{result['bars_since_low']}   Crossovers: {crosses}")
+    print()
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -11532,6 +11600,7 @@ COMMANDS = {
         "squeeze": cmd_squeeze,
         "psar": cmd_psar,
         "donchian": cmd_donchian,
+        "aroon": cmd_aroon,
 }
 
 

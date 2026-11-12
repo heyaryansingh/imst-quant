@@ -1009,3 +1009,47 @@ def donchian_channels(
         .otherwise(0).cast(pl.Int8).alias("dc_breakout")
     )
 
+
+def aroon(
+    df: pl.DataFrame,
+    high_col: str = "high",
+    low_col: str = "low",
+    period: int = 25,
+) -> pl.DataFrame:
+    """Aroon up/down: how recently the period's high and low were set.
+
+    ``aroon_up = 100 * (period - bars_since_highest_high) / period`` over the
+    last ``period + 1`` bars (likewise ``aroon_down`` with the low). Ties go to
+    the most recent bar, so a flat market reads 100/100 (oscillator 0).
+
+    Args:
+        df: OHLC DataFrame, oldest first, no null/NaN prices.
+        high_col, low_col: Column names.
+        period: Look-back bars (>= 1).
+
+    Returns:
+        DataFrame with added ``aroon_up``, ``aroon_down`` and
+        ``aroon_osc`` (up - down, -100..100); the first ``period`` rows are null.
+
+    Example:
+        >>> df = pl.DataFrame({"high": [1.0, 2, 3], "low": [0.5, 1.5, 2.5]})
+        >>> aroon(df, period=2)["aroon_up"].to_list()
+        [None, None, 100.0]
+    """
+    if period < 1:
+        raise ValueError(f"period must be >= 1, got {period}")
+
+    n = df.height
+    up = np.full(n, np.nan)
+    down = np.full(n, np.nan)
+    if n > period:
+        win = period + 1
+        hi = np.lib.stride_tricks.sliding_window_view(df[high_col].to_numpy().astype(float), win)
+        lo = np.lib.stride_tricks.sliding_window_view(df[low_col].to_numpy().astype(float), win)
+        # argmax on the reversed window = bars since the most recent extreme.
+        up[period:] = 100.0 * (period - np.argmax(hi[:, ::-1], axis=1)) / period
+        down[period:] = 100.0 * (period - np.argmin(lo[:, ::-1], axis=1)) / period
+    return df.with_columns(
+        pl.Series("aroon_up", up).fill_nan(None),
+        pl.Series("aroon_down", down).fill_nan(None),
+    ).with_columns((pl.col("aroon_up") - pl.col("aroon_down")).alias("aroon_osc"))
