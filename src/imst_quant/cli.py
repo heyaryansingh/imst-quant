@@ -2371,6 +2371,21 @@ Examples:
     mfi_parser.add_argument("--oversold", type=float, default=20.0, help="Oversold level (default: 20)")
     mfi_parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
+    # --- ichimoku subcommand ---
+    ichimoku_parser = subparsers.add_parser(
+        "ichimoku",
+        help="Ichimoku cloud: price vs cloud, cloud color now/ahead, TK cross, chikou confirmation, bias",
+    )
+    ichimoku_parser.add_argument("--data", required=True, help="Parquet file with high/low/close columns")
+    ichimoku_parser.add_argument("--high-col", default="high", help="High column (default: high)")
+    ichimoku_parser.add_argument("--low-col", default="low", help="Low column (default: low)")
+    ichimoku_parser.add_argument("--close-col", default="close", help="Close column (default: close)")
+    ichimoku_parser.add_argument("--tenkan", type=int, default=9, help="Conversion line window (default: 9)")
+    ichimoku_parser.add_argument("--kijun", type=int, default=26, help="Base line window (default: 26)")
+    ichimoku_parser.add_argument("--senkou", type=int, default=52, help="Leading span B window (default: 52)")
+    ichimoku_parser.add_argument("--displacement", type=int, default=26, help="Cloud projection bars (default: 26)")
+    ichimoku_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
     # --- pbo subcommand ---
     pbo_parser = subparsers.add_parser(
         "pbo",
@@ -10235,6 +10250,95 @@ def cmd_mfi(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ichimoku(args: argparse.Namespace) -> int:
+    """Report Ichimoku: price vs cloud, TK cross, chikou confirmation and overall bias.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    from imst_quant.utils.technical_indicators import ichimoku
+
+    if min(args.tenkan, args.kijun, args.senkou, args.displacement) < 1:
+        print("Error: --tenkan, --kijun, --senkou and --displacement must be >= 1")
+        return 1
+    # The cloud at the last bar needs full windows `displacement` bars back.
+    need = max(args.tenkan, args.kijun, args.senkou) + args.displacement
+    df = _load_clean_ohlc(args, [args.high_col, args.low_col, args.close_col], need)
+    if df is None:
+        return 1
+
+    out = ichimoku(
+        df, high_col=args.high_col, low_col=args.low_col, tenkan=args.tenkan,
+        kijun=args.kijun, senkou=args.senkou, displacement=args.displacement,
+    )
+    last = out.row(-1, named=True)
+    close = last[args.close_col]
+    a, b = last["ichi_senkou_a"], last["ichi_senkou_b"]
+    top, bottom = max(a, b), min(a, b)
+    position = "above" if close > top else "below" if close < bottom else "inside"
+
+    def color(x: float, y: float) -> str:
+        return "green" if x > y else "red" if x < y else "flat"
+
+    tk = (out["ichi_tenkan"] - out["ichi_kijun"]).to_list()
+    signs = [((d > 0) - (d < 0)) if d is not None else 0 for d in tk]
+    cross_at = None
+    prev = 0
+    for i, sgn in enumerate(signs):
+        if sgn:
+            if prev and sgn != prev:
+                cross_at = i
+            prev = sgn
+    tk_state = {1: "bullish", -1: "bearish", 0: "flat"}[signs[-1]]
+    past_close = out[args.close_col][-1 - args.displacement]
+    chikou = "above" if close > past_close else "below" if close < past_close else "equal"
+    if position == "above" and tk_state == "bullish" and chikou == "above":
+        bias = "bullish"
+    elif position == "below" and tk_state == "bearish" and chikou == "below":
+        bias = "bearish"
+    else:
+        bias = "mixed"
+    edge = {"above": top, "below": bottom}.get(position, close)
+    result = {
+        "n_bars": out.height,
+        "close": close,
+        "tenkan": last["ichi_tenkan"],
+        "kijun": last["ichi_kijun"],
+        "cloud_top": top,
+        "cloud_bottom": bottom,
+        "cloud_color": color(a, b),
+        "future_cloud_color": color(last["ichi_lead_a"], last["ichi_lead_b"]),
+        "price_vs_cloud": position,
+        "distance_to_cloud_pct": (close - edge) / close,
+        "tk_state": tk_state,
+        "bars_since_tk_cross": (out.height - 1 - cross_at) if cross_at is not None else None,
+        "chikou": chikou,
+        "bias": bias,
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    print("\n=== Ichimoku Cloud ===\n")
+    print(f"Bars: {out.height}   Windows: {args.tenkan}/{args.kijun}/{args.senkou}   "
+          f"Displacement: {args.displacement}")
+    print(f"Close: {close:.4f}   Tenkan: {result['tenkan']:.4f}   Kijun: {result['kijun']:.4f}")
+    print(f"Cloud: {bottom:.4f} - {top:.4f} ({result['cloud_color']})   "
+          f"Future cloud: {result['future_cloud_color']}")
+    print(f"Price {position.upper()} cloud ({result['distance_to_cloud_pct']:+.2%})   "
+          f"TK: {tk_state}   Chikou: {chikou} close {args.displacement} bars ago")
+    since = f"{result['bars_since_tk_cross']} bars ago" if cross_at is not None else "none"
+    print(f"Last TK cross: {since}   Bias: {bias.upper()}")
+    print()
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -11759,6 +11863,7 @@ COMMANDS = {
         "aroon": cmd_aroon,
         "vortex": cmd_vortex,
         "mfi": cmd_mfi,
+        "ichimoku": cmd_ichimoku,
 }
 
 

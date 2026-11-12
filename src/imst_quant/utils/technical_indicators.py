@@ -693,8 +693,11 @@ def detect_rsi_divergence(
         - bearish_divergence: 1 if bearish divergence detected, 0 otherwise
 
     Example:
+        >>> df = pl.DataFrame({"close": [100.0 + (i % 7) + 0.5 * i for i in range(40)]})
         >>> df = rsi(df, period=14)
         >>> df = detect_rsi_divergence(df, lookback=10)
+        >>> {"bullish_divergence", "bearish_divergence"} <= set(df.columns)
+        True
     """
     # Calculate rolling min/max for price and RSI
     df = df.with_columns([
@@ -1139,3 +1142,56 @@ def money_flow_index(
     valid = chg.is_not_null().cast(pl.Int32).rolling_sum(window_size=period) == period
     mfi = pl.when(~valid).then(None).when(pos + neg == 0).then(50.0).otherwise(100 * pos / (pos + neg))
     return df.with_columns(mfi.cast(pl.Float64).alias("mfi"))
+
+
+def ichimoku(
+    df: pl.DataFrame,
+    high_col: str = "high",
+    low_col: str = "low",
+    tenkan: int = 9,
+    kijun: int = 26,
+    senkou: int = 52,
+    displacement: int = 26,
+) -> pl.DataFrame:
+    """Ichimoku Kinko Hyo lines, with the cloud aligned to the bar it applies to.
+
+    Each line is a rolling ``(highest high + lowest low) / 2`` midpoint.
+    ``lead_a = (tenkan + kijun) / 2`` and ``lead_b`` (the ``senkou`` midpoint)
+    are plotted ``displacement`` bars ahead, so the cloud *at* bar t is the lead
+    value from bar ``t - displacement``: no look-ahead. The chikou span is just
+    the close shifted back, so it is left to callers (compare close to the close
+    ``displacement`` bars ago).
+
+    Args:
+        df: OHLC DataFrame, oldest first, no null/NaN prices.
+        high_col, low_col: Column names.
+        tenkan, kijun, senkou: Midpoint windows (>= 1).
+        displacement: Bars the cloud is projected forward (>= 1).
+
+    Returns:
+        DataFrame with added ``ichi_tenkan``, ``ichi_kijun``, ``ichi_lead_a``,
+        ``ichi_lead_b`` (the forward cloud computed at this bar) and
+        ``ichi_senkou_a``, ``ichi_senkou_b`` (the cloud in force at this bar);
+        null during warm-up.
+
+    Example:
+        >>> df = pl.DataFrame({"high": [2.0, 4, 6, 8], "low": [1.0, 3, 5, 7]})
+        >>> ichimoku(df, tenkan=1, kijun=2, senkou=3, displacement=1)["ichi_senkou_b"].to_list()
+        [None, None, None, 3.5]
+    """
+    for name, val in (("tenkan", tenkan), ("kijun", kijun), ("senkou", senkou), ("displacement", displacement)):
+        if val < 1:
+            raise ValueError(f"{name} must be >= 1, got {val}")
+
+    def mid(w: int) -> pl.Expr:
+        return (pl.col(high_col).rolling_max(window_size=w) + pl.col(low_col).rolling_min(window_size=w)) / 2
+
+    out = df.with_columns(
+        mid(tenkan).alias("ichi_tenkan"),
+        mid(kijun).alias("ichi_kijun"),
+        mid(senkou).alias("ichi_lead_b"),
+    ).with_columns(((pl.col("ichi_tenkan") + pl.col("ichi_kijun")) / 2).alias("ichi_lead_a"))
+    return out.with_columns(
+        pl.col("ichi_lead_a").shift(displacement).alias("ichi_senkou_a"),
+        pl.col("ichi_lead_b").shift(displacement).alias("ichi_senkou_b"),
+    )
