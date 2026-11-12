@@ -55,6 +55,11 @@ def calculate_rolling_volatility(
     return rolling_vol
 
 
+def _nan_if_flat(rolling_std: pd.Series, eps: float = 1e-12) -> pd.Series:
+    """Mask (near-)zero rolling std; pandas' online std leaves ~1e-18 noise on flat windows."""
+    return rolling_std.where(rolling_std > eps)
+
+
 def calculate_rolling_sharpe(
     returns: pd.Series,
     window: int,
@@ -76,7 +81,8 @@ def calculate_rolling_sharpe(
     excess_returns = returns - risk_free_rate / annualization_factor
 
     rolling_mean = excess_returns.rolling(window).mean()
-    rolling_std = excess_returns.rolling(window).std()
+    # A flat window has no volatility: NaN, not +/-inf (or a huge ratio from float noise).
+    rolling_std = _nan_if_flat(excess_returns.rolling(window).std())
 
     rolling_sharpe = (rolling_mean / rolling_std) * np.sqrt(annualization_factor)
 
@@ -290,7 +296,8 @@ def calculate_rolling_information_ratio(
     active_returns = returns - benchmark_returns
 
     rolling_mean = active_returns.rolling(window).mean()
-    rolling_std = active_returns.rolling(window).std()
+    # A flat window has no volatility: NaN, not +/-inf (or a huge ratio from float noise).
+    rolling_std = _nan_if_flat(active_returns.rolling(window).std())
 
     rolling_ir = (rolling_mean / rolling_std) * np.sqrt(annualization_factor)
 
