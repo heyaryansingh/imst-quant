@@ -1053,3 +1053,45 @@ def aroon(
         pl.Series("aroon_up", up).fill_nan(None),
         pl.Series("aroon_down", down).fill_nan(None),
     ).with_columns((pl.col("aroon_up") - pl.col("aroon_down")).alias("aroon_osc"))
+
+
+def vortex(
+    df: pl.DataFrame,
+    high_col: str = "high",
+    low_col: str = "low",
+    close_col: str = "close",
+    period: int = 14,
+) -> pl.DataFrame:
+    """Vortex indicator (VI+ / VI-): directional movement normalised by true range.
+
+    ``VM+ = |high - prior low|``, ``VM- = |low - prior high|``,
+    ``TR = max(high - low, |high - prior close|, |low - prior close|)``;
+    ``VI± = sum(VM±, period) / sum(TR, period)``. VI+ above VI- reads as an uptrend.
+
+    Args:
+        df: OHLC DataFrame, oldest first, no null/NaN prices.
+        high_col, low_col, close_col: Column names.
+        period: Summation window (>= 1).
+
+    Returns:
+        DataFrame with added ``vi_plus``, ``vi_minus`` and ``vi_diff``
+        (plus - minus); the first ``period`` rows are null (bar 0 has no prior
+        bar). Zero total true range (flat window) gives null, not inf.
+
+    Example:
+        >>> df = pl.DataFrame({"high": [2.0, 3, 4], "low": [1.0, 2, 3], "close": [1.5, 2.5, 3.5]})
+        >>> vortex(df, period=2)["vi_minus"].to_list()
+        [None, None, 0.0]
+    """
+    if period < 1:
+        raise ValueError(f"period must be >= 1, got {period}")
+
+    h, lo, c = pl.col(high_col), pl.col(low_col), pl.col(close_col)
+    tr = pl.max_horizontal(h - lo, (h - c.shift(1)).abs(), (lo - c.shift(1)).abs())
+    tr = pl.when(c.shift(1).is_null()).then(None).otherwise(tr)
+    tr_sum = pl.when(tr.rolling_sum(window_size=period) > 0).then(tr.rolling_sum(window_size=period))
+    out = df.with_columns(
+        ((h - lo.shift(1)).abs().rolling_sum(window_size=period) / tr_sum).alias("vi_plus"),
+        ((lo - h.shift(1)).abs().rolling_sum(window_size=period) / tr_sum).alias("vi_minus"),
+    )
+    return out.with_columns((pl.col("vi_plus") - pl.col("vi_minus")).alias("vi_diff"))

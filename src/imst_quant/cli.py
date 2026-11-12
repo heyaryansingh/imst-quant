@@ -2344,6 +2344,18 @@ Examples:
     aroon_parser.add_argument("--period", type=int, default=25, help="Look-back bars (default: 25)")
     aroon_parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
+    # --- vortex subcommand ---
+    vortex_parser = subparsers.add_parser(
+        "vortex",
+        help="Vortex indicator: VI+/VI- trend direction, crossovers, bars since last cross",
+    )
+    vortex_parser.add_argument("--data", required=True, help="Parquet file with high/low/close columns")
+    vortex_parser.add_argument("--high-col", default="high", help="High column (default: high)")
+    vortex_parser.add_argument("--low-col", default="low", help="Low column (default: low)")
+    vortex_parser.add_argument("--close-col", default="close", help="Close column (default: close)")
+    vortex_parser.add_argument("--period", type=int, default=14, help="Summation window (default: 14)")
+    vortex_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
     # --- pbo subcommand ---
     pbo_parser = subparsers.add_parser(
         "pbo",
@@ -10079,6 +10091,68 @@ def cmd_aroon(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_vortex(args: argparse.Namespace) -> int:
+    """Report the Vortex indicator (VI+/VI-), trend direction and VI crossovers.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    from imst_quant.utils.technical_indicators import vortex
+
+    if args.period < 1:
+        print("Error: --period must be >= 1")
+        return 1
+    df = _load_clean_ohlc(args, [args.high_col, args.low_col, args.close_col], args.period + 1)
+    if df is None:
+        return 1
+
+    out = vortex(df, high_col=args.high_col, low_col=args.low_col, close_col=args.close_col, period=args.period)
+    diffs = out["vi_diff"].to_list()
+    last = out.row(-1, named=True)
+    if last["vi_diff"] is None:
+        print("Error: true range is zero over the last window (flat prices); Vortex undefined")
+        return 1
+    # Sign per bar (0 = tie / undefined); a cross is a sign change between non-zero bars.
+    signs = [((d > 0) - (d < 0)) if d is not None else 0 for d in diffs]
+    cross_bars = []
+    prev = 0
+    for i, sgn in enumerate(signs):
+        if sgn:
+            if prev and sgn != prev:
+                cross_bars.append(i)
+            prev = sgn
+    trend = "up" if last["vi_diff"] > 0 else "down" if last["vi_diff"] < 0 else "neutral"
+    result = {
+        "n_bars": out.height,
+        "period": args.period,
+        "vi_plus": last["vi_plus"],
+        "vi_minus": last["vi_minus"],
+        "vi_diff": last["vi_diff"],
+        "trend": trend,
+        "cross_now": bool(cross_bars) and cross_bars[-1] == out.height - 1,
+        "bars_since_cross": (out.height - 1 - cross_bars[-1]) if cross_bars else None,
+        "crossovers": len(cross_bars),
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    print("\n=== Vortex Indicator ===\n")
+    print(f"Bars: {out.height}   Period: {args.period}")
+    print(f"VI+: {result['vi_plus']:.4f}   VI-: {result['vi_minus']:.4f}   Diff: {result['vi_diff']:+.4f}")
+    since = f"{result['bars_since_cross']} bars ago" if cross_bars else "none"
+    print(f"Trend: {trend.upper()}   Cross this bar: {'YES' if result['cross_now'] else 'no'}   "
+          f"Last cross: {since}   Crossovers: {len(cross_bars)}")
+    print()
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -11601,6 +11675,7 @@ COMMANDS = {
         "psar": cmd_psar,
         "donchian": cmd_donchian,
         "aroon": cmd_aroon,
+        "vortex": cmd_vortex,
 }
 
 
