@@ -2371,6 +2371,35 @@ Examples:
     mfi_parser.add_argument("--oversold", type=float, default=20.0, help="Oversold level (default: 20)")
     mfi_parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
+    # --- cmf subcommand ---
+    cmf_parser = subparsers.add_parser(
+        "cmf",
+        help="Chaikin Money Flow: buying/selling pressure, zero crosses, price divergence",
+    )
+    cmf_parser.add_argument("--data", required=True, help="Parquet file with high/low/close/volume columns")
+    cmf_parser.add_argument("--high-col", default="high", help="High column (default: high)")
+    cmf_parser.add_argument("--low-col", default="low", help="Low column (default: low)")
+    cmf_parser.add_argument("--close-col", default="close", help="Close column (default: close)")
+    cmf_parser.add_argument("--volume-col", default="volume", help="Volume column (default: volume)")
+    cmf_parser.add_argument("--period", type=int, default=20, help="Summation window (default: 20)")
+    cmf_parser.add_argument("--threshold", type=float, default=0.05,
+                            help="|CMF| above this reads as buying/selling pressure (default: 0.05)")
+    cmf_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
+    # --- chop subcommand ---
+    chop_parser = subparsers.add_parser(
+        "chop",
+        help="Choppiness Index: trending vs sideways regime, streak, time in each regime",
+    )
+    chop_parser.add_argument("--data", required=True, help="Parquet file with high/low/close columns")
+    chop_parser.add_argument("--high-col", default="high", help="High column (default: high)")
+    chop_parser.add_argument("--low-col", default="low", help="Low column (default: low)")
+    chop_parser.add_argument("--close-col", default="close", help="Close column (default: close)")
+    chop_parser.add_argument("--period", type=int, default=14, help="Window (default: 14, min 2)")
+    chop_parser.add_argument("--choppy", type=float, default=61.8, help="Choppy above this (default: 61.8)")
+    chop_parser.add_argument("--trending", type=float, default=38.2, help="Trending below this (default: 38.2)")
+    chop_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
     # --- ichimoku subcommand ---
     ichimoku_parser = subparsers.add_parser(
         "ichimoku",
@@ -10339,6 +10368,154 @@ def cmd_ichimoku(args: argparse.Namespace) -> int:
     return 0
 
 
+def _streak(vals: list, label) -> int:
+    """Count trailing items of ``vals`` whose ``label(v)`` equals that of the last item."""
+    n, last = 0, label(vals[-1])
+    for v in reversed(vals):
+        if label(v) != last:
+            break
+        n += 1
+    return n
+
+
+def cmd_cmf(args: argparse.Namespace) -> int:
+    """Report Chaikin Money Flow, pressure, zero-line crosses and price/flow divergence.
+
+    Divergence compares the sign of the close change and the CMF change over the
+    last ``period`` bars: price up with flow falling is bearish, and vice versa.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    from imst_quant.utils.technical_indicators import chaikin_money_flow
+
+    if args.period < 1:
+        print("Error: --period must be >= 1")
+        return 1
+    if not 0 <= args.threshold < 1:
+        print("Error: --threshold must be in [0, 1)")
+        return 1
+    cols = [args.high_col, args.low_col, args.close_col, args.volume_col]
+    df = _load_clean_ohlc(args, cols, args.period + 1)
+    if df is None:
+        return 1
+
+    out = chaikin_money_flow(
+        df, high_col=args.high_col, low_col=args.low_col, close_col=args.close_col,
+        volume_col=args.volume_col, period=args.period,
+    ).drop_nulls("cmf")
+    vals = out["cmf"].to_list()
+    closes = out[args.close_col].to_list()
+    now = vals[-1]
+
+    def pressure(v: float) -> str:
+        return "buying" if v > args.threshold else "selling" if v < -args.threshold else "neutral"
+
+    signs = [(v > 0) - (v < 0) for v in vals]
+    crosses, prev = [], 0
+    for i, sgn in enumerate(signs):
+        if sgn:
+            if prev and sgn != prev:
+                crosses.append(i)
+            prev = sgn
+    lookback = min(args.period, len(vals) - 1)
+    d_price = closes[-1] - closes[-1 - lookback]
+    d_flow = now - vals[-1 - lookback]
+    divergence = (
+        "bearish" if d_price > 0 and d_flow < 0 else "bullish" if d_price < 0 and d_flow > 0 else "none"
+    )
+    result = {
+        "n_bars": df.height,
+        "period": args.period,
+        "cmf": now,
+        "pressure": pressure(now),
+        "bars_in_pressure": _streak(vals, pressure),
+        "cmf_change": d_flow,
+        "divergence": divergence,
+        "bars_since_zero_cross": (len(vals) - 1 - crosses[-1]) if crosses else None,
+        "zero_crosses": len(crosses),
+        "pct_positive": sum(v > 0 for v in vals) / len(vals),
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    print("\n=== Chaikin Money Flow ===\n")
+    print(f"Bars: {df.height}   Period: {args.period}   Threshold: +/-{args.threshold:g}")
+    print(f"CMF: {now:+.4f}   Pressure: {result['pressure'].upper()} ({result['bars_in_pressure']} bars)   "
+          f"Change over {lookback} bars: {d_flow:+.4f}")
+    since = f"{result['bars_since_zero_cross']} bars ago" if crosses else "none"
+    print(f"Divergence: {divergence.upper()}   Last zero cross: {since}   "
+          f"Time positive: {result['pct_positive']:.0%}")
+    print()
+    return 0
+
+
+def cmd_chop(args: argparse.Namespace) -> int:
+    """Report the Choppiness Index, trend/chop regime, its streak and time in each regime.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    from imst_quant.utils.technical_indicators import choppiness_index
+
+    if args.period < 2:
+        print("Error: --period must be >= 2")
+        return 1
+    if not 0 <= args.trending < args.choppy <= 100:
+        print("Error: need 0 <= --trending < --choppy <= 100")
+        return 1
+    df = _load_clean_ohlc(args, [args.high_col, args.low_col, args.close_col], args.period)
+    if df is None:
+        return 1
+
+    vals = choppiness_index(
+        df, high_col=args.high_col, low_col=args.low_col, close_col=args.close_col, period=args.period,
+    )["chop"].drop_nulls().to_list()
+    if not vals:
+        print("Error: price range is zero in every window (flat prices); Choppiness undefined")
+        return 1
+    now = vals[-1]
+
+    def regime(v: float) -> str:
+        return "choppy" if v > args.choppy else "trending" if v < args.trending else "transition"
+
+    lookback = min(args.period, len(vals) - 1)
+    result = {
+        "n_bars": df.height,
+        "period": args.period,
+        "chop": now,
+        "regime": regime(now),
+        "bars_in_regime": _streak(vals, regime),
+        "chop_change": now - vals[-1 - lookback],
+        "pct_choppy": sum(v > args.choppy for v in vals) / len(vals),
+        "pct_trending": sum(v < args.trending for v in vals) / len(vals),
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    print("\n=== Choppiness Index ===\n")
+    print(f"Bars: {df.height}   Period: {args.period}   Bands: {args.trending:g}/{args.choppy:g}")
+    print(f"CHOP: {now:.1f}   Regime: {result['regime'].upper()} ({result['bars_in_regime']} bars)   "
+          f"Change over {lookback} bars: {result['chop_change']:+.1f}")
+    print(f"Time choppy: {result['pct_choppy']:.0%}   Time trending: {result['pct_trending']:.0%}")
+    print()
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -11864,6 +12041,8 @@ COMMANDS = {
         "vortex": cmd_vortex,
         "mfi": cmd_mfi,
         "ichimoku": cmd_ichimoku,
+        "cmf": cmd_cmf,
+        "chop": cmd_chop,
 }
 
 

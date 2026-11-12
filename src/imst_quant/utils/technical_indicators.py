@@ -1195,3 +1195,83 @@ def ichimoku(
         pl.col("ichi_lead_a").shift(displacement).alias("ichi_senkou_a"),
         pl.col("ichi_lead_b").shift(displacement).alias("ichi_senkou_b"),
     )
+
+
+def chaikin_money_flow(
+    df: pl.DataFrame,
+    high_col: str = "high",
+    low_col: str = "low",
+    close_col: str = "close",
+    volume_col: str = "volume",
+    period: int = 20,
+) -> pl.DataFrame:
+    """Chaikin Money Flow: volume-weighted location of the close in each bar's range.
+
+    Money-flow multiplier ``mfm = ((close - low) - (high - close)) / (high - low)``
+    (+1 = closed at the high, -1 = at the low, 0 for a zero-range bar);
+    ``CMF = sum(mfm * volume, period) / sum(volume, period)``, in [-1, 1].
+
+    Args:
+        df: OHLCV DataFrame, oldest first, no null/NaN values.
+        high_col, low_col, close_col, volume_col: Column names.
+        period: Summation window (>= 1).
+
+    Returns:
+        DataFrame with added ``cmf``; the first ``period - 1`` rows are null,
+        and a window with zero total volume is null rather than NaN.
+
+    Example:
+        >>> df = pl.DataFrame({"high": [2.0, 2], "low": [1.0, 1],
+        ...                    "close": [2.0, 1.0], "volume": [30.0, 10]})
+        >>> chaikin_money_flow(df, period=2)["cmf"].to_list()
+        [None, 0.5]
+    """
+    if period < 1:
+        raise ValueError(f"period must be >= 1, got {period}")
+
+    h, lo, c, v = pl.col(high_col), pl.col(low_col), pl.col(close_col), pl.col(volume_col)
+    mfm = pl.when(h > lo).then(((c - lo) - (h - c)) / (h - lo)).otherwise(0.0)
+    vol_sum = v.rolling_sum(window_size=period)
+    cmf = pl.when(vol_sum > 0).then((mfm * v).rolling_sum(window_size=period) / vol_sum)
+    return df.with_columns(cmf.cast(pl.Float64).alias("cmf"))
+
+
+def choppiness_index(
+    df: pl.DataFrame,
+    high_col: str = "high",
+    low_col: str = "low",
+    close_col: str = "close",
+    period: int = 14,
+) -> pl.DataFrame:
+    """Choppiness Index: how much of the window's travel went nowhere.
+
+    ``CHOP = 100 * log10(sum(TR, period) / (max(high, period) - min(low, period))) / log10(period)``.
+    Near 100 = sideways chop (lots of true range, little net range); near 0 =
+    a clean trend. Common reads: > 61.8 choppy, < 38.2 trending. Bar 0's true
+    range is ``high - low`` (no prior close).
+
+    Args:
+        df: OHLC DataFrame, oldest first, no null/NaN prices.
+        high_col, low_col, close_col: Column names.
+        period: Window (>= 2; log10(1) = 0).
+
+    Returns:
+        DataFrame with added ``chop``; the first ``period - 1`` rows are null,
+        and a flat window (zero high-low range) is null rather than inf.
+
+    Example:
+        >>> df = pl.DataFrame({"high": [2.0, 3.0], "low": [1.0, 2.0], "close": [2.0, 3.0]})
+        >>> chop = choppiness_index(df, period=2)["chop"].to_list()
+        >>> chop[0] is None, round(chop[1], 6)
+        (True, 0.0)
+    """
+    if period < 2:
+        raise ValueError(f"period must be >= 2, got {period}")
+
+    h, lo, pc = pl.col(high_col), pl.col(low_col), pl.col(close_col).shift(1)
+    tr = pl.max_horizontal(h - lo, (h - pc).abs(), (lo - pc).abs())  # null pc -> h - lo
+    rng = h.rolling_max(window_size=period) - lo.rolling_min(window_size=period)
+    chop = pl.when(rng > 0).then(
+        100 * (tr.rolling_sum(window_size=period) / rng).log10() / np.log10(period)
+    )
+    return df.with_columns(chop.cast(pl.Float64).alias("chop"))
