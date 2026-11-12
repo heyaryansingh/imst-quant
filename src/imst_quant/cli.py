@@ -2321,6 +2321,18 @@ Examples:
     psar_parser.add_argument("--max-step", type=float, default=0.2, help="Acceleration cap (default: 0.2)")
     psar_parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
+    # --- donchian subcommand ---
+    donchian_parser = subparsers.add_parser(
+        "donchian",
+        help="Donchian channel breakout: channel bounds, position in channel, width, breakout now, last breakout",
+    )
+    donchian_parser.add_argument("--data", required=True, help="Parquet file with high/low/close columns")
+    donchian_parser.add_argument("--high-col", default="high", help="High column (default: high)")
+    donchian_parser.add_argument("--low-col", default="low", help="Low column (default: low)")
+    donchian_parser.add_argument("--close-col", default="close", help="Close column (default: close)")
+    donchian_parser.add_argument("--window", type=int, default=20, help="Look-back bars (default: 20)")
+    donchian_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
     # --- pbo subcommand ---
     pbo_parser = subparsers.add_parser(
         "pbo",
@@ -9909,6 +9921,96 @@ def cmd_psar(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_clean_ohlc(args: argparse.Namespace, cols: list, min_rows: int):
+    """Read ``args.data`` and keep rows where every column in ``cols`` is finite and > 0.
+
+    Returns the DataFrame, or None after printing an error.
+    """
+    import polars as pl
+
+    path = Path(args.data)
+    if not path.exists():
+        print(f"Error: Data file not found: {path}")
+        return None
+    try:
+        df = pl.read_parquet(path)
+    except Exception as e:
+        print(f"Error reading data file: {e}")
+        return None
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        print(f"Error: Missing columns {missing}. Available columns: {df.columns}")
+        return None
+    df = df.select([pl.col(c).cast(pl.Float64, strict=False) for c in cols])
+    df = df.filter(pl.all_horizontal([pl.col(c).is_finite() & (pl.col(c) > 0) for c in cols]))
+    if df.height < min_rows:
+        print(f"Error: need at least {min_rows} clean bars, got {df.height}")
+        return None
+    return df
+
+
+def cmd_donchian(args: argparse.Namespace) -> int:
+    """Report the Donchian channel, where price sits in it, and breakouts.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    from imst_quant.utils.technical_indicators import donchian_channels
+
+    if args.window < 1:
+        print("Error: --window must be >= 1")
+        return 1
+    df = _load_clean_ohlc(args, [args.high_col, args.low_col, args.close_col], args.window + 1)
+    if df is None:
+        return 1
+
+    out = donchian_channels(
+        df, high_col=args.high_col, low_col=args.low_col, close_col=args.close_col, window=args.window,
+    )
+    brk = out["dc_breakout"].to_list()
+    hits = [i for i, b in enumerate(brk) if b]
+    last = out.row(-1, named=True)
+    c, up, lo = last[args.close_col], last["dc_upper"], last["dc_lower"]
+    width = up - lo
+    result = {
+        "n_bars": out.height,
+        "window": args.window,
+        "close": c,
+        "upper": up,
+        "lower": lo,
+        "middle": last["dc_middle"],
+        "position_pct": (c - lo) / width if width else 0.5,
+        "width_pct": width / c,
+        "breakout_now": {1: "up", -1: "down"}.get(last["dc_breakout"], "none"),
+        "last_breakout": ({1: "up", -1: "down"}[brk[hits[-1]]] if hits else None),
+        "bars_since_breakout": (out.height - 1 - hits[-1]) if hits else None,
+        "breakouts_up": sum(1 for b in brk if b == 1),
+        "breakouts_down": sum(1 for b in brk if b == -1),
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    print("\n" + "=== Donchian Channel ===" + "\n")
+    print(f"Bars: {out.height}   Window: {args.window}")
+    print(f"Close: {c:.4f}   Upper: {up:.4f}   Lower: {lo:.4f}   Middle: {last['dc_middle']:.4f}")
+    print(f"Position in channel: {result['position_pct']:.0%}   Width: {result['width_pct']:.2%} of price")
+    since = (
+        f"{result['last_breakout'].upper()} {result['bars_since_breakout']} bars ago"
+        if hits else "none"
+    )
+    print(f"Breakout this bar: {result['breakout_now'].upper()}   Last breakout: {since}")
+    print(f"Breakouts: {result['breakouts_up']} up / {result['breakouts_down']} down")
+    print()
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point for IMST-Quant.
 
@@ -11429,6 +11531,7 @@ COMMANDS = {
         "supertrend": cmd_supertrend,
         "squeeze": cmd_squeeze,
         "psar": cmd_psar,
+        "donchian": cmd_donchian,
 }
 
 

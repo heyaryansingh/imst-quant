@@ -965,3 +965,47 @@ def parabolic_sar(
         pl.Series("psar_direction", dir_out, dtype=pl.Int8),
         pl.Series("psar_af", af_out, dtype=pl.Float64),
     )
+
+
+def donchian_channels(
+    df: pl.DataFrame,
+    high_col: str = "high",
+    low_col: str = "low",
+    close_col: str = "close",
+    window: int = 20,
+) -> pl.DataFrame:
+    """Donchian channels: rolling highest high / lowest low over ``window`` bars.
+
+    A breakout is a close beyond the *prior* bar's channel (the current bar is
+    always inside its own channel, so comparing to it would never fire).
+
+    Args:
+        df: OHLC DataFrame, oldest first.
+        high_col, low_col, close_col: Column names.
+        window: Look-back bars (>= 1).
+
+    Returns:
+        DataFrame with added ``dc_upper``, ``dc_lower``, ``dc_middle`` (null
+        during warm-up) and ``dc_breakout`` (1 above prior upper, -1 below
+        prior lower, 0 otherwise; null until a prior channel exists).
+
+    Example:
+        >>> df = pl.DataFrame({"high": [2.0, 3, 5], "low": [1.0, 2, 4], "close": [1.5, 2.5, 4.5]})
+        >>> donchian_channels(df, window=2)["dc_breakout"].to_list()
+        [None, None, 1]
+    """
+    if window < 1:
+        raise ValueError(f"window must be >= 1, got {window}")
+
+    out = df.with_columns(
+        pl.col(high_col).rolling_max(window_size=window).alias("dc_upper"),
+        pl.col(low_col).rolling_min(window_size=window).alias("dc_lower"),
+    ).with_columns(((pl.col("dc_upper") + pl.col("dc_lower")) / 2).alias("dc_middle"))
+    prev_up, prev_lo = pl.col("dc_upper").shift(1), pl.col("dc_lower").shift(1)
+    return out.with_columns(
+        pl.when(prev_up.is_null()).then(None)
+        .when(pl.col(close_col) > prev_up).then(1)
+        .when(pl.col(close_col) < prev_lo).then(-1)
+        .otherwise(0).cast(pl.Int8).alias("dc_breakout")
+    )
+
