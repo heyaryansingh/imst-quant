@@ -278,8 +278,10 @@ def composite_sentiment_signal(
     result = sentiment_extreme_signal(
         result, sentiment_col, config.extreme_high, config.extreme_low
     )
+    # smoothing_window is the fast MA; keep the slow MA strictly slower so a
+    # large smoothing_window cannot invert (or zero out) the crossover.
     result = sentiment_crossover_signal(
-        result, sentiment_col, config.smoothing_window
+        result, sentiment_col, config.smoothing_window, max(10, 2 * config.smoothing_window)
     )
 
     # Combine signals with weights
@@ -322,47 +324,25 @@ def calculate_sentiment_divergence(
 
     Returns:
         DataFrame with added columns:
-        - sentiment_direction: Rolling sentiment trend (1=up, -1=down)
-        - price_direction: Rolling price trend (1=up, -1=down)
-        - sentiment_price_divergence: True when directions disagree
+        - sentiment_direction: Rolling sentiment trend (1=up, -1=down, 0=flat)
+        - price_direction: Rolling price trend (1=up, -1=down, 0=flat)
+        - sentiment_price_divergence: True when one is up and the other down
         - divergence_signal: 1=bullish divergence (neg sentiment, pos price),
             -1=bearish divergence (pos sentiment, neg price)
     """
+    # sign() gives 1/-1, and 0 for a flat stretch: no movement is not "down",
+    # otherwise flat sentiment against rising prices reads as a bullish divergence.
+    sent_ma = pl.col(sentiment_col).rolling_mean(window_size=window)
     result = df.with_columns(
-        pl.when(
-            pl.col(sentiment_col).rolling_mean(window_size=window)
-            > pl.col(sentiment_col).rolling_mean(window_size=window).shift(1)
-        )
-        .then(1)
-        .when(pl.col(sentiment_col).rolling_mean(window_size=window).is_not_null()
-              & pl.col(sentiment_col).rolling_mean(window_size=window).shift(1).is_not_null())
-        .then(-1)
-        .alias("sentiment_direction"),
-        pl.when(
-            pl.col(price_returns_col).rolling_sum(window_size=window) > 0
-        )
-        .then(1)
-        .when(pl.col(price_returns_col).rolling_sum(window_size=window).is_not_null())
-        .then(-1)
+        sent_ma.diff().sign().cast(pl.Int64).alias("sentiment_direction"),
+        pl.col(price_returns_col).rolling_sum(window_size=window).sign().cast(pl.Int64)
         .alias("price_direction"),
     )
 
+    opposed = pl.col("sentiment_direction") * pl.col("price_direction") < 0
     result = result.with_columns(
-        (pl.col("sentiment_direction") != pl.col("price_direction")).alias(
-            "sentiment_price_divergence"
-        ),
-        pl.when(
-            (pl.col("sentiment_direction") < 0)
-            & (pl.col("price_direction") > 0)
-        )
-        .then(1)
-        .when(
-            (pl.col("sentiment_direction") > 0)
-            & (pl.col("price_direction") < 0)
-        )
-        .then(-1)
-        .otherwise(0)
-        .alias("divergence_signal"),
+        opposed.alias("sentiment_price_divergence"),
+        pl.when(opposed).then(pl.col("price_direction")).otherwise(0).alias("divergence_signal"),
     )
 
     return result
