@@ -2439,6 +2439,32 @@ Examples:
                                help="Pivot formula (default: classic)")
     pivots_parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
+    # --- stochrsi subcommand ---
+    srsi_parser = subparsers.add_parser(
+        "stochrsi",
+        help="Stochastic RSI %%K/%%D: overbought/oversold zone, K/D crosses, zone-confirmed signals",
+    )
+    srsi_parser.add_argument("--data", required=True, help="Parquet file with a close column")
+    srsi_parser.add_argument("--close-col", default="close", help="Close column (default: close)")
+    srsi_parser.add_argument("--rsi-period", type=int, default=14, help="RSI lookback (default: 14)")
+    srsi_parser.add_argument("--stoch-period", type=int, default=14, help="Stochastic lookback (default: 14)")
+    srsi_parser.add_argument("--k", type=int, default=3, help="%%K smoothing (default: 3)")
+    srsi_parser.add_argument("--d", type=int, default=3, help="%%D smoothing (default: 3)")
+    srsi_parser.add_argument("--overbought", type=float, default=80.0, help="Overbought level (default: 80)")
+    srsi_parser.add_argument("--oversold", type=float, default=20.0, help="Oversold level (default: 20)")
+    srsi_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
+    # --- trix subcommand ---
+    trix_parser = subparsers.add_parser(
+        "trix",
+        help="TRIX triple-smoothed momentum: value vs signal, zero-line and signal crosses",
+    )
+    trix_parser.add_argument("--data", required=True, help="Parquet file with a close column")
+    trix_parser.add_argument("--close-col", default="close", help="Close column (default: close)")
+    trix_parser.add_argument("--period", type=int, default=15, help="Triple-EMA span (default: 15)")
+    trix_parser.add_argument("--signal", type=int, default=9, help="Signal EMA span (default: 9)")
+    trix_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
     # --- confluence subcommand ---
     conf_parser = subparsers.add_parser(
         "confluence",
@@ -10781,6 +10807,154 @@ def cmd_pivots(args: argparse.Namespace) -> int:
     return 0
 
 
+def _last_cross(gaps: list):
+    """Return ``(direction, bars_ago, count)`` for sign changes in ``gaps``.
+
+    Zeros are skipped (a touch is not a cross). ``direction`` is ``"up"`` when
+    the gap went negative to positive. ``(None, None, 0)`` when it never crossed.
+    """
+    crosses, prev = [], 0
+    for i, g in enumerate(gaps):
+        sgn = (g > 0) - (g < 0)
+        if sgn:
+            if prev and sgn != prev:
+                crosses.append((i, "up" if sgn > 0 else "down"))
+            prev = sgn
+    if not crosses:
+        return None, None, 0
+    i, direction = crosses[-1]
+    return direction, len(gaps) - 1 - i, len(crosses)
+
+
+def cmd_stochrsi(args: argparse.Namespace) -> int:
+    """Report Stochastic RSI %K/%D, its zone, and the latest K/D cross.
+
+    A K/D cross on the last bar reads as a signal only when %K came from the
+    matching extreme zone (bullish cross out of oversold, bearish out of overbought).
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    from imst_quant.utils.technical_indicators import stoch_rsi
+
+    if min(args.rsi_period, args.stoch_period, args.k, args.d) < 1:
+        print("Error: --rsi-period, --stoch-period, --k and --d must be >= 1")
+        return 1
+    if not 0 <= args.oversold < args.overbought <= 100:
+        print("Error: need 0 <= --oversold < --overbought <= 100")
+        return 1
+    warmup = args.stoch_period + args.k + args.d - 2
+    df = _load_clean_ohlc(args, [args.close_col], warmup + 2)
+    if df is None:
+        return 1
+
+    out = stoch_rsi(
+        df, close_col=args.close_col, rsi_period=args.rsi_period,
+        stoch_period=args.stoch_period, k_smooth=args.k, d_smooth=args.d,
+    ).drop_nulls("stochrsi_d")
+    ks, ds = out["stochrsi_k"].to_list(), out["stochrsi_d"].to_list()
+
+    def zone(v: float) -> str:
+        return "overbought" if v >= args.overbought else "oversold" if v <= args.oversold else "neutral"
+
+    direction, ago, n_cross = _last_cross([k - d for k, d in zip(ks, ds)])
+    signal = "none"
+    if ago == 0:
+        if direction == "up" and zone(ks[-2]) == "oversold":
+            signal = "buy"
+        elif direction == "down" and zone(ks[-2]) == "overbought":
+            signal = "sell"
+    result = {
+        "n_bars": df.height,
+        "k": ks[-1],
+        "d": ds[-1],
+        "zone": zone(ks[-1]),
+        "bars_in_zone": _streak(ks, zone),
+        "last_cross": direction,
+        "bars_since_cross": ago,
+        "crosses": n_cross,
+        "signal": signal,
+        "pct_overbought": sum(zone(k) == "overbought" for k in ks) / len(ks),
+        "pct_oversold": sum(zone(k) == "oversold" for k in ks) / len(ks),
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    print("\n=== Stochastic RSI ===\n")
+    print(f"Bars: {df.height}   RSI/Stoch: {args.rsi_period}/{args.stoch_period}   K/D: {args.k}/{args.d}")
+    print(f"%K: {ks[-1]:.1f}   %D: {ds[-1]:.1f}   Zone: {result['zone'].upper()} ({result['bars_in_zone']} bars)")
+    since = f"{direction.upper()} {ago} bars ago" if direction else "none"
+    print(f"Last K/D cross: {since}   Signal: {signal.upper()}")
+    print(f"Time overbought: {result['pct_overbought']:.0%}   oversold: {result['pct_oversold']:.0%}")
+    print()
+    return 0
+
+
+def cmd_trix(args: argparse.Namespace) -> int:
+    """Report TRIX, its signal line, and the latest zero-line and signal crosses.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    from imst_quant.utils.technical_indicators import trix
+
+    if args.period < 1 or args.signal < 1:
+        print("Error: --period and --signal must be >= 1")
+        return 1
+    df = _load_clean_ohlc(args, [args.close_col], 3)
+    if df is None:
+        return 1
+
+    out = trix(df, close_col=args.close_col, period=args.period, signal=args.signal).drop_nulls("trix")
+    tx, sig = out["trix"].to_list(), out["trix_signal"].to_list()
+    hist = [t - s for t, s in zip(tx, sig)]
+    zero_dir, zero_ago, _ = _last_cross(tx)
+    sig_dir, sig_ago, _ = _last_cross(hist)
+    slope = tx[-1] - tx[-2]
+    result = {
+        "n_bars": df.height,
+        "period": args.period,
+        "trix": tx[-1],
+        "signal": sig[-1],
+        "histogram": hist[-1],
+        "momentum": "bullish" if tx[-1] > 0 else "bearish" if tx[-1] < 0 else "flat",
+        "direction": "rising" if slope > 0 else "falling" if slope < 0 else "flat",
+        "vs_signal": "above" if hist[-1] > 0 else "below" if hist[-1] < 0 else "at",
+        "last_zero_cross": zero_dir,
+        "bars_since_zero_cross": zero_ago,
+        "last_signal_cross": sig_dir,
+        "bars_since_signal_cross": sig_ago,
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    def since(d, ago):
+        return f"{d.upper()} {ago} bars ago" if d else "none"
+
+    print("\n=== TRIX ===\n")
+    print(f"Bars: {df.height}   Period: {args.period}   Signal: {args.signal}")
+    print(f"TRIX: {tx[-1]:+.4f}%/bar ({result['direction']})   Signal: {sig[-1]:+.4f}   "
+          f"Histogram: {hist[-1]:+.4f}")
+    print(f"Momentum: {result['momentum'].upper()}   TRIX {result['vs_signal']} signal")
+    print(f"Zero-line cross: {since(zero_dir, zero_ago)}   Signal cross: {since(sig_dir, sig_ago)}")
+    print()
+    return 0
+
+
 def cmd_confluence(args: argparse.Namespace) -> int:
     """Report a chop-gated multi-indicator vote on the latest bar.
 
@@ -12362,6 +12536,8 @@ COMMANDS = {
         "kama": cmd_kama,
         "elder": cmd_elder,
         "pivots": cmd_pivots,
+        "stochrsi": cmd_stochrsi,
+        "trix": cmd_trix,
         "confluence": cmd_confluence,
 }
 

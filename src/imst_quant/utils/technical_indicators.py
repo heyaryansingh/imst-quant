@@ -1424,6 +1424,88 @@ def pivot_points(
     return df.with_columns([levels[k].cast(pl.Float64).alias(k) for k in PIVOT_LEVELS])
 
 
+def stoch_rsi(
+    df: pl.DataFrame,
+    close_col: str = "close",
+    rsi_period: int = 14,
+    stoch_period: int = 14,
+    k_smooth: int = 3,
+    d_smooth: int = 3,
+) -> pl.DataFrame:
+    """Stochastic RSI: where RSI sits inside its own recent range, 0-100.
+
+    ``raw = 100 * (rsi - min(rsi, n)) / (max(rsi, n) - min(rsi, n))``;
+    ``stochrsi_k`` is ``raw`` smoothed by a ``k_smooth`` SMA and ``stochrsi_d``
+    is ``k`` smoothed by a ``d_smooth`` SMA. A window where RSI never moved
+    reads a neutral 50 instead of dividing by zero.
+
+    Args:
+        df: DataFrame with a close column, oldest first, no null/NaN values.
+        close_col: Close column name.
+        rsi_period, stoch_period, k_smooth, d_smooth: Lookbacks (>= 1).
+
+    Returns:
+        DataFrame with added ``stochrsi_k`` and ``stochrsi_d``; warmup rows are null.
+
+    Example:
+        >>> df = pl.DataFrame({"close": [1.0, 2, 3, 2, 1]})
+        >>> stoch_rsi(df, rsi_period=2, stoch_period=2, k_smooth=1, d_smooth=1)["stochrsi_k"].to_list()
+        [None, 100.0, 50.0, 0.0, 0.0]
+    """
+    for name, v in (("rsi_period", rsi_period), ("stoch_period", stoch_period),
+                    ("k_smooth", k_smooth), ("d_smooth", d_smooth)):
+        if v < 1:
+            raise ValueError(f"{name} must be >= 1, got {v}")
+
+    r = rsi(df.select(pl.col(close_col).cast(pl.Float64)), price_col=close_col, period=rsi_period)["rsi"]
+    lo = r.rolling_min(window_size=stoch_period)
+    hi = r.rolling_max(window_size=stoch_period)
+    raw = pl.select(_safe_ratio(100 * (pl.lit(r) - pl.lit(lo)), pl.lit(hi) - pl.lit(lo), 50.0)).to_series()
+    k = raw.rolling_mean(window_size=k_smooth).clip(0.0, 100.0)  # rolling-sum float noise
+    d = k.rolling_mean(window_size=d_smooth).clip(0.0, 100.0)
+    return df.with_columns(k.alias("stochrsi_k"), d.alias("stochrsi_d"))
+
+
+def trix(
+    df: pl.DataFrame,
+    close_col: str = "close",
+    period: int = 15,
+    signal: int = 9,
+) -> pl.DataFrame:
+    """TRIX: percent rate of change of a triple-smoothed EMA, plus a signal line.
+
+    ``ema3 = EMA(EMA(EMA(close, period)))``, ``trix = 100 * ema3.pct_change()``
+    (percent per bar), ``trix_signal = EMA(trix, signal)``. Triple smoothing
+    filters out moves shorter than ``period``, so zero-line and signal crosses
+    flag the underlying trend turning.
+
+    Args:
+        df: DataFrame with a close column, oldest first, no null/NaN values,
+            prices > 0.
+        close_col: Close column name.
+        period: EMA span (>= 1).
+        signal: Signal EMA span (>= 1).
+
+    Returns:
+        DataFrame with added ``trix`` and ``trix_signal``; row 0 is null.
+
+    Example:
+        >>> df = pl.DataFrame({"close": [10.0, 10, 10]})
+        >>> trix(df, period=2, signal=2)["trix"].to_list()
+        [None, 0.0, 0.0]
+    """
+    if period < 1 or signal < 1:
+        raise ValueError(f"period and signal must be >= 1, got {period}, {signal}")
+
+    ema3 = pl.col(close_col).cast(pl.Float64)
+    for _ in range(3):
+        ema3 = ema3.ewm_mean(span=period, adjust=False)
+    out = df.with_columns((100 * ema3.pct_change()).alias("trix"))
+    return out.with_columns(
+        pl.col("trix").ewm_mean(span=signal, adjust=False, ignore_nulls=True).alias("trix_signal")
+    )
+
+
 def indicator_confluence(df: pl.DataFrame, chop_threshold: float = 61.8) -> dict:
     """Combine trend, momentum and money-flow indicators into one vote on the last bar.
 
