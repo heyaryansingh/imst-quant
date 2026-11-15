@@ -248,8 +248,10 @@ class RiskDashboard:
         beta = self.calculate_beta()
 
         correlation = 0.0
-        if self.benchmark_returns is not None:
-            correlation = np.corrcoef(self.returns, self.benchmark_returns)[0, 1]
+        # Constant series make corrcoef NaN; keep 0.0 so the dashboard stays finite.
+        if (self.benchmark_returns is not None and np.ptp(self.returns) > 0
+                and np.ptp(self.benchmark_returns) > 0):
+            correlation = float(np.corrcoef(self.returns, self.benchmark_returns)[0, 1])
 
         concentration = self.calculate_concentration()
         tail_ratio = self.calculate_tail_ratio()

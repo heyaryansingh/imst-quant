@@ -470,6 +470,11 @@ def compute_sentiment_divergence(
     if len(sentiment_scores) < 2:
         return 0.0
 
+    # Constant series have no defined correlation (corrcoef gives NaN, which
+    # np.clip passes through); call that no divergence.
+    if np.ptp(sentiment_scores) == 0 or np.ptp(price_returns) == 0:
+        return 0.0
+
     # Correlation between sentiment and returns
     correlation = np.corrcoef(sentiment_scores, price_returns)[0, 1]
 
