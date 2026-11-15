@@ -5724,6 +5724,7 @@ def cmd_risk_metrics(args: argparse.Namespace) -> int:
     """
     from imst_quant.config.settings import Settings
     from imst_quant.utils.risk_metrics import calculate_all_metrics
+    import math
     import polars as pl
     import json as json_module
 
@@ -5765,7 +5766,9 @@ def cmd_risk_metrics(args: argparse.Namespace) -> int:
         )
 
         if args.json:
-            print(json_module.dumps(metrics, indent=2))
+            # inf (no losses) is not valid JSON; emit null instead.
+            print(json_module.dumps(
+                {k: (v if math.isfinite(v) else None) for k, v in metrics.items()}, indent=2))
         else:
             print("\n=== Portfolio Risk Metrics ===\n")
             print(f"Total Return:        {metrics['total_return']:>10.2%}")
@@ -5775,6 +5778,13 @@ def cmd_risk_metrics(args: argparse.Namespace) -> int:
             print(f"Sharpe Ratio:        {metrics['sharpe']:>10.3f}")
             print(f"Sortino Ratio:       {metrics['sortino']:>10.3f}")
             print(f"Calmar Ratio:        {metrics['calmar']:>10.3f}")
+            print(f"Burke Ratio:         {metrics['burke']:>10.3f}")
+            print()
+            print(f"Omega Ratio:         {metrics['omega']:>10.3f}")
+            print(f"Gain to Pain:        {metrics['gain_to_pain']:>10.3f}")
+            print(f"Upside Potential:    {metrics['upside_potential']:>10.3f}")
+            print(f"Tail Ratio (95/5):   {metrics['tail_ratio']:>10.3f}")
+            print(f"Rachev Ratio (5%):   {metrics['rachev']:>10.3f}")
             print()
             print(f"Max Drawdown:        {metrics['max_drawdown']:>10.2%}")
             print(f"VaR ({args.var_confidence:.0%}):        {metrics['var']:>10.2%}")

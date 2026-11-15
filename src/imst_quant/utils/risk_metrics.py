@@ -281,7 +281,9 @@ def calculate_all_metrics(
 
     Returns:
         Dictionary with keys: sharpe, sortino, max_drawdown, var, calmar,
-        total_return, annualized_return, volatility.
+        omega, gain_to_pain, burke, tail_ratio, rachev, upside_potential,
+        total_return, annualized_return, volatility. Ratios with no
+        downside (no losses / empty left tail) can be ``inf``.
 
     Example:
         >>> returns = pl.Series([0.01, -0.02, 0.015, -0.005, 0.02])
@@ -309,6 +311,12 @@ def calculate_all_metrics(
         "max_drawdown": max_drawdown(ret_series),
         "var": value_at_risk(ret_series, var_confidence),
         "calmar": calmar_ratio(ret_series, periods_per_year),
+        "omega": calculate_omega_ratio(ret_series),
+        "gain_to_pain": gain_to_pain_ratio(ret_series),
+        "burke": burke_ratio(ret_series, risk_free_rate, periods_per_year),
+        "tail_ratio": calculate_tail_ratio(ret_series),
+        "rachev": rachev_ratio(ret_series),
+        "upside_potential": upside_potential_ratio(ret_series),
         "total_return": total_return,
         "annualized_return": annualized_return,
         "volatility": volatility,
@@ -545,3 +553,76 @@ def burke_ratio(
         return 100.0 if annualized_excess > 0 else 0.0
 
     return float(annualized_excess / np.sqrt(sum_sq_drawdown))
+
+
+def rachev_ratio(
+    returns: Union[pl.Series, pl.DataFrame],
+    alpha: float = 0.05,
+    beta: float = 0.05,
+    return_col: str = "returns",
+) -> float:
+    """Calculate the Rachev ratio: expected tail gain over expected tail loss.
+
+    Mean of the best ``beta`` fraction of returns divided by the absolute
+    mean of the worst ``alpha`` fraction (a CVaR-to-CVaR ratio). Above 1
+    means the right tail is fatter than the left. Each tail holds at least
+    one observation.
+
+    Args:
+        returns: Series or DataFrame containing return data.
+        alpha: Left-tail fraction, 0 < alpha <= 1.
+        beta: Right-tail fraction, 0 < beta <= 1.
+        return_col: Column name if returns is a DataFrame.
+
+    Returns:
+        Rachev ratio. ``inf`` when the left tail mean is >= 0 and the right
+        tail mean is positive, 0.0 when there is no data or no upside.
+
+    Example:
+        >>> rachev_ratio(pl.Series([-0.04, -0.01, 0.0, 0.01, 0.02]), alpha=0.2, beta=0.2)
+        0.5
+    """
+    if not (0 < alpha <= 1 and 0 < beta <= 1):
+        raise ValueError(f"alpha and beta must be in (0, 1], got {alpha}, {beta}")
+    r = np.sort(_clean_returns(returns, return_col).to_numpy())
+    if r.size == 0:
+        return 0.0
+    left = r[: max(1, int(np.ceil(alpha * r.size)))].mean()
+    right = r[-max(1, int(np.ceil(beta * r.size))):].mean()
+    if left >= 0:
+        return float("inf") if right > 0 else 0.0
+    return float(max(right, 0.0) / -left)
+
+
+def upside_potential_ratio(
+    returns: Union[pl.Series, pl.DataFrame],
+    target: float = 0.0,
+    return_col: str = "returns",
+) -> float:
+    """Calculate the upside potential ratio (Sortino, van der Meer & Plantinga).
+
+    Mean upside above ``target`` (shortfalls count as 0) divided by the
+    downside deviation below it. Unlike Sortino the numerator ignores
+    losses, so it rewards how far gains reach rather than the average.
+
+    Args:
+        returns: Series or DataFrame containing return data.
+        target: Minimum acceptable return per period.
+        return_col: Column name if returns is a DataFrame.
+
+    Returns:
+        Upside potential ratio; ``inf`` with upside but no downside, 0.0
+        with no upside.
+
+    Example:
+        >>> upside_potential_ratio(pl.Series([0.02, -0.02, 0.02, -0.02]))
+        0.7071067811865476
+    """
+    r = _clean_returns(returns, return_col).to_numpy()
+    if r.size == 0:
+        return 0.0
+    upside = np.maximum(r - target, 0.0).mean()
+    dd = downside_deviation(r, target)
+    if dd == 0:
+        return float("inf") if upside > 0 else 0.0
+    return float(upside / dd)
