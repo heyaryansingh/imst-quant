@@ -1633,3 +1633,135 @@ def indicator_confluence(df: pl.DataFrame, chop_threshold: float = 61.8) -> dict
     total = sum(weights[k] for k in cast)
     score = sum(weights[k] * v for k, v in cast.items()) / total if total else 0.0
     return {"score": score, "votes": votes, "chop": chop, "choppy": choppy, "n_votes": len(cast)}
+
+
+def ultimate_oscillator(
+    df: pl.DataFrame,
+    high_col: str = "high",
+    low_col: str = "low",
+    close_col: str = "close",
+    periods: tuple = (7, 14, 28),
+) -> pl.DataFrame:
+    """Ultimate Oscillator (Williams): buying pressure over true range on three horizons, 0-100.
+
+    ``bp = close - min(low, prev_close)``, ``tr = max(high, prev_close) - min(low, prev_close)``,
+    ``avg_k = sum(bp, k) / sum(tr, k)`` and ``uo = 100 * (4*avg_s + 2*avg_m + avg_l) / 7``.
+    A window with zero total range reads 0.5 (neutral) instead of dividing by zero.
+
+    Args:
+        df: DataFrame with high/low/close, oldest first, no null/NaN values.
+        high_col, low_col, close_col: Column names.
+        periods: (short, medium, long) lookbacks, each >= 1.
+
+    Returns:
+        DataFrame with added ``uo``; null until the long window has a previous close.
+
+    Example:
+        >>> df = pl.DataFrame({"high": [2.0] * 4, "low": [1.0] * 4, "close": [2.0] * 4})
+        >>> ultimate_oscillator(df, periods=(1, 2, 3))["uo"].to_list()
+        [None, None, None, 100.0]
+    """
+    if len(periods) != 3 or min(periods) < 1:
+        raise ValueError(f"periods must be three lookbacks >= 1, got {periods}")
+
+    prev = pl.col(close_col).shift(1)
+    lo = pl.min_horizontal(pl.col(low_col), prev)
+    bp = pl.col(close_col) - lo
+    tr = pl.max_horizontal(pl.col(high_col), prev) - lo
+    # Row 0 has no prev close; null it so windows only count real bars.
+    bp = pl.when(prev.is_null()).then(None).otherwise(bp)
+    tr = pl.when(prev.is_null()).then(None).otherwise(tr)
+
+    def avg(k: int) -> pl.Expr:
+        s_tr = tr.rolling_sum(k)
+        return pl.when(s_tr > 0).then(bp.rolling_sum(k) / s_tr).otherwise(
+            pl.when(s_tr.is_null()).then(None).otherwise(0.5)
+        )
+
+    s, m, l = periods
+    return df.with_columns((100 * (4 * avg(s) + 2 * avg(m) + avg(l)) / 7).alias("uo"))
+
+
+def fisher_transform(
+    df: pl.DataFrame,
+    high_col: str = "high",
+    low_col: str = "low",
+    period: int = 10,
+) -> pl.DataFrame:
+    """Ehlers Fisher Transform of the median price, plus its one-bar trigger.
+
+    The median price ``(high + low) / 2`` is scaled to [-1, 1] within its
+    ``period`` range, smoothed (``v = 0.66 * x + 0.67 * v_prev``, clipped to
+    +/-0.999) and mapped through ``0.5 * ln((1 + v) / (1 - v))`` with half of
+    the prior value carried forward. The result is near-Gaussian, so turns at
+    extremes (|fisher| > ~1.5) are sharp reversal cues. ``fisher_trigger`` is
+    the previous bar's value; fisher crossing it marks the turn. A flat window
+    scales to the midpoint (0).
+
+    Args:
+        df: DataFrame with high/low, oldest first, no null/NaN values.
+        high_col, low_col: Column names.
+        period: Range lookback (>= 2).
+
+    Returns:
+        DataFrame with added ``fisher`` and ``fisher_trigger``; null during warmup.
+
+    Example:
+        >>> df = pl.DataFrame({"high": [2.0] * 4, "low": [1.0] * 4})
+        >>> fisher_transform(df, period=2)["fisher"].to_list()
+        [None, 0.0, 0.0, 0.0]
+    """
+    if period < 2:
+        raise ValueError(f"period must be >= 2, got {period}")
+
+    hi = df[high_col].cast(pl.Float64).to_numpy()
+    lo = df[low_col].cast(pl.Float64).to_numpy()
+    mid = (hi + lo) / 2
+    n = len(mid)
+    fish = np.full(n, np.nan)
+    v_prev = f_prev = 0.0
+    for i in range(period - 1, n):
+        win = mid[i - period + 1:i + 1]
+        rng = win.max() - win.min()
+        x = (mid[i] - win.min()) / rng - 0.5 if rng > 0 else 0.0
+        v = float(np.clip(0.66 * x + 0.67 * v_prev, -0.999, 0.999))
+        f_prev = fish[i] = 0.5 * np.log((1 + v) / (1 - v)) + 0.5 * f_prev
+        v_prev = v
+    fs = pl.Series("fisher", fish).fill_nan(None)
+    return df.with_columns(fs, fs.shift(1).alias("fisher_trigger"))
+
+
+def ppo(
+    df: pl.DataFrame,
+    close_col: str = "close",
+    fast: int = 12,
+    slow: int = 26,
+    signal: int = 9,
+) -> pl.DataFrame:
+    """Percentage Price Oscillator: MACD expressed as percent of the slow EMA.
+
+    ``ppo = 100 * (EMA(fast) - EMA(slow)) / EMA(slow)``, ``ppo_signal = EMA(ppo, signal)``,
+    ``ppo_hist = ppo - ppo_signal``. Unlike MACD it is scale-free, so values
+    compare across tickers and across price levels of one ticker.
+
+    Args:
+        df: DataFrame with a close column, oldest first, prices > 0.
+        close_col: Close column name.
+        fast, slow: EMA spans with 1 <= fast < slow.
+        signal: Signal EMA span (>= 1).
+
+    Returns:
+        DataFrame with added ``ppo``, ``ppo_signal`` and ``ppo_hist``.
+
+    Example:
+        >>> ppo(pl.DataFrame({"close": [10.0, 10, 10]}), fast=2, slow=3, signal=2)["ppo"].to_list()
+        [0.0, 0.0, 0.0]
+    """
+    if not 1 <= fast < slow or signal < 1:
+        raise ValueError(f"need 1 <= fast < slow and signal >= 1, got {fast}, {slow}, {signal}")
+
+    c = pl.col(close_col).cast(pl.Float64)
+    slow_ema = c.ewm_mean(span=slow, adjust=False)
+    out = df.with_columns((100 * (c.ewm_mean(span=fast, adjust=False) - slow_ema) / slow_ema).alias("ppo"))
+    out = out.with_columns(pl.col("ppo").ewm_mean(span=signal, adjust=False).alias("ppo_signal"))
+    return out.with_columns((pl.col("ppo") - pl.col("ppo_signal")).alias("ppo_hist"))

@@ -2492,6 +2492,45 @@ Examples:
     trix_parser.add_argument("--signal", type=int, default=9, help="Signal EMA span (default: 9)")
     trix_parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
+    # --- uo subcommand ---
+    uo_parser = subparsers.add_parser(
+        "uo",
+        help="Ultimate Oscillator (7/14/28 buying pressure): zone, direction, time in extremes",
+    )
+    uo_parser.add_argument("--data", required=True, help="Parquet file with high/low/close columns")
+    uo_parser.add_argument("--high-col", default="high", help="High column (default: high)")
+    uo_parser.add_argument("--low-col", default="low", help="Low column (default: low)")
+    uo_parser.add_argument("--close-col", default="close", help="Close column (default: close)")
+    uo_parser.add_argument("--periods", type=int, nargs=3, default=[7, 14, 28],
+                           metavar=("SHORT", "MED", "LONG"), help="Lookbacks (default: 7 14 28)")
+    uo_parser.add_argument("--overbought", type=float, default=70.0, help="Overbought level (default: 70)")
+    uo_parser.add_argument("--oversold", type=float, default=30.0, help="Oversold level (default: 30)")
+    uo_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
+    # --- fisher subcommand ---
+    fisher_parser = subparsers.add_parser(
+        "fisher",
+        help="Ehlers Fisher Transform: extreme readings and latest trigger-line turn",
+    )
+    fisher_parser.add_argument("--data", required=True, help="Parquet file with high/low columns")
+    fisher_parser.add_argument("--high-col", default="high", help="High column (default: high)")
+    fisher_parser.add_argument("--low-col", default="low", help="Low column (default: low)")
+    fisher_parser.add_argument("--period", type=int, default=10, help="Range lookback (default: 10)")
+    fisher_parser.add_argument("--extreme", type=float, default=1.5, help="|fisher| extreme level (default: 1.5)")
+    fisher_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
+    # --- ppo subcommand ---
+    ppo_parser = subparsers.add_parser(
+        "ppo",
+        help="Percentage Price Oscillator (scale-free MACD): value, signal, histogram, crosses",
+    )
+    ppo_parser.add_argument("--data", required=True, help="Parquet file with a close column")
+    ppo_parser.add_argument("--close-col", default="close", help="Close column (default: close)")
+    ppo_parser.add_argument("--fast", type=int, default=12, help="Fast EMA span (default: 12)")
+    ppo_parser.add_argument("--slow", type=int, default=26, help="Slow EMA span (default: 26)")
+    ppo_parser.add_argument("--signal", type=int, default=9, help="Signal EMA span (default: 9)")
+    ppo_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
     # --- confluence subcommand ---
     conf_parser = subparsers.add_parser(
         "confluence",
@@ -11138,6 +11177,179 @@ def cmd_trix(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_uo(args: argparse.Namespace) -> int:
+    """Report the Ultimate Oscillator on the last bar: zone, direction, time in extremes.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    from imst_quant.utils.technical_indicators import ultimate_oscillator
+
+    s, m, l = args.periods
+    if not 1 <= s < m < l:
+        print("Error: --periods must satisfy 1 <= SHORT < MED < LONG")
+        return 1
+    if not 0 <= args.oversold < args.overbought <= 100:
+        print("Error: need 0 <= --oversold < --overbought <= 100")
+        return 1
+    df = _load_clean_ohlc(args, [args.high_col, args.low_col, args.close_col], l + 2)
+    if df is None:
+        return 1
+
+    out = ultimate_oscillator(df, high_col=args.high_col, low_col=args.low_col,
+                              close_col=args.close_col, periods=(s, m, l))
+    vals = out["uo"].drop_nulls().to_list()
+
+    def zone(v: float) -> str:
+        return "overbought" if v >= args.overbought else "oversold" if v <= args.oversold else "neutral"
+
+    change = vals[-1] - vals[-2]
+    result = {
+        "n_bars": df.height,
+        "periods": [s, m, l],
+        "uo": vals[-1],
+        "zone": zone(vals[-1]),
+        "bars_in_zone": _streak(vals, zone),
+        "change": change,
+        "direction": "rising" if change > 0 else "falling" if change < 0 else "flat",
+        "pct_overbought": sum(zone(v) == "overbought" for v in vals) / len(vals),
+        "pct_oversold": sum(zone(v) == "oversold" for v in vals) / len(vals),
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    print("\n=== Ultimate Oscillator ===\n")
+    print(f"Bars: {df.height}   Periods: {s}/{m}/{l}")
+    print(f"UO: {vals[-1]:.1f} ({result['direction']}, {change:+.1f})   "
+          f"Zone: {result['zone'].upper()} ({result['bars_in_zone']} bars)")
+    print(f"Time overbought: {result['pct_overbought']:.0%}   oversold: {result['pct_oversold']:.0%}")
+    print()
+    return 0
+
+
+def cmd_fisher(args: argparse.Namespace) -> int:
+    """Report the Fisher Transform, whether it is at an extreme, and its latest trigger cross.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    from imst_quant.utils.technical_indicators import fisher_transform
+
+    if args.period < 2:
+        print("Error: --period must be >= 2")
+        return 1
+    if args.extreme <= 0:
+        print("Error: --extreme must be > 0")
+        return 1
+    df = _load_clean_ohlc(args, [args.high_col, args.low_col], args.period + 2)
+    if df is None:
+        return 1
+
+    out = fisher_transform(df, high_col=args.high_col, low_col=args.low_col,
+                           period=args.period).drop_nulls("fisher_trigger")
+    fish, trig = out["fisher"].to_list(), out["fisher_trigger"].to_list()
+    cross_dir, cross_ago, _ = _last_cross([f - t for f, t in zip(fish, trig)])
+    f = fish[-1]
+    state = "extreme_high" if f >= args.extreme else "extreme_low" if f <= -args.extreme else "normal"
+    # trigger[-1] is fisher[-2]: a fresh turn that starts from an extreme is the reversal cue.
+    if cross_ago == 0 and cross_dir == "down" and trig[-1] >= args.extreme:
+        reversal = "bearish"
+    elif cross_ago == 0 and cross_dir == "up" and trig[-1] <= -args.extreme:
+        reversal = "bullish"
+    else:
+        reversal = None
+    result = {
+        "n_bars": df.height,
+        "period": args.period,
+        "fisher": f,
+        "trigger": trig[-1],
+        "state": state,
+        "direction": "rising" if f > trig[-1] else "falling" if f < trig[-1] else "flat",
+        "last_turn": cross_dir,
+        "bars_since_turn": cross_ago,
+        "reversal_signal": reversal,
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    turn = f"{cross_dir.upper()} {cross_ago} bars ago" if cross_dir else "none"
+    print("\n=== Fisher Transform ===\n")
+    print(f"Bars: {df.height}   Period: {args.period}   Extreme: +/-{args.extreme}")
+    print(f"Fisher: {f:+.3f}   Trigger: {trig[-1]:+.3f}   ({result['direction']})   "
+          f"State: {state.upper()}")
+    print(f"Last turn: {turn}" + (f"   >> {reversal.upper()} REVERSAL" if reversal else ""))
+    print()
+    return 0
+
+
+def cmd_ppo(args: argparse.Namespace) -> int:
+    """Report the Percentage Price Oscillator, its signal and histogram, and latest crosses.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    from imst_quant.utils.technical_indicators import ppo
+
+    if not 1 <= args.fast < args.slow or args.signal < 1:
+        print("Error: need 1 <= --fast < --slow and --signal >= 1")
+        return 1
+    df = _load_clean_ohlc(args, [args.close_col], args.slow + 1)
+    if df is None:
+        return 1
+
+    out = ppo(df, close_col=args.close_col, fast=args.fast, slow=args.slow, signal=args.signal)
+    p, sig, hist = out["ppo"].to_list(), out["ppo_signal"].to_list(), out["ppo_hist"].to_list()
+    zero_dir, zero_ago, _ = _last_cross(p)
+    sig_dir, sig_ago, _ = _last_cross(hist)
+    result = {
+        "n_bars": df.height,
+        "ppo": p[-1],
+        "signal": sig[-1],
+        "histogram": hist[-1],
+        "momentum": "bullish" if p[-1] > 0 else "bearish" if p[-1] < 0 else "flat",
+        "histogram_trend": "expanding" if abs(hist[-1]) > abs(hist[-2]) else "contracting",
+        "last_zero_cross": zero_dir,
+        "bars_since_zero_cross": zero_ago,
+        "last_signal_cross": sig_dir,
+        "bars_since_signal_cross": sig_ago,
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    def since(d, ago):
+        return f"{d.upper()} {ago} bars ago" if d else "none"
+
+    print("\n=== Percentage Price Oscillator ===\n")
+    print(f"Bars: {df.height}   Fast/Slow/Signal: {args.fast}/{args.slow}/{args.signal}")
+    print(f"PPO: {p[-1]:+.3f}%   Signal: {sig[-1]:+.3f}%   Histogram: {hist[-1]:+.3f} "
+          f"({result['histogram_trend']})")
+    print(f"Momentum: {result['momentum'].upper()}   Zero cross: {since(zero_dir, zero_ago)}   "
+          f"Signal cross: {since(sig_dir, sig_ago)}")
+    print()
+    return 0
+
+
 def cmd_confluence(args: argparse.Namespace) -> int:
     """Report a chop-gated multi-indicator vote on the latest bar.
 
@@ -12723,6 +12935,9 @@ COMMANDS = {
         "crsi": cmd_crsi,
         "stochrsi": cmd_stochrsi,
         "trix": cmd_trix,
+        "uo": cmd_uo,
+        "fisher": cmd_fisher,
+        "ppo": cmd_ppo,
         "confluence": cmd_confluence,
 }
 
