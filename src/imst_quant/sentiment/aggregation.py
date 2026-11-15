@@ -78,7 +78,13 @@ def aggregate_daily_sentiment(
     """
     influence_scores = influence_scores or {}
     date_str = target_date.isoformat() if isinstance(target_date, date) else str(target_date)
-    day_posts = posts_df.filter(pl.col("date") == date_str)
+    # Compare on the YYYY-MM-DD prefix so Date, Datetime and string columns all
+    # work (a Date column compared to a str raised InvalidOperationError), and
+    # drop null/NaN polarities, which crashed float() or poisoned the average.
+    day_posts = posts_df.filter(
+        (pl.col("date").cast(pl.Utf8).str.slice(0, 10) == date_str[:10])
+        & pl.col("polarity").cast(pl.Float64, strict=False).is_finite()
+    )
 
     if len(day_posts) == 0:
         return {}
@@ -219,7 +225,10 @@ def calculate_sentiment_z_score(
     ])
 
     df = df.with_columns([
-        ((pl.col(sentiment_col) - pl.col("_rolling_mean")) / pl.col("_rolling_std"))
+        # Flat window: no spread to normalise by, so null rather than +/-inf/NaN.
+        pl.when(pl.col("_rolling_std") > 0)
+        .then((pl.col(sentiment_col) - pl.col("_rolling_mean")) / pl.col("_rolling_std"))
+        .otherwise(None)
         .alias("sentiment_z_score")
     ]).drop(["_rolling_mean", "_rolling_std"])
 
@@ -313,9 +322,10 @@ def calculate_sentiment_divergence(
         how="inner"
     )
 
-    # Calculate divergence: positive when sentiment and returns disagree
+    # Divergence: 1 only when sentiment and returns point in opposite
+    # directions; a flat (0) side is not a disagreement.
     merged = merged.with_columns([
-        (pl.col(sentiment_col).sign() != pl.col(return_col).sign())
+        (pl.col(sentiment_col).sign() * pl.col(return_col).sign() < 0)
         .cast(pl.Int8)
         .alias("sentiment_return_divergence")
     ])
