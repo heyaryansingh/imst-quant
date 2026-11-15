@@ -168,7 +168,8 @@ class BenchmarkAnalyzer:
         excess = self.strategy_returns - self.benchmark_returns
         active_return = float(np.mean(excess)) * self.ann_factor
         te = self.tracking_error
-        return active_return / te if te > 0 else 0.0
+        # ponytail: 1e-12 floor absorbs float noise from a constant active return
+        return active_return / te if te > 1e-12 else 0.0
 
     @property
     def correlation(self) -> float:
@@ -178,6 +179,10 @@ class BenchmarkAnalyzer:
             Pearson correlation coefficient.
         """
         if len(self.strategy_returns) < 2:
+            return 0.0
+        # Constant series have no defined correlation; report 0 rather than NaN
+        # (NaN made `benchmark --json` print an invalid JSON token).
+        if np.ptp(self.strategy_returns) == 0 or np.ptp(self.benchmark_returns) == 0:
             return 0.0
         return float(np.corrcoef(self.strategy_returns, self.benchmark_returns)[0, 1])
 

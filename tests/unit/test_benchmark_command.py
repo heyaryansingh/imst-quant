@@ -42,3 +42,15 @@ def test_benchmark_without_return_column(tmp_path, capsys):
     code, out = _run(capsys, tmp_path / "s.parquet", "--benchmark", str(tmp_path / "b.parquet"))
     assert code == 1
     assert "Error" in out
+
+
+def test_constant_strategy_correlation_is_zero_not_nan():
+    import warnings
+
+    from imst_quant.utils.benchmark import BenchmarkAnalyzer
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        a = BenchmarkAnalyzer([0.01] * 6, [0.01, 0.02, -0.01, 0.0, 0.03, -0.02])
+        assert a.correlation == 0.0
+        assert a.calculate_all_metrics().correlation == 0.0
