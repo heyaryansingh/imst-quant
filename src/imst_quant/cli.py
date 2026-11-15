@@ -2400,6 +2400,32 @@ Examples:
     chop_parser.add_argument("--trending", type=float, default=38.2, help="Trending below this (default: 38.2)")
     chop_parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
+    # --- kama subcommand ---
+    kama_parser = subparsers.add_parser(
+        "kama",
+        help="Kaufman Efficiency Ratio + adaptive moving average: trend efficiency, price vs KAMA, crosses",
+    )
+    kama_parser.add_argument("--data", required=True, help="Parquet file with a close column")
+    kama_parser.add_argument("--close-col", default="close", help="Close column (default: close)")
+    kama_parser.add_argument("--period", type=int, default=10, help="Efficiency lookback (default: 10)")
+    kama_parser.add_argument("--fast", type=int, default=2, help="Fastest EMA span (default: 2)")
+    kama_parser.add_argument("--slow", type=int, default=30, help="Slowest EMA span (default: 30)")
+    kama_parser.add_argument("--efficient", type=float, default=0.3,
+                             help="ER at or above this reads as an efficient trend (default: 0.3)")
+    kama_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
+    # --- elder subcommand ---
+    elder_parser = subparsers.add_parser(
+        "elder",
+        help="Elder Ray bull/bear power around an EMA, with Elder's buy/sell setups",
+    )
+    elder_parser.add_argument("--data", required=True, help="Parquet file with high/low/close columns")
+    elder_parser.add_argument("--high-col", default="high", help="High column (default: high)")
+    elder_parser.add_argument("--low-col", default="low", help="Low column (default: low)")
+    elder_parser.add_argument("--close-col", default="close", help="Close column (default: close)")
+    elder_parser.add_argument("--period", type=int, default=13, help="EMA span (default: 13)")
+    elder_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
     # --- confluence subcommand ---
     conf_parser = subparsers.add_parser(
         "confluence",
@@ -10531,6 +10557,147 @@ def cmd_chop(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_kama(args: argparse.Namespace) -> int:
+    """Report the Kaufman Efficiency Ratio, KAMA, price position vs KAMA and crosses.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    from imst_quant.utils.technical_indicators import kaufman_efficiency
+
+    if args.period < 1:
+        print("Error: --period must be >= 1")
+        return 1
+    if not 1 <= args.fast < args.slow:
+        print("Error: need 1 <= --fast < --slow")
+        return 1
+    if not 0 < args.efficient <= 1:
+        print("Error: --efficient must be in (0, 1]")
+        return 1
+    df = _load_clean_ohlc(args, [args.close_col], args.period + 2)
+    if df is None:
+        return 1
+
+    out = kaufman_efficiency(
+        df, close_col=args.close_col, period=args.period, fast=args.fast, slow=args.slow,
+    ).drop_nulls("kama")
+    ers, kamas = out["er"].to_list(), out["kama"].to_list()
+    closes = out[args.close_col].to_list()
+    gaps = [c - k for c, k in zip(closes, kamas)]
+
+    def side(g: float) -> str:
+        return "above" if g > 0 else "below" if g < 0 else "at"
+
+    def regime(e: float) -> str:
+        return "efficient" if e >= args.efficient else "noisy"
+
+    crosses, prev = [], 0
+    for i, g in enumerate(gaps):
+        sgn = (g > 0) - (g < 0)
+        if sgn:
+            if prev and sgn != prev:
+                crosses.append(i)
+            prev = sgn
+    slope = kamas[-1] - kamas[-2]
+    result = {
+        "n_bars": df.height,
+        "period": args.period,
+        "er": ers[-1],
+        "regime": regime(ers[-1]),
+        "bars_in_regime": _streak(ers, regime),
+        "kama": kamas[-1],
+        "kama_slope": slope,
+        "kama_direction": "up" if slope > 0 else "down" if slope < 0 else "flat",
+        "close": closes[-1],
+        "price_vs_kama": side(gaps[-1]),
+        "distance_pct": gaps[-1] / kamas[-1],
+        "bars_since_cross": (len(gaps) - 1 - crosses[-1]) if crosses else None,
+        "crosses": len(crosses),
+        "pct_efficient": sum(e >= args.efficient for e in ers) / len(ers),
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    print("\n=== Kaufman Adaptive Moving Average ===\n")
+    print(f"Bars: {df.height}   Period: {args.period}   Fast/Slow: {args.fast}/{args.slow}")
+    print(f"ER: {ers[-1]:.3f}   Regime: {result['regime'].upper()} ({result['bars_in_regime']} bars)   "
+          f"Time efficient: {result['pct_efficient']:.0%}")
+    since = f"{result['bars_since_cross']} bars ago" if crosses else "none"
+    print(f"KAMA: {kamas[-1]:.4f} ({result['kama_direction']})   Close {result['price_vs_kama']} KAMA by "
+          f"{result['distance_pct']:+.2%}   Last cross: {since}")
+    print()
+    return 0
+
+
+def cmd_elder(args: argparse.Namespace) -> int:
+    """Report Elder Ray bull/bear power, EMA trend and Elder's buy/sell setups.
+
+    Setups (Elder): buy when the EMA is rising and bear power is negative but
+    rising; sell when the EMA is falling and bull power is positive but falling.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    from imst_quant.utils.technical_indicators import elder_ray
+
+    if args.period < 1:
+        print("Error: --period must be >= 1")
+        return 1
+    df = _load_clean_ohlc(args, [args.high_col, args.low_col, args.close_col], args.period + 2)
+    if df is None:
+        return 1
+
+    out = elder_ray(
+        df, high_col=args.high_col, low_col=args.low_col, close_col=args.close_col, period=args.period,
+    ).drop_nulls("ema_slope")
+    bull, bear = out["bull_power"].to_list(), out["bear_power"].to_list()
+    slope = out["ema_slope"][-1]
+    if slope > 0 and bear[-1] < 0 and bear[-1] > bear[-2]:
+        setup = "buy"
+    elif slope < 0 and bull[-1] > 0 and bull[-1] < bull[-2]:
+        setup = "sell"
+    else:
+        setup = "none"
+    result = {
+        "n_bars": df.height,
+        "period": args.period,
+        "ema": out["ema"][-1],
+        "ema_trend": "rising" if slope > 0 else "falling" if slope < 0 else "flat",
+        "bull_power": bull[-1],
+        "bear_power": bear[-1],
+        "bull_power_change": bull[-1] - bull[-2],
+        "bear_power_change": bear[-1] - bear[-2],
+        "setup": setup,
+        "pct_bull_positive": sum(b > 0 for b in bull) / len(bull),
+        "pct_bear_negative": sum(b < 0 for b in bear) / len(bear),
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    print("\n=== Elder Ray ===\n")
+    print(f"Bars: {df.height}   EMA({args.period}): {result['ema']:.4f} ({result['ema_trend']})")
+    print(f"Bull power: {bull[-1]:+.4f} ({result['bull_power_change']:+.4f})   "
+          f"Bear power: {bear[-1]:+.4f} ({result['bear_power_change']:+.4f})")
+    print(f"Setup: {setup.upper()}   Bull>0: {result['pct_bull_positive']:.0%}   "
+          f"Bear<0: {result['pct_bear_negative']:.0%}")
+    print()
+    return 0
+
+
 def cmd_confluence(args: argparse.Namespace) -> int:
     """Report a chop-gated multi-indicator vote on the latest bar.
 
@@ -12109,6 +12276,8 @@ COMMANDS = {
         "ichimoku": cmd_ichimoku,
         "cmf": cmd_cmf,
         "chop": cmd_chop,
+        "kama": cmd_kama,
+        "elder": cmd_elder,
         "confluence": cmd_confluence,
 }
 

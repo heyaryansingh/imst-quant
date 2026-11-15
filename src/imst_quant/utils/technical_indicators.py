@@ -1277,6 +1277,104 @@ def choppiness_index(
     return df.with_columns(chop.cast(pl.Float64).alias("chop"))
 
 
+def kaufman_efficiency(
+    df: pl.DataFrame,
+    close_col: str = "close",
+    period: int = 10,
+    fast: int = 2,
+    slow: int = 30,
+) -> pl.DataFrame:
+    """Kaufman Efficiency Ratio and Adaptive Moving Average (KAMA).
+
+    ``ER = |close - close[period ago]| / sum(|close - prev close|, period)``,
+    in [0, 1]: 1 = every bar moved the same way, 0 = pure noise. KAMA's
+    smoothing constant ``sc = (ER * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1))**2``
+    so the average hugs price in clean trends and freezes in chop:
+    ``kama = kama_prev + sc * (close - kama_prev)``, seeded with the close on
+    the first bar where ER exists.
+
+    Args:
+        df: DataFrame with a close column, oldest first, no null/NaN values.
+        close_col: Close column name.
+        period: ER lookback (>= 1).
+        fast, slow: Fastest/slowest EMA spans (1 <= fast < slow).
+
+    Returns:
+        DataFrame with added ``er`` and ``kama``; the first ``period`` rows are
+        null. A window with no movement at all has ER 0 (KAMA then barely moves).
+
+    Example:
+        >>> df = pl.DataFrame({"close": [1.0, 2, 3, 4]})
+        >>> out = kaufman_efficiency(df, period=2)
+        >>> out["er"].to_list()
+        [None, None, 1.0, 1.0]
+        >>> out["kama"].to_list()[2]
+        3.0
+    """
+    if period < 1:
+        raise ValueError(f"period must be >= 1, got {period}")
+    if not 1 <= fast < slow:
+        raise ValueError(f"need 1 <= fast < slow, got fast={fast}, slow={slow}")
+
+    c = pl.col(close_col)
+    noise = c.diff().abs().rolling_sum(window_size=period)
+    er = pl.when(noise > 0).then((c - c.shift(period)).abs() / noise).otherwise(
+        pl.when(noise.is_not_null()).then(0.0)
+    )
+    out = df.with_columns(er.cast(pl.Float64).alias("er"))
+
+    fast_sc, slow_sc = 2 / (fast + 1), 2 / (slow + 1)
+    closes = out[close_col].cast(pl.Float64).to_numpy()
+    ers = out["er"].to_numpy()
+    kama = np.full(len(closes), np.nan)
+    if len(closes) > period:
+        kama[period] = closes[period]
+        for i in range(period + 1, len(closes)):
+            sc = (ers[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+            kama[i] = kama[i - 1] + sc * (closes[i] - kama[i - 1])
+    return out.with_columns(pl.Series("kama", kama).fill_nan(None))
+
+
+def elder_ray(
+    df: pl.DataFrame,
+    high_col: str = "high",
+    low_col: str = "low",
+    close_col: str = "close",
+    period: int = 13,
+) -> pl.DataFrame:
+    """Elder Ray: bull and bear power around an EMA of the close.
+
+    ``bull_power = high - EMA(close, period)`` (how far buyers pushed above
+    value) and ``bear_power = low - EMA(close, period)`` (how far sellers
+    pushed below it). Also adds ``ema`` and its one-bar slope ``ema_slope``.
+
+    Args:
+        df: OHLC DataFrame, oldest first, no null/NaN prices.
+        high_col, low_col, close_col: Column names.
+        period: EMA span (>= 1).
+
+    Returns:
+        DataFrame with added ``ema``, ``ema_slope``, ``bull_power``,
+        ``bear_power``; the first ``period - 1`` rows are null (EMA warm-up).
+
+    Example:
+        >>> df = pl.DataFrame({"high": [3.0, 4], "low": [1.0, 2], "close": [2.0, 3]})
+        >>> out = elder_ray(df, period=1)
+        >>> out["bull_power"].to_list(), out["bear_power"].to_list()
+        ([1.0, 1.0], [-1.0, -1.0])
+    """
+    if period < 1:
+        raise ValueError(f"period must be >= 1, got {period}")
+
+    ema = pl.col(close_col).ewm_mean(span=period, adjust=False, min_samples=period)
+    out = df.with_columns(ema.cast(pl.Float64).alias("ema"))
+    return out.with_columns(
+        pl.col("ema").diff().alias("ema_slope"),
+        (pl.col(high_col) - pl.col("ema")).alias("bull_power"),
+        (pl.col(low_col) - pl.col("ema")).alias("bear_power"),
+    )
+
+
 def indicator_confluence(df: pl.DataFrame, chop_threshold: float = 61.8) -> dict:
     """Combine trend, momentum and money-flow indicators into one vote on the last bar.
 
