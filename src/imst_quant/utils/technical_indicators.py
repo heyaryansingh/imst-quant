@@ -1506,6 +1506,67 @@ def trix(
     )
 
 
+def connors_rsi(
+    df: pl.DataFrame,
+    close_col: str = "close",
+    rsi_period: int = 3,
+    streak_period: int = 2,
+    rank_period: int = 100,
+) -> pl.DataFrame:
+    """Connors RSI: mean of price RSI, up/down-streak RSI and return percent rank, 0-100.
+
+    - ``crsi_rsi``: RSI of close over ``rsi_period``.
+    - ``crsi_streak``: signed run length of consecutive up (+) / down (-) closes
+      (an unchanged close resets it to 0), and its RSI over ``streak_period``.
+    - ``crsi_rank``: percent of the previous ``rank_period`` one-bar returns
+      strictly below today's.
+
+    ``crsi = (rsi + streak_rsi + rank) / 3``. Built for short-term mean
+    reversion: low readings (< 10) are oversold, high (> 90) overbought.
+
+    Args:
+        df: DataFrame with a close column, oldest first, no null/NaN values, prices > 0.
+        close_col: Close column name.
+        rsi_period, streak_period, rank_period: Lookbacks (>= 1).
+
+    Returns:
+        DataFrame with added ``crsi_streak`` and ``crsi``; ``crsi`` is null
+        until ``rank_period`` past returns exist.
+
+    Example:
+        >>> df = pl.DataFrame({"close": [10.0, 11, 12, 12, 11]})
+        >>> connors_rsi(df, rank_period=2)["crsi_streak"].to_list()
+        [0, 1, 2, 0, -1]
+    """
+    for name, v in (("rsi_period", rsi_period), ("streak_period", streak_period),
+                    ("rank_period", rank_period)):
+        if v < 1:
+            raise ValueError(f"{name} must be >= 1, got {v}")
+
+    closes = df[close_col].cast(pl.Float64).to_numpy()
+    n = len(closes)
+    streak = np.zeros(n, dtype=np.int64)
+    for i in range(1, n):
+        if closes[i] > closes[i - 1]:
+            streak[i] = streak[i - 1] + 1 if streak[i - 1] > 0 else 1
+        elif closes[i] < closes[i - 1]:
+            streak[i] = streak[i - 1] - 1 if streak[i - 1] < 0 else -1
+    rets = np.full(n, np.nan)
+    rets[1:] = closes[1:] / closes[:-1] - 1
+    rank = np.full(n, np.nan)
+    for i in range(rank_period + 1, n):
+        rank[i] = 100.0 * np.mean(rets[i - rank_period:i] < rets[i])
+
+    price_rsi = rsi(pl.DataFrame({"c": closes}), price_col="c", period=rsi_period)["rsi"].to_numpy()
+    streak_rsi = rsi(pl.DataFrame({"c": streak.astype(float)}), price_col="c",
+                     period=streak_period)["rsi"].to_numpy()
+    crsi = (price_rsi + streak_rsi + rank) / 3
+    return df.with_columns(
+        pl.Series("crsi_streak", streak),
+        pl.Series("crsi", crsi).fill_nan(None),
+    )
+
+
 def indicator_confluence(df: pl.DataFrame, chop_threshold: float = 61.8) -> dict:
     """Combine trend, momentum and money-flow indicators into one vote on the last bar.
 

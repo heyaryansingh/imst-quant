@@ -2452,6 +2452,20 @@ Examples:
                                 help="Bars of forward return to score each divergence (default: 5)")
     sentdiv_parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
+    # --- crsi subcommand ---
+    crsi_parser = subparsers.add_parser(
+        "crsi",
+        help="Connors RSI (price RSI + streak RSI + return rank): mean-reversion zone and streak",
+    )
+    crsi_parser.add_argument("--data", required=True, help="Parquet file with a close column")
+    crsi_parser.add_argument("--close-col", default="close", help="Close column (default: close)")
+    crsi_parser.add_argument("--rsi-period", type=int, default=3, help="Price RSI lookback (default: 3)")
+    crsi_parser.add_argument("--streak-period", type=int, default=2, help="Streak RSI lookback (default: 2)")
+    crsi_parser.add_argument("--rank-period", type=int, default=100, help="Return percent-rank lookback (default: 100)")
+    crsi_parser.add_argument("--overbought", type=float, default=90.0, help="Overbought level (default: 90)")
+    crsi_parser.add_argument("--oversold", type=float, default=10.0, help="Oversold level (default: 10)")
+    crsi_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
     # --- stochrsi subcommand ---
     srsi_parser = subparsers.add_parser(
         "stochrsi",
@@ -10938,6 +10952,63 @@ def cmd_sentdiv(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_crsi(args: argparse.Namespace) -> int:
+    """Report Connors RSI and its components on the last bar.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    from imst_quant.utils.technical_indicators import connors_rsi
+
+    if min(args.rsi_period, args.streak_period, args.rank_period) < 1:
+        print("Error: --rsi-period, --streak-period and --rank-period must be >= 1")
+        return 1
+    if not 0 <= args.oversold < args.overbought <= 100:
+        print("Error: need 0 <= --oversold < --overbought <= 100")
+        return 1
+    df = _load_clean_ohlc(args, [args.close_col], args.rank_period + 2)
+    if df is None:
+        return 1
+
+    out = connors_rsi(
+        df, close_col=args.close_col, rsi_period=args.rsi_period,
+        streak_period=args.streak_period, rank_period=args.rank_period,
+    )
+    vals = out["crsi"].drop_nulls().to_list()
+
+    def zone(v: float) -> str:
+        return "overbought" if v >= args.overbought else "oversold" if v <= args.oversold else "neutral"
+
+    streak = out["crsi_streak"][-1]
+    result = {
+        "n_bars": df.height,
+        "crsi": vals[-1],
+        "zone": zone(vals[-1]),
+        "bars_in_zone": _streak(vals, zone),
+        "streak": streak,
+        "change": vals[-1] - vals[-2] if len(vals) > 1 else None,
+        "pct_overbought": sum(zone(v) == "overbought" for v in vals) / len(vals),
+        "pct_oversold": sum(zone(v) == "oversold" for v in vals) / len(vals),
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    run = f"{abs(streak)} {'up' if streak > 0 else 'down'} close{'s' * (abs(streak) > 1)}" if streak else "flat close"
+    print("\n=== Connors RSI ===\n")
+    print(f"Bars: {df.height}   RSI/Streak/Rank: {args.rsi_period}/{args.streak_period}/{args.rank_period}")
+    print(f"CRSI: {vals[-1]:.1f}   Zone: {result['zone'].upper()} ({result['bars_in_zone']} bars)   Streak: {run}")
+    print(f"Time overbought: {result['pct_overbought']:.0%}   oversold: {result['pct_oversold']:.0%}")
+    print()
+    return 0
+
+
 def cmd_stochrsi(args: argparse.Namespace) -> int:
     """Report Stochastic RSI %K/%D, its zone, and the latest K/D cross.
 
@@ -12649,6 +12720,7 @@ COMMANDS = {
         "elder": cmd_elder,
         "pivots": cmd_pivots,
         "sentdiv": cmd_sentdiv,
+        "crsi": cmd_crsi,
         "stochrsi": cmd_stochrsi,
         "trix": cmd_trix,
         "confluence": cmd_confluence,
