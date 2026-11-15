@@ -1375,6 +1375,55 @@ def elder_ray(
     )
 
 
+PIVOT_LEVELS = ("s3", "s2", "s1", "pivot", "r1", "r2", "r3")
+
+
+def pivot_points(
+    df: pl.DataFrame,
+    high_col: str = "high",
+    low_col: str = "low",
+    close_col: str = "close",
+    method: str = "classic",
+) -> pl.DataFrame:
+    """Floor pivot points for each bar, built from the *previous* bar (no look-ahead).
+
+    ``pivot = (H + L + C) / 3`` of the prior bar, range ``R = H - L``.
+
+    - classic: ``r1 = 2P - L``, ``s1 = 2P - H``, ``r2/s2 = P +/- R``,
+      ``r3 = H + 2(P - L)``, ``s3 = L - 2(H - P)``.
+    - fibonacci: ``r1/r2/r3 = P + 0.382R / 0.618R / 1.0R``, supports mirrored.
+
+    Args:
+        df: OHLC DataFrame (e.g. daily bars to get the next session's levels),
+            oldest first, no null/NaN prices.
+        high_col, low_col, close_col: Column names.
+        method: ``"classic"`` or ``"fibonacci"``.
+
+    Returns:
+        DataFrame with added ``s3, s2, s1, pivot, r1, r2, r3``; row 0 is null.
+
+    Example:
+        >>> df = pl.DataFrame({"high": [12.0, 0], "low": [9.0, 0], "close": [9.0, 0]})
+        >>> pivot_points(df).row(1, named=True)["pivot"], pivot_points(df)["r1"][1]
+        (10.0, 11.0)
+    """
+    if method not in ("classic", "fibonacci"):
+        raise ValueError(f"method must be 'classic' or 'fibonacci', got {method!r}")
+
+    h, lo, c = (pl.col(x).shift(1) for x in (high_col, low_col, close_col))
+    p = (h + lo + c) / 3
+    rng = h - lo
+    if method == "classic":
+        levels = {"s3": lo - 2 * (h - p), "s2": p - rng, "s1": 2 * p - h,
+                  "r1": 2 * p - lo, "r2": p + rng, "r3": h + 2 * (p - lo)}
+    else:
+        levels = {f"{side}{i}": p + sign * k * rng
+                  for i, k in enumerate((0.382, 0.618, 1.0), 1)
+                  for side, sign in (("r", 1), ("s", -1))}
+    levels["pivot"] = p
+    return df.with_columns([levels[k].cast(pl.Float64).alias(k) for k in PIVOT_LEVELS])
+
+
 def indicator_confluence(df: pl.DataFrame, chop_threshold: float = 61.8) -> dict:
     """Combine trend, momentum and money-flow indicators into one vote on the last bar.
 

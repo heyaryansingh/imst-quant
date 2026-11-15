@@ -2426,6 +2426,19 @@ Examples:
     elder_parser.add_argument("--period", type=int, default=13, help="EMA span (default: 13)")
     elder_parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
+    # --- pivots subcommand ---
+    pivots_parser = subparsers.add_parser(
+        "pivots",
+        help="Floor pivot points (classic/fibonacci) from the last bar: next-session levels, nearest support/resistance",
+    )
+    pivots_parser.add_argument("--data", required=True, help="Parquet file with high/low/close columns")
+    pivots_parser.add_argument("--high-col", default="high", help="High column (default: high)")
+    pivots_parser.add_argument("--low-col", default="low", help="Low column (default: low)")
+    pivots_parser.add_argument("--close-col", default="close", help="Close column (default: close)")
+    pivots_parser.add_argument("--method", choices=["classic", "fibonacci"], default="classic",
+                               help="Pivot formula (default: classic)")
+    pivots_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
     # --- confluence subcommand ---
     conf_parser = subparsers.add_parser(
         "confluence",
@@ -10698,6 +10711,76 @@ def cmd_elder(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pivots(args: argparse.Namespace) -> int:
+    """Report next-session pivot levels from the last bar and where the close sits among them.
+
+    Levels for the *next* bar come from the last completed bar. Position and
+    nearest support/resistance are measured from the last close.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    import polars as pl
+
+    from imst_quant.utils.technical_indicators import PIVOT_LEVELS, pivot_points
+
+    df = _load_clean_ohlc(args, [args.high_col, args.low_col, args.close_col], 1)
+    if df is None:
+        return 1
+    # Append a placeholder bar so the last real bar's levels land on it.
+    pad = pl.DataFrame({c: [None] for c in df.columns}, schema=df.schema)
+    row = pivot_points(
+        pl.concat([df, pad]), high_col=args.high_col, low_col=args.low_col,
+        close_col=args.close_col, method=args.method,
+    ).row(-1, named=True)
+    levels = {k: row[k] for k in PIVOT_LEVELS}
+    close = df[args.close_col][-1]
+    below = [(k, v) for k, v in levels.items() if v < close]
+    above = [(k, v) for k, v in levels.items() if v > close]
+    support = max(below, key=lambda kv: kv[1]) if below else None
+    resistance = min(above, key=lambda kv: kv[1]) if above else None
+    if support and resistance:
+        zone = f"between {support[0]} and {resistance[0]}"
+    elif support:
+        zone = f"above {support[0]}"
+    elif resistance:
+        zone = f"below {resistance[0]}"
+    else:
+        zone = "at pivot"  # zero-range bar: every level equals the close
+    result = {
+        "n_bars": df.height,
+        "method": args.method,
+        "close": close,
+        "levels": levels,
+        "zone": zone,
+        "bias": "bullish" if close > levels["pivot"] else "bearish" if close < levels["pivot"] else "neutral",
+        "support": support[0] if support else None,
+        "support_distance_pct": (support[1] - close) / close if support else None,
+        "resistance": resistance[0] if resistance else None,
+        "resistance_distance_pct": (resistance[1] - close) / close if resistance else None,
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    print(f"\n=== Pivot Points ({args.method}) ===\n")
+    for k in reversed(PIVOT_LEVELS):
+        print(f"  {k.upper():>5}: {levels[k]:.4f}")
+    print(f"\nClose: {close:.4f}   Zone: {zone}   Bias: {result['bias'].upper()}")
+    if support:
+        print(f"Nearest support:    {support[0].upper()} ({result['support_distance_pct']:+.2%})")
+    if resistance:
+        print(f"Nearest resistance: {resistance[0].upper()} ({result['resistance_distance_pct']:+.2%})")
+    print()
+    return 0
+
+
 def cmd_confluence(args: argparse.Namespace) -> int:
     """Report a chop-gated multi-indicator vote on the latest bar.
 
@@ -12278,6 +12361,7 @@ COMMANDS = {
         "chop": cmd_chop,
         "kama": cmd_kama,
         "elder": cmd_elder,
+        "pivots": cmd_pivots,
         "confluence": cmd_confluence,
 }
 
