@@ -2439,6 +2439,19 @@ Examples:
                                help="Pivot formula (default: classic)")
     pivots_parser.add_argument("--json", action="store_true", help="Output results as JSON")
 
+    # --- sentdiv subcommand ---
+    sentdiv_parser = subparsers.add_parser(
+        "sentdiv",
+        help="Sentiment vs price divergence: current state, streak, and forward returns after past divergences",
+    )
+    sentdiv_parser.add_argument("--data", required=True, help="Parquet file with sentiment and returns columns")
+    sentdiv_parser.add_argument("--sentiment-col", default="sentiment", help="Sentiment column (default: sentiment)")
+    sentdiv_parser.add_argument("--return-col", default="returns", help="Per-bar returns column (default: returns)")
+    sentdiv_parser.add_argument("--window", type=int, default=10, help="Trend window (default: 10)")
+    sentdiv_parser.add_argument("--horizon", type=int, default=5,
+                                help="Bars of forward return to score each divergence (default: 5)")
+    sentdiv_parser.add_argument("--json", action="store_true", help="Output results as JSON")
+
     # --- stochrsi subcommand ---
     srsi_parser = subparsers.add_parser(
         "stochrsi",
@@ -10826,6 +10839,105 @@ def _last_cross(gaps: list):
     return direction, len(gaps) - 1 - i, len(crosses)
 
 
+def cmd_sentdiv(args: argparse.Namespace) -> int:
+    """Report sentiment/price divergence now and how past divergences played out.
+
+    Each divergence *onset* (first bar of a run) is scored by the compounded
+    return over the next ``--horizon`` bars; a hit is a forward return with the
+    sign the divergence predicted (bullish = up). Onsets too close to the end to
+    have a full horizon are skipped.
+
+    Args:
+        args: Parsed command-line arguments.
+
+    Returns:
+        Exit code (0 on success, 1 on bad input).
+    """
+    import json as json_module
+
+    import numpy as np
+    import polars as pl
+
+    from imst_quant.utils.sentiment_signals import calculate_sentiment_divergence
+
+    if args.window < 1 or args.horizon < 1:
+        print("Error: --window and --horizon must be >= 1")
+        return 1
+    path = Path(args.data)
+    if not path.exists():
+        print(f"Error: Data file not found: {path}")
+        return 1
+    try:
+        df = pl.read_parquet(path)
+    except Exception as e:
+        print(f"Error reading data file: {e}")
+        return 1
+    cols = [args.sentiment_col, args.return_col]
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        print(f"Error: Missing columns {missing}. Available columns: {df.columns}")
+        return 1
+    df = df.select([pl.col(c).cast(pl.Float64, strict=False) for c in cols])
+    df = df.filter(pl.all_horizontal([pl.col(c).is_finite() for c in cols]))
+    if df.height < args.window + 2:
+        print(f"Error: need at least {args.window + 2} clean rows, got {df.height}")
+        return 1
+
+    out = calculate_sentiment_divergence(
+        df, sentiment_col=args.sentiment_col, price_returns_col=args.return_col, window=args.window,
+    )
+    sig = out["divergence_signal"].to_list()
+    rets = df[args.return_col].to_numpy()
+    growth = np.concatenate([[0.0], np.cumsum(np.log1p(np.clip(rets, -0.999999, None)))])
+
+    scored = {1: [], -1: []}
+    for i, v in enumerate(sig):
+        if v and (i == 0 or sig[i - 1] != v) and i + args.horizon < len(sig):
+            scored[v].append(float(np.expm1(growth[i + 1 + args.horizon] - growth[i + 1])))
+
+    def summary(fwd: list, sign: int) -> dict:
+        return {
+            "count": len(fwd),
+            "avg_forward_return": float(np.mean(fwd)) if fwd else None,
+            "hit_rate": sum(r * sign > 0 for r in fwd) / len(fwd) if fwd else None,
+        }
+
+    last = out.row(-1, named=True)
+    names = {1: "bullish", -1: "bearish", 0: "none"}
+    result = {
+        "n_bars": df.height,
+        "window": args.window,
+        "horizon": args.horizon,
+        "sentiment_direction": last["sentiment_direction"],
+        "price_direction": last["price_direction"],
+        "divergence_now": names[sig[-1]],
+        "bars_in_state": _streak(sig, lambda v: v),
+        "pct_divergent": sum(1 for v in sig if v) / len(sig),
+        "bullish": summary(scored[1], 1),
+        "bearish": summary(scored[-1], -1),
+    }
+
+    if args.json:
+        print(json_module.dumps(result, indent=2))
+        return 0
+
+    arrow = {1: "UP", -1: "DOWN", 0: "FLAT", None: "n/a"}
+    print("\n=== Sentiment / Price Divergence ===\n")
+    print(f"Bars: {df.height}   Window: {args.window}   Forward horizon: {args.horizon}")
+    print(f"Sentiment: {arrow[last['sentiment_direction']]}   Price: {arrow[last['price_direction']]}   "
+          f"Divergence: {result['divergence_now'].upper()} ({result['bars_in_state']} bars)")
+    print(f"Time divergent: {result['pct_divergent']:.0%}")
+    for side in ("bullish", "bearish"):
+        st = result[side]
+        if st["count"]:
+            print(f"  Past {side:<8} onsets: {st['count']:>3}   avg fwd {st['avg_forward_return']:+.2%}   "
+                  f"hit rate {st['hit_rate']:.0%}")
+        else:
+            print(f"  Past {side:<8} onsets:   0")
+    print()
+    return 0
+
+
 def cmd_stochrsi(args: argparse.Namespace) -> int:
     """Report Stochastic RSI %K/%D, its zone, and the latest K/D cross.
 
@@ -12536,6 +12648,7 @@ COMMANDS = {
         "kama": cmd_kama,
         "elder": cmd_elder,
         "pivots": cmd_pivots,
+        "sentdiv": cmd_sentdiv,
         "stochrsi": cmd_stochrsi,
         "trix": cmd_trix,
         "confluence": cmd_confluence,
